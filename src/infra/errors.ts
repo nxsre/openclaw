@@ -155,6 +155,7 @@ export function formatUncaughtError(err: unknown): string {
   return formatErrorMessage(err);
 }
 
+/** Coarse error families used by retry/reporting code without exposing provider-specific text. */
 export type ErrorKind = "refusal" | "timeout" | "rate_limit" | "context_length" | "unknown";
 
 /** Classifies broad provider/runtime error families from redacted message text and codes. */
