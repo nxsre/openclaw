@@ -29,12 +29,21 @@ type ApprovalResolved = ExecApprovalResolved | PluginApprovalResolved;
 export type { PreparedChannelNativeApprovalTarget } from "./approval-native-runtime-types.js";
 
 type ChannelNativeApprovalPlanDeliveryResult<TPendingEntry> = {
+  /** Pending entries returned by successful channel deliveries. */
   entries: TPendingEntry[];
+  /** Resolved plan used for this request, including origin notice metadata. */
   deliveryPlan: ChannelApprovalNativeDeliveryPlan;
+  /** Planned targets that actually produced pending entries after dedupe and errors. */
   deliveredTargets: ChannelApprovalNativePlannedTarget[];
 };
 
-/** Deliver one approval request through a resolved native plan and collect pending entries. */
+/**
+ * Deliver one approval request through a resolved native plan and collect pending entries.
+ *
+ * Target preparation may collapse multiple planned targets onto one dedupe key; only the first
+ * successful delivery for a key is retained, and per-target failures are reported without stopping
+ * delivery to other targets.
+ */
 export async function deliverApprovalRequestViaChannelNativePlan<
   TPreparedTarget,
   TPendingEntry,
@@ -174,7 +183,13 @@ type ChannelNativeApprovalRuntimeAdapter<
     onStopped?: () => Promise<void> | void;
   };
 
-/** Create a channel-native approval runtime with route reporting and shared gateway handling. */
+/**
+ * Create a channel-native approval runtime with route reporting and shared gateway handling.
+ *
+ * The returned runtime uses the shared exec/plugin gateway lifecycle while this wrapper resolves
+ * native delivery plans, passes pending content through channel hooks, and reports delivery results
+ * so origin-chat fallback notices can be finalized.
+ */
 export function createChannelNativeApprovalRuntime<
   TPendingEntry,
   TPreparedTarget,
