@@ -1,5 +1,6 @@
 import type { ChannelId } from "../channels/plugins/channel-id.types.js";
 
+/** Direction of channel traffic recorded for activity freshness checks. */
 export type ChannelDirection = "inbound" | "outbound";
 
 /** Last observed activity timestamps for one channel/account route. */
@@ -26,6 +27,7 @@ function ensureEntry(channel: ChannelId, accountId: string): ActivityEntry {
   return created;
 }
 
+/** Records the latest inbound or outbound activity timestamp for a channel account. */
 export function recordChannelActivity(params: {
   channel: ChannelId;
   accountId?: string | null;
@@ -57,6 +59,7 @@ export function getChannelActivity(params: {
   );
 }
 
+/** Clears all recorded channel activity for tests. */
 export function resetChannelActivityForTest() {
   activity.clear();
 }
