@@ -1,8 +1,3 @@
-/**
- * Shared inbound reply dispatch helpers for channel message adapters and
- * deprecated SDK compatibility facades.
- */
-
 import { withReplyDispatcher } from "../../auto-reply/dispatch.js";
 import type { GetReplyOptions } from "../../auto-reply/get-reply-options.types.js";
 import {
@@ -57,12 +52,16 @@ type ReplyOptionsWithoutModelSelected = Omit<
 type RecordInboundSessionFn = typeof import("../session.js").recordInboundSession;
 
 type ReplyDispatchFromConfigOptions = Omit<GetReplyOptions, "onBlockReply">;
+/** Parameters for running a raw inbound channel event through the shared turn pipeline. */
 export type ChannelInboundEventRunnerParams<
   TRaw,
   TDispatchResult = DispatchFromConfigResult,
 > = RunChannelTurnParams<TRaw, TDispatchResult>;
+/** Prepared turn shape kept for legacy inbound-reply naming. */
 export type PreparedInboundReply<TDispatchResult> = PreparedChannelTurn<TDispatchResult>;
+/** Assembled dispatch context kept for legacy inbound-reply naming. */
 export type AssembledInboundReply = AssembledChannelTurn;
+/** Turn result shape kept for legacy inbound-reply naming. */
 export type InboundReplyDispatchResult<TDispatchResult> = ChannelTurnResult<TDispatchResult>;
 
 /** Run an already prepared inbound reply through shared session-record + dispatch ordering. */
@@ -197,19 +196,33 @@ export function buildInboundReplyDispatchBase(params: {
 
 type BuildInboundReplyDispatchBaseParams = Parameters<typeof buildInboundReplyDispatchBase>[0];
 type RecordChannelMessageReplyDispatchParams = {
+  /** Config used to resolve agent/session/reply settings for the inbound turn. */
   cfg: OpenClawConfig;
+  /** Channel id that owns the inbound reply turn. */
   channel: string;
+  /** Optional account scope for multi-account channel adapters. */
   accountId?: string;
+  /** Agent selected by route resolution before dispatch starts. */
   agentId: string;
+  /** Stable session key used for inbound session history. */
   routeSessionKey: string;
+  /** Store path used by the reply dispatcher for session state. */
   storePath: string;
+  /** Finalized inbound message context passed to prompt templating. */
   ctxPayload: FinalizedMsgContext;
+  /** Session recorder that must run before reply dispatch. */
   recordInboundSession: RecordInboundSessionFn;
+  /** Buffered reply dispatcher used to produce tool/block/final reply deliveries. */
   dispatchReplyWithBufferedBlockDispatcher: DispatchReplyWithBufferedBlockDispatcher;
+  /** Legacy outbound delivery callback used when durable message delivery is unavailable. */
   deliver: (payload: OutboundReplyPayload) => Promise<void>;
+  /** Durable delivery options, or false to force the legacy deliver callback. */
   durable?: false | DurableInboundReplyDeliveryOptions;
+  /** Error sink for session-record failures that should not skip dispatch. */
   onRecordError: (err: unknown) => void;
+  /** Error sink for reply delivery failures, tagged by reply kind. */
   onDispatchError: (err: unknown, info: { kind: string }) => void;
+  /** Reply options forwarded without block-dispatcher/model-selection overrides. */
   replyOptions?: ReplyOptionsWithoutModelSelected;
 };
 
@@ -276,11 +289,11 @@ export async function recordChannelMessageReplyDispatch(
     dispatchReplyWithBufferedBlockDispatcher: params.dispatchReplyWithBufferedBlockDispatcher,
     delivery: {
       preparePayload: (payload) =>
-        payload && typeof payload === "object"
-          ? normalizeOutboundReplyPayload(payload)
-          : {},
+        payload && typeof payload === "object" ? normalizeOutboundReplyPayload(payload) : {},
       deliver: async (payload, info) => {
         if (params.durable) {
+          // Durable delivery owns normalized message lifecycle results; fall back only when the
+          // adapter reports that this payload was not handled by the durable path.
           const durable = await deliverInboundReplyWithMessageSendContext({
             cfg: params.cfg,
             channel: params.channel,
