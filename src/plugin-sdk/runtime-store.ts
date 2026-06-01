@@ -4,11 +4,15 @@ const pluginRuntimeStoreRegistryKey = Symbol.for("openclaw.plugin-sdk.runtime-st
 
 type PluginRuntimeStoreRegistry = Map<string, { runtime: unknown }>;
 type PluginRuntimeStoreKeyOptions = {
+  /** Explicit shared slot key for advanced runtimes that are not keyed by plugin id. */
   key: string;
+  /** Error thrown by `getRuntime` before the host binds the runtime. */
   errorMessage: string;
 };
 type PluginRuntimeStorePluginOptions = {
+  /** Plugin id used to share the runtime slot across duplicate module instances. */
   pluginId: string;
+  /** Error thrown by `getRuntime` before the host binds the runtime. */
   errorMessage: string;
 };
 type PluginRuntimeStoreOptions = PluginRuntimeStoreKeyOptions | PluginRuntimeStorePluginOptions;
@@ -17,6 +21,8 @@ function getPluginRuntimeStoreRegistry(): PluginRuntimeStoreRegistry {
   const globalRecord = globalThis as typeof globalThis & {
     [pluginRuntimeStoreRegistryKey]?: PluginRuntimeStoreRegistry;
   };
+  // Runtime modules can be imported through both source and generated facade paths; Symbol.for
+  // keeps plugin-id stores shared across those duplicate module instances in one process.
   globalRecord[pluginRuntimeStoreRegistryKey] ??= new Map();
   return globalRecord[pluginRuntimeStoreRegistryKey];
 }
@@ -46,15 +52,23 @@ function resolvePluginRuntimeStoreOptions(
 
 /** Create a tiny mutable runtime slot with strict access when the runtime has not been initialized. */
 export function createPluginRuntimeStore<T>(errorMessage: string): {
+  /** Bind or replace the current runtime instance. */
   setRuntime: (next: T) => void;
+  /** Clear the runtime slot during tests or plugin teardown. */
   clearRuntime: () => void;
+  /** Return null when no runtime is bound instead of throwing. */
   tryGetRuntime: () => T | null;
+  /** Return the bound runtime or throw the configured initialization error. */
   getRuntime: () => T;
 };
 export function createPluginRuntimeStore<T>(options: PluginRuntimeStoreOptions): {
+  /** Bind or replace the current runtime instance. */
   setRuntime: (next: T) => void;
+  /** Clear the runtime slot during tests or plugin teardown. */
   clearRuntime: () => void;
+  /** Return null when no runtime is bound instead of throwing. */
   tryGetRuntime: () => T | null;
+  /** Return the bound runtime or throw the configured initialization error. */
   getRuntime: () => T;
 };
 export function createPluginRuntimeStore<T>(options: string | PluginRuntimeStoreOptions): {
