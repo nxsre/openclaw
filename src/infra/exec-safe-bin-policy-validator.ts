@@ -57,6 +57,8 @@ function resolveCanonicalLongFlag(params: {
   if (params.knownLongFlagsSet.has(params.flag)) {
     return params.flag;
   }
+  // GNU tools accept unambiguous long-option prefixes; ambiguous prefixes are
+  // stored as null so validation fails closed instead of guessing a flag.
   return params.longFlagPrefixMap.get(params.flag) ?? null;
 }
 
@@ -213,6 +215,7 @@ function collectPositionalTokens(args: string[], profile: SafeBinProfile): strin
   return positional;
 }
 
+/** Validates argv tokens against a safe-bin profile without trusting shell expansion. */
 export function validateSafeBinArgv(
   args: string[],
   profile: SafeBinProfile,
