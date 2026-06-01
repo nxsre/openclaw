@@ -109,6 +109,7 @@ function buildApprovalCommandFence(
   return buildFence(descriptors.map((descriptor) => descriptor.command).join("\n"), "txt");
 }
 
+/** Builds the slash-command form that text-only clients can send back as an approval action. */
 export function buildExecApprovalCommandText(params: {
   approvalCommandId: string;
   decision: ExecApprovalReplyDecision;
@@ -223,6 +224,8 @@ export function buildExecApprovalPresentation(params: {
 }
 
 /**
+ * Build legacy interactive-reply buttons from already-resolved approval actions.
+ *
  * @deprecated Use buildApprovalPresentationFromActionDescriptors.
  */
 export function buildApprovalInteractiveReplyFromActionDescriptors(
@@ -233,6 +236,8 @@ export function buildApprovalInteractiveReplyFromActionDescriptors(
 }
 
 /**
+ * Build legacy interactive-reply buttons for an approval id and decision allowlist.
+ *
  * @deprecated Use buildApprovalPresentation.
  */
 export function buildApprovalInteractiveReply(params: {
@@ -250,6 +255,8 @@ export function buildApprovalInteractiveReply(params: {
 }
 
 /**
+ * Build legacy exec-approval interactive-reply buttons for command callbacks.
+ *
  * @deprecated Use buildExecApprovalPresentation.
  */
 export function buildExecApprovalInteractiveReply(params: {
@@ -264,6 +271,7 @@ export function buildExecApprovalInteractiveReply(params: {
   });
 }
 
+/** Returns the stable notice used when approval has moved to approver DMs. */
 export function getExecApprovalApproverDmNoticeText(): string {
   return "Approval required. I sent approval DMs to the approvers for this account.";
 }
