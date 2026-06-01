@@ -10,9 +10,9 @@ import type {
   ProviderToolSchemaDiagnostic,
 } from "./plugin-entry.js";
 
-// Shared provider-tool helpers for plugin-owned schema compatibility rewrites.
 export { cleanSchemaForGemini, GEMINI_UNSUPPORTED_SCHEMA_KEYWORDS, stripUnsupportedSchemaKeywords };
 
+/** Find unsupported schema keyword paths while preserving property names in diagnostic paths. */
 export function findUnsupportedSchemaKeywords(
   schema: unknown,
   path: string,
@@ -55,6 +55,7 @@ export function findUnsupportedSchemaKeywords(
   return violations;
 }
 
+/** Rewrite Gemini tool parameters by removing schema keywords rejected by Gemini transports. */
 export function normalizeGeminiToolSchemas(
   ctx: ProviderNormalizeToolSchemasContext,
 ): AnyAgentTool[] {
@@ -69,6 +70,7 @@ export function normalizeGeminiToolSchemas(
   });
 }
 
+/** Report Gemini-incompatible schema keyword paths without mutating the incoming tools. */
 export function inspectGeminiToolSchemas(
   ctx: ProviderNormalizeToolSchemasContext,
 ): ProviderToolSchemaDiagnostic[] {
@@ -85,6 +87,12 @@ export function inspectGeminiToolSchemas(
   });
 }
 
+/**
+ * Normalize native OpenAI Responses tool schemas to the stricter object shape expected by strict mode.
+ *
+ * Non-native OpenAI-compatible routes are left untouched because many proxy providers accept wider
+ * JSON Schema shapes and should not inherit OpenAI-specific constraints.
+ */
 export function normalizeOpenAIToolSchemas(
   ctx: ProviderNormalizeToolSchemasContext,
 ): AnyAgentTool[] {
@@ -275,6 +283,7 @@ function normalizeOpenAIStrictCompatSchemaRecursive(
   return changed ? normalized : schema;
 }
 
+/** Return paths that would force native OpenAI tool handling out of strict-schema mode. */
 export function findOpenAIStrictSchemaViolations(
   schema: unknown,
   path: string,
@@ -348,6 +357,7 @@ export function findOpenAIStrictSchemaViolations(
   return violations;
 }
 
+/** Inspect OpenAI tools after route gating; native transports downgrade strict mode elsewhere. */
 export function inspectOpenAIToolSchemas(
   ctx: ProviderNormalizeToolSchemasContext,
 ): ProviderToolSchemaDiagnostic[] {
@@ -462,6 +472,7 @@ function isStringConstVariant(entry: unknown): entry is { const: string } {
   return typeof record.const === "string";
 }
 
+/** Collapse DeepSeek-rejected union keywords into the closest supported single-schema shape. */
 export function normalizeDeepSeekToolSchemas(
   ctx: ProviderNormalizeToolSchemasContext,
 ): AnyAgentTool[] {
@@ -479,6 +490,7 @@ export function normalizeDeepSeekToolSchemas(
   });
 }
 
+/** Report DeepSeek-incompatible union keyword paths before normalization. */
 export function inspectDeepSeekToolSchemas(
   ctx: ProviderNormalizeToolSchemasContext,
 ): ProviderToolSchemaDiagnostic[] {
@@ -497,6 +509,7 @@ export function inspectDeepSeekToolSchemas(
 
 export type ProviderToolCompatFamily = "deepseek" | "gemini" | "openai";
 
+/** Build provider-entry hooks for one known tool-schema compatibility family. */
 export function buildProviderToolCompatFamilyHooks(family: ProviderToolCompatFamily): {
   normalizeToolSchemas: (ctx: ProviderNormalizeToolSchemasContext) => AnyAgentTool[];
   inspectToolSchemas: (ctx: ProviderNormalizeToolSchemasContext) => ProviderToolSchemaDiagnostic[];
