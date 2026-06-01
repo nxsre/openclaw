@@ -101,7 +101,12 @@ function buildPluginViewBase<TPhase extends ApprovalPhase>(
   };
 }
 
-/** Build a pending approval view for channel-native renderers. */
+/**
+ * Builds a pending approval view for channel-native renderers.
+ *
+ * Plugin approvals are identified by the stored `plugin:` id prefix; all other requests render as
+ * exec approvals so legacy exec ids keep their existing command-focused view.
+ */
 export function buildPendingApprovalView(request: ApprovalRequest): PendingApprovalView {
   if (request.id.startsWith("plugin:")) {
     // Approval stores encode plugin approvals with a plugin: id prefix; preserve that split so
@@ -128,7 +133,12 @@ export function buildPendingApprovalView(request: ApprovalRequest): PendingAppro
   };
 }
 
-/** Build a resolved approval view with the original request context plus final decision. */
+/**
+ * Builds a resolved approval view with the original request context plus final decision.
+ *
+ * The same id-prefix split is used as pending views so channels can update an existing message with
+ * a matching view shape after resolution.
+ */
 export function buildResolvedApprovalView(
   request: ApprovalRequest,
   resolved: ApprovalResolved,
@@ -149,7 +159,12 @@ export function buildResolvedApprovalView(
   };
 }
 
-/** Build an expired approval view while preserving the original approval metadata. */
+/**
+ * Builds an expired approval view while preserving the original approval metadata.
+ *
+ * Expired views intentionally omit actions and decisions; they retain enough request context for
+ * channels to explain what timed out.
+ */
 export function buildExpiredApprovalView(request: ApprovalRequest): ExpiredApprovalView {
   if (request.id.startsWith("plugin:")) {
     return buildPluginViewBase(request as PluginApprovalRequest, "expired");
