@@ -66,6 +66,7 @@ const INTERPRETER_LIKE_PATTERNS = [
   /^node\d+(?:\.\d+)?$/,
 ];
 
+/** Returns true for safe-bin names that can execute scripts or arbitrary code. */
 export function isInterpreterLikeSafeBin(raw: string): boolean {
   const normalized = normalizeSafeBinName(raw);
   if (!normalized) {
@@ -77,6 +78,7 @@ export function isInterpreterLikeSafeBin(raw: string): boolean {
   return INTERPRETER_LIKE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
+/** Lists normalized interpreter-like safe bins that still lack explicit profiles. */
 export function listInterpreterLikeSafeBins(entries: Iterable<string>): string[] {
   return Array.from(entries)
     .map((entry) => normalizeSafeBinName(entry))
@@ -84,6 +86,7 @@ export function listInterpreterLikeSafeBins(entries: Iterable<string>): string[]
     .toSorted();
 }
 
+/** Merges global and local safe-bin profile fixtures with local config winning. */
 export function resolveMergedSafeBinProfileFixtures(params: {
   global?: ExecSafeBinConfigScope | null;
   local?: ExecSafeBinConfigScope | null;
@@ -99,6 +102,7 @@ export function resolveMergedSafeBinProfileFixtures(params: {
   };
 }
 
+/** Resolves the runtime safe-bin policy from global/local config and trust checks. */
 export function resolveExecSafeBinRuntimePolicy(params: {
   global?: ExecSafeBinConfigScope | null;
   local?: ExecSafeBinConfigScope | null;
@@ -134,6 +138,8 @@ export function resolveExecSafeBinRuntimePolicy(params: {
   );
   if (params.onWarning) {
     for (const hit of writableTrustedSafeBinDirs) {
+      // Explicit trust in writable directories lets another process swap the
+      // executable after policy resolution, so surface it as an operator warning.
       const scope =
         hit.worldWritable || hit.groupWritable
           ? hit.worldWritable
