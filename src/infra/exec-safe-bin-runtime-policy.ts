@@ -20,6 +20,21 @@ type ExecSafeBinConfigScope = {
   safeBinTrustedDirs?: string[] | null;
 };
 
+type ExecSafeBinRuntimePolicy = {
+  /** Normalized safe-bin names selected by config, falling back to defaults when unset. */
+  safeBins: Set<string>;
+  /** Compiled argv-validation profiles after built-ins and config overlays are resolved. */
+  safeBinProfiles: Readonly<Record<string, SafeBinProfile>>;
+  /** Resolved directories whose executables may satisfy safe-bin checks. */
+  trustedSafeBinDirs: ReadonlySet<string>;
+  /** Configured safe bins without an argv-validation profile. */
+  unprofiledSafeBins: string[];
+  /** Unprofiled safe bins that look capable of script or arbitrary code execution. */
+  unprofiledInterpreterSafeBins: string[];
+  /** Explicit trusted directories that are group/world writable. */
+  writableTrustedSafeBinDirs: ReadonlyArray<WritableTrustedSafeBinDir>;
+};
+
 const INTERPRETER_LIKE_SAFE_BINS = new Set([
   "ash",
   "awk",
@@ -66,7 +81,12 @@ const INTERPRETER_LIKE_PATTERNS = [
   /^node\d+(?:\.\d+)?$/,
 ];
 
-/** Returns true for safe-bin names that can execute scripts or arbitrary code. */
+/**
+ * Returns true for safe-bin names that can execute scripts or arbitrary code.
+ *
+ * Names are normalized through the same executable-family rules used by semantic validation, so
+ * path-like and version-suffixed entries classify consistently.
+ */
 export function isInterpreterLikeSafeBin(raw: string): boolean {
   const normalized = normalizeSafeBinName(raw);
   if (!normalized) {
@@ -78,7 +98,7 @@ export function isInterpreterLikeSafeBin(raw: string): boolean {
   return INTERPRETER_LIKE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
-/** Lists normalized interpreter-like safe bins that still lack explicit profiles. */
+/** Lists normalized interpreter-like safe bins so missing profiles can be warned about separately. */
 export function listInterpreterLikeSafeBins(entries: Iterable<string>): string[] {
   return Array.from(entries)
     .map((entry) => normalizeSafeBinName(entry))
@@ -86,7 +106,12 @@ export function listInterpreterLikeSafeBins(entries: Iterable<string>): string[]
     .toSorted();
 }
 
-/** Merges global and local safe-bin profile fixtures with local config winning. */
+/**
+ * Merges global and local safe-bin profile fixtures with local config winning.
+ *
+ * Both scopes are normalized first, which keeps override matching case-insensitive and removes
+ * invalid fixture entries before compilation.
+ */
 export function resolveMergedSafeBinProfileFixtures(params: {
   global?: ExecSafeBinConfigScope | null;
   local?: ExecSafeBinConfigScope | null;
@@ -102,19 +127,17 @@ export function resolveMergedSafeBinProfileFixtures(params: {
   };
 }
 
-/** Resolves the runtime safe-bin policy from global/local config and trust checks. */
+/**
+ * Resolves the runtime safe-bin policy from global/local config and trust checks.
+ *
+ * Local safeBins replace global safeBins, while profile fixtures and trusted dirs merge. The result
+ * is the precomputed approval-time snapshot used by exec allowlist evaluation.
+ */
 export function resolveExecSafeBinRuntimePolicy(params: {
   global?: ExecSafeBinConfigScope | null;
   local?: ExecSafeBinConfigScope | null;
   onWarning?: (message: string) => void;
-}): {
-  safeBins: Set<string>;
-  safeBinProfiles: Readonly<Record<string, SafeBinProfile>>;
-  trustedSafeBinDirs: ReadonlySet<string>;
-  unprofiledSafeBins: string[];
-  unprofiledInterpreterSafeBins: string[];
-  writableTrustedSafeBinDirs: ReadonlyArray<WritableTrustedSafeBinDir>;
-} {
+}): ExecSafeBinRuntimePolicy {
   const safeBins = resolveSafeBins(params.local?.safeBins ?? params.global?.safeBins);
   const safeBinProfiles = resolveSafeBinProfiles(
     resolveMergedSafeBinProfileFixtures({
