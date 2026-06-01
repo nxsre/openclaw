@@ -6,10 +6,6 @@ import { isRecord } from "../utils.js";
 import { asBoolean } from "../utils/boolean.js";
 import type { ChannelAccountSnapshot } from "./plugins/types.core.js";
 
-// Read-only status commands project a safe subset of account fields into snapshots
-// so renderers can preserve "configured but unavailable" state without touching
-// strict runtime-only credential helpers.
-
 const CREDENTIAL_STATUS_KEYS = [
   "tokenStatus",
   "botTokenStatus",
@@ -57,6 +53,7 @@ function readCredentialStatus(record: Record<string, unknown>, key: CredentialSt
     : undefined;
 }
 
+/** Infers configured state from any credential status field on an account snapshot-like object. */
 export function resolveConfiguredFromCredentialStatuses(account: unknown): boolean | undefined {
   const record = isRecord(account) ? account : null;
   if (!record) {
@@ -98,6 +95,7 @@ export function resolveConfiguredFromRequiredCredentialStatuses(
   return sawCredentialStatus ? true : undefined;
 }
 
+/** Returns true when a credential exists but is unavailable to the current process. */
 export function hasConfiguredUnavailableCredentialStatus(account: unknown): boolean {
   const record = isRecord(account) ? account : null;
   if (!record) {
@@ -108,6 +106,7 @@ export function hasConfiguredUnavailableCredentialStatus(account: unknown): bool
   );
 }
 
+/** Returns true when an account snapshot exposes an actual credential or available status. */
 export function hasResolvedCredentialValue(account: unknown): boolean {
   const record = isRecord(account) ? account : null;
   if (!record) {
@@ -120,6 +119,7 @@ export function hasResolvedCredentialValue(account: unknown): boolean {
   );
 }
 
+/** Projects non-secret credential source/status fields into a channel account snapshot. */
 export function projectCredentialSnapshotFields(
   account: unknown,
 ): Pick<
@@ -166,6 +166,7 @@ export function projectCredentialSnapshotFields(
   };
 }
 
+/** Projects a safe read-only account snapshot, redacting URL credentials and raw secrets. */
 export function projectSafeChannelAccountSnapshotFields(
   account: unknown,
 ): Partial<ChannelAccountSnapshot> {
@@ -232,6 +233,7 @@ export function projectSafeChannelAccountSnapshotFields(
       ? { allowFrom: readStringArray(record, "allowFrom") }
       : {}),
     ...projectCredentialSnapshotFields(account),
+    // Status output may display base URLs, but embedded credentials must never leak.
     ...(baseUrl ? { baseUrl: stripUrlUserInfo(baseUrl) } : {}),
     ...(readBoolean(record, "allowUnmentionedGroups") !== undefined
       ? { allowUnmentionedGroups: readBoolean(record, "allowUnmentionedGroups") }
