@@ -19,14 +19,20 @@ export * from "./exec-approvals-analysis.js";
 export * from "./exec-approvals-allowlist.js";
 export type { ExecAllowlistEntry } from "./exec-approvals.types.js";
 
+/** Concrete runtime that can execute a command. */
 export type ExecHost = "sandbox" | "gateway" | "node";
+/** User-facing execution target, including automatic host selection. */
 export type ExecTarget = "auto" | ExecHost;
+/** Security boundary applied before command execution. */
 export type ExecSecurity = "deny" | "allowlist" | "full";
+/** Approval prompt policy layered on top of the security boundary. */
 export type ExecAsk = "off" | "on-miss" | "always";
+/** Compact preset combining exec security and approval behavior. */
 export type ExecMode = "deny" | "allowlist" | "ask" | "auto" | "full";
 
 export const EXEC_TARGET_VALUES: readonly ExecTarget[] = ["auto", "sandbox", "gateway", "node"];
 
+/** Normalizes a concrete exec host value. */
 export function normalizeExecHost(value?: string | null): ExecHost | null {
   const normalized = normalizeOptionalLowercaseString(value);
   if (normalized === "sandbox" || normalized === "gateway" || normalized === "node") {
@@ -35,6 +41,7 @@ export function normalizeExecHost(value?: string | null): ExecHost | null {
   return null;
 }
 
+/** Normalizes an exec target, preserving the `auto` target when present. */
 export function normalizeExecTarget(value?: string | null): ExecTarget | null {
   const normalized = normalizeOptionalLowercaseString(value);
   if (normalized === "auto") {
@@ -43,6 +50,7 @@ export function normalizeExecTarget(value?: string | null): ExecTarget | null {
   return normalizeExecHost(normalized);
 }
 
+/** Validates config/input exec target values and throws with allowed values on invalid input. */
 export function requireValidExecTarget(value?: unknown): ExecTarget | null {
   if (value == null) {
     return null;
@@ -70,6 +78,7 @@ export function requireValidExecTarget(value?: unknown): ExecTarget | null {
 /** Coerce a raw JSON field to string, returning undefined for non-string types. */
 const toStringOrUndefined = readStringValue;
 
+/** Normalizes an exec security boundary value. */
 export function normalizeExecSecurity(value?: string | null): ExecSecurity | null {
   const normalized = normalizeOptionalLowercaseString(value);
   if (normalized === "deny" || normalized === "allowlist" || normalized === "full") {
@@ -78,6 +87,7 @@ export function normalizeExecSecurity(value?: string | null): ExecSecurity | nul
   return null;
 }
 
+/** Normalizes an exec approval prompt policy value. */
 export function normalizeExecAsk(value?: string | null): ExecAsk | null {
   const normalized = normalizeOptionalLowercaseString(value);
   if (normalized === "off" || normalized === "on-miss" || normalized === "always") {
@@ -86,6 +96,7 @@ export function normalizeExecAsk(value?: string | null): ExecAsk | null {
   return null;
 }
 
+/** Normalizes a compact exec mode preset. */
 export function normalizeExecMode(value?: string | null): ExecMode | null {
   const normalized = normalizeOptionalLowercaseString(value);
   if (
@@ -100,6 +111,7 @@ export function normalizeExecMode(value?: string | null): ExecMode | null {
   return null;
 }
 
+/** Collapses explicit security/ask policy fields into the equivalent compact exec mode. */
 export function resolveExecModeFromPolicy(params: {
   security: ExecSecurity;
   ask: ExecAsk;
@@ -116,6 +128,7 @@ export function resolveExecModeFromPolicy(params: {
   return "ask";
 }
 
+/** Expands a compact exec mode into security, ask, and autoreview policy fields. */
 export function resolveExecPolicyForMode(mode: ExecMode): {
   security: ExecSecurity;
   ask: ExecAsk;
