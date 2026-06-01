@@ -32,16 +32,23 @@ type ChannelThreadBindingsContainerShape = {
   accounts?: Record<string, { threadBindings?: SessionThreadBindingsConfigShape } | undefined>;
 };
 
+/** Session family that can request automatic thread binding on spawn. */
 export type ThreadBindingSpawnKind = "subagent" | "acp";
 
 export type ThreadBindingSpawnPolicy = {
+  /** Normalized channel id whose config supplied the policy. */
   channel: string;
+  /** Normalized account id whose config supplied the policy. */
   accountId: string;
+  /** True when thread bindings are enabled for the channel/account/session. */
   enabled: boolean;
+  /** True when this spawn kind may create thread-bound sessions. */
   spawnEnabled: boolean;
+  /** Default session relationship for spawned thread-bound sessions. */
   defaultSpawnContext: ThreadBindingSpawnContext;
 };
 
+/** Spawn relationship used when a channel opens a new bound thread. */
 export type ThreadBindingSpawnContext = "isolated" | "fork";
 
 function normalizeChannelId(value: string | undefined | null): string {
