@@ -101,8 +101,11 @@ function buildPluginViewBase<TPhase extends ApprovalPhase>(
   };
 }
 
+/** Build a pending approval view for channel-native renderers. */
 export function buildPendingApprovalView(request: ApprovalRequest): PendingApprovalView {
   if (request.id.startsWith("plugin:")) {
+    // Approval stores encode plugin approvals with a plugin: id prefix; preserve that split so
+    // plugin requests use plugin severity/title metadata instead of exec command metadata.
     const pluginRequest = request as PluginApprovalRequest;
     return {
       ...buildPluginViewBase(pluginRequest, "pending"),
@@ -125,6 +128,7 @@ export function buildPendingApprovalView(request: ApprovalRequest): PendingAppro
   };
 }
 
+/** Build a resolved approval view with the original request context plus final decision. */
 export function buildResolvedApprovalView(
   request: ApprovalRequest,
   resolved: ApprovalResolved,
@@ -145,6 +149,7 @@ export function buildResolvedApprovalView(
   };
 }
 
+/** Build an expired approval view while preserving the original approval metadata. */
 export function buildExpiredApprovalView(request: ApprovalRequest): ExpiredApprovalView {
   if (request.id.startsWith("plugin:")) {
     return buildPluginViewBase(request as PluginApprovalRequest, "expired");
