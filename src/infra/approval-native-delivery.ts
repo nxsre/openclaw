@@ -11,12 +11,14 @@ import type { PluginApprovalRequest } from "./plugin-approvals.js";
 
 type ApprovalRequest = ExecApprovalRequest | PluginApprovalRequest;
 
+/** One planned native approval destination with why it was selected. */
 export type ChannelApprovalNativePlannedTarget = {
   surface: ChannelApprovalNativeSurface;
   target: ChannelApprovalNativeTarget;
   reason: "preferred" | "fallback";
 };
 
+/** Complete native delivery plan plus origin metadata used for route notices. */
 export type ChannelApprovalNativeDeliveryPlan = {
   targets: ChannelApprovalNativePlannedTarget[];
   originTarget: ChannelApprovalNativeTarget | null;
@@ -31,6 +33,7 @@ function dedupeTargets(
   for (const target of targets) {
     const key = buildChannelApprovalNativeTargetKey(target.target);
     if (seen.has(key)) {
+      // Keep the first surface/reason for a route; preferred origin should win over duplicate DM.
       continue;
     }
     seen.add(key);
@@ -39,6 +42,7 @@ function dedupeTargets(
   return deduped;
 }
 
+/** Resolve where a channel should deliver one native approval request. */
 export async function resolveChannelNativeApprovalDeliveryPlan(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
@@ -111,6 +115,8 @@ export async function resolveChannelNativeApprovalDeliveryPlan(params: {
       });
     }
   } else if (!originTarget) {
+    // Origin-preferred channels still need an actionable path when the origin chat cannot be
+    // resolved; approver DMs become fallback targets instead of dropping the approval.
     for (const target of approverDmTargets) {
       plannedTargets.push({
         surface: "approver-dm",
