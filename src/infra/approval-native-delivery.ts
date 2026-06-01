@@ -11,14 +11,24 @@ import type { PluginApprovalRequest } from "./plugin-approvals.js";
 
 type ApprovalRequest = ExecApprovalRequest | PluginApprovalRequest;
 
-/** One planned native approval destination with why it was selected. */
+/**
+ * One planned native approval destination with why it was selected.
+ *
+ * `preferred` targets come from the channel's declared delivery surface; `fallback` targets are
+ * used only when origin-preferred delivery cannot resolve an origin chat.
+ */
 export type ChannelApprovalNativePlannedTarget = {
   surface: ChannelApprovalNativeSurface;
   target: ChannelApprovalNativeTarget;
   reason: "preferred" | "fallback";
 };
 
-/** Complete native delivery plan plus origin metadata used for route notices. */
+/**
+ * Complete native delivery plan plus origin metadata used for route notices.
+ *
+ * `originTarget` may be present even when the approval is delivered only to approver DMs so the
+ * runtime can post a routed-elsewhere notice back to the originating chat.
+ */
 export type ChannelApprovalNativeDeliveryPlan = {
   targets: ChannelApprovalNativePlannedTarget[];
   originTarget: ChannelApprovalNativeTarget | null;
@@ -42,7 +52,12 @@ function dedupeTargets(
   return deduped;
 }
 
-/** Resolve where a channel should deliver one native approval request. */
+/**
+ * Resolves where a channel should deliver one native approval request.
+ *
+ * The adapter declares supported surfaces and preference order; this planner resolves concrete
+ * targets, falls back from missing origin targets to approver DMs, and dedupes converged routes.
+ */
 export async function resolveChannelNativeApprovalDeliveryPlan(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
