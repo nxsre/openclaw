@@ -1,3 +1,4 @@
+/** Prunes oldest Map entries in insertion order until the map fits maxSize. */
 export function pruneMapToMaxSize<K, V>(map: Map<K, V>, maxSize: number): void {
   if (Number.isNaN(maxSize) || maxSize === Number.POSITIVE_INFINITY) {
     return;
