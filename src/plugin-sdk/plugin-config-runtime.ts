@@ -46,5 +46,7 @@ export function resolveLivePluginConfigObject(
   if (typeof runtimeConfigLoader !== "function") {
     return startupPluginConfig;
   }
+  // Once a live loader is available, do not fall back to startup config; a missing runtime
+  // plugin entry means the plugin was removed or disabled after startup.
   return resolvePluginConfigObject(runtimeConfigLoader(), pluginId);
 }
