@@ -136,6 +136,7 @@ function isWithinDispatchClassificationDepth(depth: number): boolean {
   return depth <= MAX_DISPATCH_WRAPPER_DEPTH;
 }
 
+/** Returns true for canonical shell executables that can carry inline commands. */
 export function isShellWrapperExecutable(token: string): boolean {
   return SHELL_WRAPPER_CANONICAL.has(normalizeExecutableToken(token));
 }
@@ -145,6 +146,7 @@ function isShellWrapperInvocationInternal(argv: string[], depth: number): boolea
   return candidate ? isShellWrapperExecutable(candidate.token0) : false;
 }
 
+/** Detects shell wrapper invocations after transparent dispatch wrappers. */
 export function isShellWrapperInvocation(argv: string[]): boolean {
   return isShellWrapperInvocationInternal(argv, 0);
 }
@@ -309,6 +311,7 @@ function hasEnvManipulationBeforeShellWrapperInternal(
   return candidate.state;
 }
 
+/** Detects environment mutation before a bindable shell-wrapper payload. */
 export function hasEnvManipulationBeforeShellWrapper(argv: string[]): boolean {
   return hasEnvManipulationBeforeShellWrapperInternal(argv, 0, false);
 }
@@ -344,6 +347,9 @@ function extractShellWrapperCommandInternal(
   const allowLegacyShLoginPayloadBinding =
     isLegacyShLoginInlineForm(candidate.argv, baseExecutable) &&
     (rawMatchesPayload || rawMatchesCanonicalArgv);
+  // Startup-file modes can run user-controlled code before -c. Keep the full
+  // argv as the policy target unless the legacy sh -lc payload is already the
+  // exact raw command being bound.
   if (
     startupWrapperRequiresFullArgv({
       argv: candidate.argv,
@@ -366,14 +372,17 @@ function extractShellWrapperCommandInternal(
   };
 }
 
+/** Returns the argv that actually reaches a shell wrapper after transparent wrappers. */
 export function resolveShellWrapperTransportArgv(argv: string[]): string[] | null {
   return resolveShellWrapperSpecAndArgvInternal(argv, 0)?.argv ?? null;
 }
 
+/** Extracts an inline shell payload without considering raw-command binding safety. */
 export function extractShellWrapperInlineCommand(argv: string[]): string | null {
   return resolveShellWrapperSpecAndArgvInternal(argv, 0)?.payload ?? null;
 }
 
+/** Extracts an inline shell payload only when policy can bind it to the raw command. */
 export function extractBindableShellWrapperInlineCommand(
   argv: string[],
   rawCommand?: string | null,
@@ -381,6 +390,7 @@ export function extractBindableShellWrapperInlineCommand(
   return extractShellWrapperCommandInternal(argv, normalizeRawCommand(rawCommand), 0).command;
 }
 
+/** Classifies shell-wrapper argv and returns a bindable payload when safe. */
 export function extractShellWrapperCommand(
   argv: string[],
   rawCommand?: string | null,
@@ -388,6 +398,7 @@ export function extractShellWrapperCommand(
   return extractShellWrapperCommandInternal(argv, normalizeRawCommand(rawCommand), 0);
 }
 
+/** Returns true when argv is a shell wrapper but payload binding is unsafe. */
 export function isBlockedShellWrapperCommand(argv: string[], rawCommand?: string | null): boolean {
   const extracted = extractShellWrapperCommandInternal(argv, normalizeRawCommand(rawCommand), 0);
   return extracted.isWrapper && extracted.command === null;
