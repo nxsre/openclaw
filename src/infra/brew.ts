@@ -34,6 +34,7 @@ function resolveBrewFromPath(pathEnv = process.env.PATH): string | undefined {
   return undefined;
 }
 
+/** Returns trusted Homebrew bin directories suitable for PATH augmentation. */
 export function resolveBrewPathDirs(opts?: BrewResolutionOptions): string[] {
   const homeDir = opts?.homeDir ?? os.homedir();
 
@@ -50,9 +51,12 @@ export function resolveBrewPathDirs(opts?: BrewResolutionOptions): string[] {
   return dirs;
 }
 
+/** Resolves an executable brew path without trusting Homebrew override env vars. */
 export function resolveBrewExecutable(opts?: BrewResolutionOptions): string | undefined {
   const homeDir = opts?.homeDir ?? os.homedir();
 
+  // PATH is already process-owner controlled; HOMEBREW_* env can come from
+  // workspace config and must not redirect binary resolution.
   const pathBrew = resolveBrewFromPath();
   if (pathBrew) {
     return pathBrew;
