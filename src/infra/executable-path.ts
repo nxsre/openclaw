@@ -7,6 +7,7 @@ function isDriveLessWindowsRootedPath(value: string): boolean {
   return process.platform === "win32" && /^:[\\/]/.test(value);
 }
 
+/** Normalizes a raw executable token into a path candidate without checking executability. */
 export function resolveExecutablePathCandidate(
   rawExecutable: string,
   options?: { cwd?: string; env?: NodeJS.ProcessEnv; requirePathSeparator?: boolean },
@@ -70,6 +71,7 @@ function resolveWindowsExecutableExtSet(env: NodeJS.ProcessEnv | undefined): Set
   );
 }
 
+/** Checks whether a filesystem path names an executable file for the current platform. */
 export function isExecutableFile(filePath: string): boolean {
   try {
     const stat = fs.statSync(filePath);
@@ -90,6 +92,7 @@ export function isExecutableFile(filePath: string): boolean {
   }
 }
 
+/** Resolves a bare executable through an explicit PATH string and PATHEXT policy. */
 export function resolveExecutableFromPathEnv(
   executable: string,
   pathEnv: string,
@@ -109,6 +112,7 @@ export function resolveExecutableFromPathEnv(
   return undefined;
 }
 
+/** Resolves a raw executable token to an executable filesystem path when possible. */
 export function resolveExecutablePath(
   rawExecutable: string,
   options?: { cwd?: string; env?: NodeJS.ProcessEnv },
