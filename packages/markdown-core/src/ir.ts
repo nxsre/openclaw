@@ -1055,6 +1055,7 @@ export function markdownToIRWithMeta(
   };
 }
 
+/** Chunks IR text at readable boundaries and rebases style/link spans per chunk. */
 export function chunkMarkdownIR(ir: MarkdownIR, limit: number): MarkdownIR[] {
   if (!ir.text) {
     return [];
