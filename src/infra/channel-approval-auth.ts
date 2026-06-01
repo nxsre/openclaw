@@ -4,11 +4,15 @@ import { isImplicitSameChatApprovalAuthorization } from "../plugin-sdk/approval-
 import { normalizeMessageChannel } from "../utils/message-channel.js";
 
 type ApprovalCommandAuthorization = {
+  /** True when the sender may approve the requested action. */
   authorized: boolean;
+  /** Channel-supplied denial reason, when authorization fails. */
   reason?: string;
+  /** True when a plugin made an explicit authorization decision. */
   explicit: boolean;
 };
 
+/** Resolves channel/plugin authorization for exec and plugin approval actions. */
 export function resolveApprovalCommandAuthorization(params: {
   cfg: OpenClawConfig;
   channel?: string | null;

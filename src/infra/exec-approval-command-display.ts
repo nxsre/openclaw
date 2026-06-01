@@ -39,8 +39,11 @@ function escapeInvisibles(text: string, options?: { preserveLineBreaks?: boolean
 }
 
 export type SanitizedExecApprovalDisplayText = {
+  /** Sanitized text safe to render in approval UIs. */
   text: string;
+  /** True when output hit the display cap after redaction. */
   truncated: boolean;
+  /** True when input exceeded the hard sanitizer cap and was fully suppressed. */
   oversized: boolean;
 };
 
@@ -180,16 +183,19 @@ function sanitizeExecApprovalDisplayTextInternal(
   return truncateForDisplay(out);
 }
 
+/** Sanitizes command text for approval display without preserving line breaks. */
 export function sanitizeExecApprovalDisplayText(commandText: string): string {
   return sanitizeExecApprovalDisplayTextInternal(commandText).text;
 }
 
+/** Sanitizes command text and reports truncation/oversize status for callers. */
 export function sanitizeExecApprovalDisplayTextWithStatus(
   commandText: string,
 ): SanitizedExecApprovalDisplayText {
   return sanitizeExecApprovalDisplayTextInternal(commandText);
 }
 
+/** Sanitizes warning text while preserving readable line structure. */
 export function sanitizeExecApprovalWarningText(warningText: string): string {
   return sanitizeExecApprovalDisplayTextInternal(normalizeDisplayLineBreaks(warningText), {
     preserveLineBreaks: true,
@@ -209,6 +215,7 @@ function normalizePreview(commandText: string, commandPreview?: string | null): 
   return preview;
 }
 
+/** Resolves the sanitized command text and optional preview shown for an exec approval. */
 export function resolveExecApprovalCommandDisplay(request: ExecApprovalRequestPayload): {
   commandText: string;
   commandPreview: string | null;
