@@ -16,26 +16,40 @@ export type { ChannelApprovalKind } from "./approval-types.js";
 export type ApprovalRequest = ExecApprovalRequest | PluginApprovalRequest;
 export type ApprovalResolved = ExecApprovalResolved | PluginApprovalResolved;
 
+/** Shared context passed to channel approval capability hooks. */
 export type ChannelApprovalCapabilityHandlerContext = {
+  /** Runtime config snapshot used for channel/account availability decisions. */
   cfg: OpenClawConfig;
+  /** Optional channel account/profile id that owns this approval client. */
   accountId?: string | null;
+  /** Gateway URL for runtimes that need to build callback or diagnostic context. */
   gatewayUrl?: string;
+  /** Channel-specific context supplied by the caller. */
   context?: unknown;
 };
 
+/** Final action a native approval runtime should apply to a delivered pending entry. */
 export type ChannelApprovalNativeFinalAction<TPayload> =
+  /** Update the delivered entry with a resolved/expired payload. */
   | { kind: "update"; payload: TPayload }
+  /** Delete the delivered entry after resolution or expiry. */
   | { kind: "delete" }
+  /** Keep the entry but remove interactive approval actions. */
   | { kind: "clear-actions" }
+  /** Leave the delivered entry untouched. */
   | { kind: "leave" };
 
+/** Availability gates for a channel-native approval runtime. */
 export type ChannelApprovalNativeAvailabilityAdapter = {
+  /** Returns whether the native approval client is configured enough to start. */
   isConfigured: (params: ChannelApprovalCapabilityHandlerContext) => boolean;
+  /** Returns whether this runtime should own a specific approval request. */
   shouldHandle: (
     params: ChannelApprovalCapabilityHandlerContext & { request: ApprovalRequest },
   ) => boolean;
 };
 
+/** Builds channel-specific pending/final payloads from approval view models. */
 export type ChannelApprovalNativePresentationAdapter<
   TPendingPayload = unknown,
   TFinalPayload = unknown,
