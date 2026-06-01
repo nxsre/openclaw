@@ -90,7 +90,10 @@ function compileGlobRegex(pattern: string): RegExp {
   return compiled;
 }
 
-/** Matches executable allowlist globs against normalized filesystem targets. */
+/**
+ * Matches executable allowlist globs against normalized filesystem targets.
+ * Handles home expansion, platform case rules, realpath checks, and dot-segment escapes.
+ */
 export function matchesExecAllowlistPattern(pattern: string, target: string): boolean {
   const trimmed = pattern.trim();
   if (!trimmed) {
