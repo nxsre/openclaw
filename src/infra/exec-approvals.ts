@@ -174,6 +174,7 @@ export function resolveExecModePolicy(params: {
   };
 }
 
+/** Stable command identity captured for matching a system-run approval to execution. */
 export type SystemRunApprovalBinding = {
   argv: string[];
   cwd: string | null;
@@ -182,12 +183,14 @@ export type SystemRunApprovalBinding = {
   envHash: string | null;
 };
 
+/** Mutable file operand included in an approval plan so later execution can verify content. */
 export type SystemRunApprovalFileOperand = {
   argvIndex: number;
   path: string;
   sha256: string;
 };
 
+/** Prepared system-run command approval plan carried from parsing to approval registration. */
 export type SystemRunApprovalPlan = {
   argv: string[];
   cwd: string | null;
@@ -198,11 +201,13 @@ export type SystemRunApprovalPlan = {
   mutableFileOperand?: SystemRunApprovalFileOperand | null;
 };
 
+/** Character span for command text that UI clients can highlight in approval prompts. */
 export type ExecApprovalCommandSpan = {
   startIndex: number;
   endIndex: number;
 };
 
+/** Payload shown to humans and forwarded to approval surfaces for a pending exec command. */
 export type ExecApprovalRequestPayload = {
   command: string;
   commandPreview?: string | null;
@@ -229,6 +234,7 @@ export type ExecApprovalRequestPayload = {
   turnSourceThreadId?: string | number | null;
 };
 
+/** Pending exec approval record with creation and expiry timestamps. */
 export type ExecApprovalRequest = {
   id: string;
   request: ExecApprovalRequestPayload;
@@ -236,6 +242,7 @@ export type ExecApprovalRequest = {
   expiresAtMs: number;
 };
 
+/** Resolved approval decision stored or broadcast after a human acts. */
 export type ExecApprovalResolved = {
   id: string;
   decision: ExecApprovalDecision;
@@ -244,6 +251,7 @@ export type ExecApprovalResolved = {
   request?: ExecApprovalRequest["request"];
 };
 
+/** Persisted default exec approval policy fields shared by defaults, wildcard, and agents. */
 export type ExecApprovalsDefaults = {
   security?: ExecSecurity;
   ask?: ExecAsk;
@@ -251,10 +259,12 @@ export type ExecApprovalsDefaults = {
   autoAllowSkills?: boolean;
 };
 
+/** Per-agent exec approval policy plus optional allowlist entries. */
 export type ExecApprovalsAgent = ExecApprovalsDefaults & {
   allowlist?: ExecAllowlistEntry[];
 };
 
+/** Versioned on-disk exec approval policy file. */
 export type ExecApprovalsFile = {
   version: 1;
   socket?: {
@@ -265,6 +275,7 @@ export type ExecApprovalsFile = {
   agents?: Record<string, ExecApprovalsAgent>;
 };
 
+/** Raw approval file snapshot used to restore temporary policy mutations. */
 export type ExecApprovalsSnapshot = {
   path: string;
   exists: boolean;
@@ -273,6 +284,7 @@ export type ExecApprovalsSnapshot = {
   hash: string;
 };
 
+/** Effective approval policy after defaults, wildcard, agent overrides, and socket state. */
 export type ExecApprovalsResolved = {
   path: string;
   socketPath: string;
@@ -288,11 +300,12 @@ export type ExecApprovalsResolved = {
   file: ExecApprovalsFile;
 };
 
-// Keep CLI + gateway defaults in sync.
+/** Default lifetime for pending exec approval requests; keep CLI and gateway uses aligned. */
 export const DEFAULT_EXEC_APPROVAL_TIMEOUT_MS = 1_800_000;
 
 const DEFAULT_SECURITY: ExecSecurity = "full";
 const DEFAULT_ASK: ExecAsk = "off";
+/** Security mode used when an approval request cannot be completed through the ask path. */
 export const DEFAULT_EXEC_APPROVAL_ASK_FALLBACK: ExecSecurity = "full";
 const DEFAULT_AUTO_ALLOW_SKILLS = false;
 const DEFAULT_SOCKET = "~/.openclaw/exec-approvals.sock";
@@ -305,10 +318,12 @@ function hashExecApprovalsRaw(raw: string | null): string {
     .digest("hex");
 }
 
+/** Resolves the canonical approval policy file path with home expansion applied. */
 export function resolveExecApprovalsPath(): string {
   return expandHomePrefix(DEFAULT_FILE);
 }
 
+/** Resolves the canonical local approval JSONL socket path with home expansion applied. */
 export function resolveExecApprovalsSocketPath(): string {
   return expandHomePrefix(DEFAULT_SOCKET);
 }
