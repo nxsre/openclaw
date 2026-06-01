@@ -61,6 +61,7 @@ type ChannelConfigAdapterWithAccessors<ResolvedAccount> = Pick<
   | "resolveDefaultTo"
 >;
 
+/** Returns whether a channel/account config target currently permits config writes. */
 export function resolveChannelConfigWrites(params: {
   cfg: OpenClawConfig;
   channelId?: string | null;
@@ -69,6 +70,7 @@ export function resolveChannelConfigWrites(params: {
   return resolveChannelConfigWritesShared(params);
 }
 
+/** Authorizes a config write against origin and target scopes. */
 export function authorizeConfigWrite(params: {
   cfg: OpenClawConfig;
   origin?: ConfigWriteScope;
@@ -78,6 +80,7 @@ export function authorizeConfigWrite(params: {
   return authorizeConfigWriteShared(params);
 }
 
+/** Returns whether an internal channel can bypass channel config write restrictions. */
 export function canBypassConfigWritePolicy(params: {
   channel?: string | null;
   gatewayClientScopes?: string[] | null;
@@ -89,6 +92,7 @@ export function canBypassConfigWritePolicy(params: {
   });
 }
 
+/** Formats a stable user-facing denial message for rejected config writes. */
 export function formatConfigWriteDeniedMessage(params: {
   result: Exclude<ConfigWriteAuthorizationResult, { allowed: true }>;
   fallbackChannelId?: string | null;
@@ -252,6 +256,8 @@ function resolveAccessorAccountWithFallback<
     | undefined,
   fallbackResolveAccessorAccount: (params: ChannelConfigAccessorParams<Config>) => AccessorAccount,
 ): (params: ChannelConfigAccessorParams<Config>) => AccessorAccount {
+  // Accessor accounts may differ from CRUD accounts when a channel exposes inherited/default
+  // allowlists; fall back to the CRUD resolver only when no accessor resolver was supplied.
   return resolveAccessorAccount ?? fallbackResolveAccessorAccount;
 }
 
@@ -372,6 +378,8 @@ function setTopLevelChannelEnabledInConfigSection<Config extends OpenClawConfig>
   sectionKey: string;
   enabled: boolean;
 }): Config {
+  // Top-level single-account channels keep enabled at the channel section root instead of under an
+  // accounts map, matching the public config shape installers already write.
   const section = params.cfg.channels?.[params.sectionKey] as Record<string, unknown> | undefined;
   return {
     ...params.cfg,
@@ -392,6 +400,7 @@ function removeTopLevelChannelConfigSection<Config extends OpenClawConfig>(param
   const nextChannels = { ...params.cfg.channels } as Record<string, unknown>;
   delete nextChannels[params.sectionKey];
   const nextCfg = { ...params.cfg };
+  // Preserve an absent `channels` object after deleting the last top-level channel section.
   if (Object.keys(nextChannels).length > 0) {
     nextCfg.channels = nextChannels as Config["channels"];
   } else {
@@ -547,6 +556,8 @@ export function createHybridChannelConfigBase<
     },
     deleteAccount({ cfg, accountId }) {
       if (normalizeAccountId(accountId) === DEFAULT_ACCOUNT_ID) {
+        // Hybrid channels store the default account at the section root; named accounts still live
+        // under the shared accounts map handled by config-helpers.
         if (params.preserveSectionOnDefaultDelete) {
           return clearTopLevelChannelConfigFields({
             cfg,
