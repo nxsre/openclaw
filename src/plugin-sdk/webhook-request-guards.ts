@@ -38,9 +38,13 @@ export const WEBHOOK_IN_FLIGHT_DEFAULTS = Object.freeze({
 });
 
 export type WebhookInFlightLimiter = {
+  /** Attempts to reserve one active request slot for the key. */
   tryAcquire: (key: string) => boolean;
+  /** Releases a previously acquired request slot for the key. */
   release: (key: string) => void;
+  /** Number of keys currently tracked for active request counts. */
   size: () => number;
+  /** Drops all active counters; intended for tests and lifecycle teardown. */
   clear: () => void;
 };
 
@@ -119,6 +123,8 @@ export function createWebhookInFlightLimiter(options?: {
         return false;
       }
       active.set(key, current + 1);
+      // The guard is per-process and best-effort; cap cardinality so hostile keys cannot
+      // grow memory without bound.
       pruneMapToMaxSize(active, maxTrackedKeys);
       return true;
     },
@@ -232,6 +238,8 @@ export function beginWebhookRequestPipelineOrReject(params: {
   return {
     ok: true,
     release: () => {
+      // Release hooks can be called from multiple finally/error paths; only the first one
+      // should decrement the active request count.
       if (released) {
         return;
       }

@@ -12,14 +12,20 @@ type CounterState = {
 };
 
 export type FixedWindowRateLimiter = {
+  /** Returns true when the key has exceeded the configured window budget. */
   isRateLimited: (key: string, nowMs?: number) => boolean;
+  /** Number of currently tracked keys after expiry/cardinality pruning. */
   size: () => number;
+  /** Drops all tracked key windows and resets pruning state. */
   clear: () => void;
 };
 
 export type BoundedCounter = {
+  /** Increments a key and returns the current non-expired count. */
   increment: (key: string, nowMs?: number) => number;
+  /** Number of currently tracked keys after TTL/cardinality pruning. */
   size: () => number;
+  /** Drops all tracked counters and resets pruning state. */
   clear: () => void;
 };
 
@@ -39,13 +45,20 @@ export const WEBHOOK_ANOMALY_STATUS_CODES = Object.freeze([400, 401, 408, 413, 4
 
 export type WebhookAnomalyTracker = {
   record: (params: {
+    /** Stable key for the source/category being sampled. */
     key: string;
+    /** Response status code; untracked codes return zero without logging. */
     statusCode: number;
+    /** Builds the sampled log line from the current count. */
     message: (count: number) => string;
+    /** Optional logger called for the first event and configured sampling interval. */
     log?: (message: string) => void;
+    /** Clock override used by tests and deterministic callers. */
     nowMs?: number;
   }) => number;
+  /** Number of currently tracked anomaly keys. */
   size: () => number;
+  /** Drops all anomaly counters. */
   clear: () => void;
 };
 
@@ -80,6 +93,7 @@ export function createFixedWindowRateLimiter(options: {
   let lastPruneMs = 0;
 
   const touch = (key: string, value: FixedWindowState) => {
+    // Delete-then-set keeps the Map in LRU order for pruneMapToMaxSize.
     state.delete(key);
     state.set(key, value);
   };
@@ -143,6 +157,7 @@ export function createBoundedCounter(options: {
   let lastPruneMs = 0;
 
   const touch = (key: string, value: CounterState) => {
+    // Delete-then-set keeps the Map in LRU order for pruneMapToMaxSize.
     counters.delete(key);
     counters.set(key, value);
   };
