@@ -1,3 +1,4 @@
+/** Single-bucket fixed-window limiter result for bursty control-plane actions. */
 export type FixedWindowRateLimiter = {
   consume: () => {
     allowed: boolean;
@@ -7,6 +8,7 @@ export type FixedWindowRateLimiter = {
   reset: () => void;
 };
 
+/** Normalize integer rate-limit options while keeping operator-provided minimums. */
 export function resolveFixedWindowRateLimitInteger(
   value: number | undefined,
   fallback: number,
@@ -16,6 +18,7 @@ export function resolveFixedWindowRateLimitInteger(
   return Math.max(params.min, Math.floor(candidate));
 }
 
+/** Create a single in-memory fixed-window limiter with clamped integer bounds. */
 export function createFixedWindowRateLimiter(params: {
   maxRequests: number;
   windowMs: number;
@@ -32,6 +35,7 @@ export function createFixedWindowRateLimiter(params: {
     consume() {
       const nowMs = now();
       if (nowMs - windowStartMs >= windowMs) {
+        // Window ownership is lazy: first consume after expiry starts the next bucket.
         windowStartMs = nowMs;
         count = 0;
       }
@@ -50,6 +54,7 @@ export function createFixedWindowRateLimiter(params: {
       };
     },
     reset() {
+      // Reset returns the limiter to cold-start state so the next consume opens a fresh window.
       count = 0;
       windowStartMs = 0;
     },
