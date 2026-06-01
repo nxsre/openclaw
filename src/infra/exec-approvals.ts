@@ -1136,6 +1136,7 @@ export function resolveExecApprovalsFromFile(params: {
   };
 }
 
+/** Decides whether current ask/security policy needs a human approval prompt. */
 export function requiresExecApproval(params: {
   ask: ExecAsk;
   security: ExecSecurity;
