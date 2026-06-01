@@ -7,6 +7,7 @@ import type { ExecApprovalChannelRuntimeEventKind } from "./exec-approval-channe
 
 export const CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY = "approval.native";
 
+/** Wrap a channel native runtime in a lazy loader while keeping availability checks eager. */
 export function createLazyChannelApprovalNativeRuntimeAdapter<
   TPendingPayload = unknown,
   TPreparedTarget = unknown,
