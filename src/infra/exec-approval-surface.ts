@@ -11,7 +11,13 @@ import {
   normalizeMessageChannel,
 } from "../utils/message-channel.js";
 
-/** Native approval availability for the channel that initiated an approval request. */
+/**
+ * Native approval availability for the channel that initiated an approval request.
+ *
+ * `enabled` means the initiating surface can collect the approval directly, `disabled` means the
+ * channel knows this account/config cannot approve natively, and `unsupported` means fallback
+ * guidance should point the user to another approval client.
+ */
 export type ExecApprovalInitiatingSurfaceState =
   | { kind: "enabled"; channel: string | undefined; channelLabel: string; accountId?: string }
   | { kind: "disabled"; channel: string; channelLabel: string; accountId?: string }
@@ -40,7 +46,12 @@ function hasNativeExecApprovalCapability(channel?: string): boolean {
   return Boolean(capability.getExecInitiatingSurfaceState || capability.getActionAvailabilityState);
 }
 
-/** Resolves whether the initiating surface can collect a native exec approval. */
+/**
+ * Resolves whether the initiating surface can collect a native exec approval.
+ *
+ * This is the exec-specific wrapper around the generic approval-kind resolver; use it when the
+ * caller is about to render or route an exec-command approval prompt.
+ */
 export function resolveExecApprovalInitiatingSurfaceState(params: {
   channel?: string | null;
   accountId?: string | null;
@@ -53,7 +64,8 @@ export function resolveExecApprovalInitiatingSurfaceState(params: {
  * Resolves whether the initiating channel can collect a native approval for this approval kind.
  *
  * Built-in UI surfaces are always enabled. Channel plugins may override availability through their
- * approval capability; deliverable chat channels without an override fall back to message replies.
+ * approval capability for account/config-specific state; deliverable chat channels without an
+ * override fall back to message replies.
  */
 export function resolveApprovalInitiatingSurfaceState(params: {
   channel?: string | null;
