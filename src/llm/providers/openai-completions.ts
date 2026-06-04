@@ -919,12 +919,23 @@ export function convertMessages(
           content: sanitizeSurrogates(msg.content),
         });
       } else {
+        // Only send image content to models that declare image input. Otherwise a
+        // text-only model rejects the request ("not a multimodal model", HTTP 400)
+        // — and because the image lives in history, it re-poisons every later turn.
+        // Replace images with a text placeholder so the request stays valid.
+        const supportsImageInput = model.input.includes("image");
         const content: ChatCompletionContentPart[] = msg.content.map(
           (item): ChatCompletionContentPart => {
             if (item.type === "text") {
               return {
                 type: "text",
                 text: sanitizeSurrogates(item.text),
+              } satisfies ChatCompletionContentPartText;
+            }
+            if (!supportsImageInput) {
+              return {
+                type: "text",
+                text: "[image omitted: model has no image input]",
               } satisfies ChatCompletionContentPartText;
             }
             return {
