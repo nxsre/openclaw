@@ -96,7 +96,9 @@ type MutableSessionManager = {
   leafId?: string | null;
   labelsById?: Map<string, unknown>;
   labelTimestampsById?: Map<string, unknown>;
-  _rewriteFile?: () => void;
+  // SessionManager 的方法名是 rewriteFile(私有,经类型转换访问;与 attempt.ts:691 一致)。
+  // 之前误写成 _rewriteFile 导致下方一律走 skip 分支,失败回合从不回滚。
+  rewriteFile?: () => void;
 };
 
 /**
@@ -117,7 +119,7 @@ export function revertEmbeddedSessionToPrePromptLeaf(params: {
   }
 
   const sm = params.sessionManager as MutableSessionManager;
-  if (!Array.isArray(sm.fileEntries) || typeof sm._rewriteFile !== "function") {
+  if (!Array.isArray(sm.fileEntries) || typeof sm.rewriteFile !== "function") {
     log.warn(
       `[http-error-session-revert] skip SessionManager rewrite (missing fileEntries/_rewriteFile) ` +
         `runId=${params.runId} sessionId=${params.sessionId}`,
@@ -149,7 +151,7 @@ export function revertEmbeddedSessionToPrePromptLeaf(params: {
     );
   }
 
-  sm._rewriteFile();
+  sm.rewriteFile();
   log.info(
     `[http-error-session-revert] removed failed prompt turn from session transcript ` +
       `runId=${params.runId} sessionId=${params.sessionId} ` +
