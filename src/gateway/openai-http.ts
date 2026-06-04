@@ -21,7 +21,7 @@ import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommandFromIngress } from "../commands/agent.js";
 import type { GatewayHttpChatCompletionsConfig } from "../config/types.gateway.js";
 import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
-import { logWarn } from "../logger.js";
+import { logInfo, logWarn } from "../logger.js";
 import {
   DEFAULT_INPUT_IMAGE_MAX_BYTES,
   DEFAULT_INPUT_IMAGE_MIMES,
@@ -981,7 +981,24 @@ export async function handleOpenAiHttpRequest(
   }
   const activeTurnContext = resolveActiveTurnContext(payload.messages);
   const prompt = buildAgentPrompt(payload.messages, activeTurnContext.activeUserMessageIndex);
-  let resolvedClientTools: ClientToolDefinition[];
+  // xcph: 把进入网关的「用户输入」(含语音 STT 转写文本)打到网关日志,便于在
+  // `docker compose logs -f openclaw-gateway-supervised` 里看到语音输入内容。
+  // 工具调用过程由各插件自行打日志(如 xim 的 `🔧 工具 openim_send_*`)。
+  try {
+    const _msgs = asMessages(payload.messages);
+    const _uIdx = activeTurnContext.activeUserMessageIndex;
+    const _userText = _uIdx >= 0 ? extractTextContent(_msgs[_uIdx]?.content).trim() : "";
+    const _imgN = activeTurnContext.urls.length;
+    const _toolN = Array.isArray(payload.tools) ? payload.tools.length : 0;
+    logInfo(
+      `[chat] agent=${agentId} model=${model} 输入「${_userText.slice(0, 300)}${
+        _userText.length > 300 ? "…" : ""
+      }」${_imgN ? ` +${_imgN}图` : ""}${_toolN ? ` tools=${_toolN}` : ""}`,
+    );
+  } catch {
+    // 日志不影响主流程
+  }
+  let resolvedClientTools: ClientToolDefinition[] = [];
   let toolChoicePrompt: string | undefined;
   let toolChoiceConstraint: ToolChoiceConstraint | undefined;
   try {

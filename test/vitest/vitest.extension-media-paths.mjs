@@ -10,6 +10,7 @@ export const mediaExtensionTestRoots = [
   "extensions/video-generation-core",
   "extensions/vydra",
   "extensions/xiaomi",
+  "extensions/xfyun",
 ];
 
 export function isMediaExtensionRoot(root) {

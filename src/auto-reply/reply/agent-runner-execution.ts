@@ -71,6 +71,7 @@ import { CommandLaneClearedError, GatewayDrainingError } from "../../process/com
 import { CommandLane } from "../../process/lanes.js";
 import { defaultRuntime } from "../../runtime.js";
 import { shouldPreserveUserFacingSessionStateForInputProvenance } from "../../sessions/input-provenance.js";
+import { userFacingFallbackText, applyFallbackVars } from "../../shared/assistant-error-format.js";
 import {
   isMarkdownCapableMessageChannel,
   resolveMessageChannel,
@@ -775,6 +776,12 @@ function buildAuthProfileFailoverFailureText(error: unknown): string | null {
 }
 
 function formatForwardedExternalRunFailureText(message: string): string {
+  // XCPH: OPENCLAW_LLM_ERROR_FALLBACK_TEXT 已设 → channel 自动回复直接用兜底文案，
+  // 不再拼装 "⚠️ Agent failed before reply: ... use /new ..." 这类英文模板。
+  const fallback = userFacingFallbackText();
+  if (fallback !== null) {
+    return applyFallbackVars(fallback, message);
+  }
   const sanitized = sanitizeUserFacingText(message, { errorContext: true })
     .trim()
     .replace(/^⚠️\s*/u, "")
@@ -850,6 +857,24 @@ function buildExternalRunFailureReply(
 }
 
 function markAgentRunFailureReplyPayload<T extends ReplyPayload>(payload: T): T {
+  // XCPH: 当 OPENCLAW_LLM_ERROR_FALLBACK_TEXT 设置后，所有 channel auto-reply 失败的
+  // text 字段统一替换为兜底文案——覆盖所有 channel（飞书 / 微信 / QQ / NIM / OpenIM）
+  // 与所有失败来源（LLM 错、role ordering、model switch、CLI 超时、billing 等）。
+  // 详细原因仍在 agent/embedded、provider-http-error 等服务端日志可查。
+  // SILENT_REPLY_TOKEN 等特殊路由 sentinel 保持不变。
+  const fallback = userFacingFallbackText();
+  if (
+    fallback !== null &&
+    payload &&
+    typeof payload === "object" &&
+    "text" in payload &&
+    typeof (payload as { text: unknown }).text === "string"
+  ) {
+    const currentText = (payload as { text: string }).text;
+    if (currentText !== SILENT_REPLY_TOKEN) {
+      (payload as { text: string }).text = applyFallbackVars(fallback, currentText);
+    }
+  }
   return markReplyPayloadForSourceSuppressionDelivery(payload);
 }
 

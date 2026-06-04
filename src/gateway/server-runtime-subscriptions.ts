@@ -22,6 +22,8 @@ export function startGatewayEventSubscriptions(params: {
   agentRunSeq: Map<string, number>;
   chatRunState: ChatRunState;
   toolEventRecipients: ToolEventRecipientRegistry;
+  thinkingEventRecipients: ToolEventRecipientRegistry;
+  thinkingSessionSubscribers: SessionMessageSubscriberRegistry;
   sessionEventSubscribers: SessionEventSubscriberRegistry;
   sessionMessageSubscribers: SessionMessageSubscriberRegistry;
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
@@ -43,6 +45,8 @@ export function startGatewayEventSubscriptions(params: {
         resolveSessionKeyForRun,
         clearAgentRunContext,
         toolEventRecipients: params.toolEventRecipients,
+        thinkingEventRecipients: params.thinkingEventRecipients,
+        thinkingSessionSubscribers: params.thinkingSessionSubscribers,
         sessionEventSubscribers: params.sessionEventSubscribers,
         sessionMessageSubscribers: params.sessionMessageSubscribers,
         clearTrackedActiveRun: ({ runId, clientRunId }) => {

@@ -110,9 +110,13 @@ describe("talk transcription gateway relay", () => {
       sttRequest?.onPartial?.("hel");
       sttRequest?.onTranscript?.("hello world");
     });
-    const { events, session } = await createStartedRelaySession(sttSession, { model: "stt-model" }, (req) => {
-      sttRequest = req;
-    });
+    const { events, session } = await createStartedRelaySession(
+      sttSession,
+      { model: "stt-model" },
+      (req) => {
+        sttRequest = req;
+      },
+    );
 
     expectRecordFields(session, "session", {
       provider: "stt-test",
@@ -207,6 +211,39 @@ describe("talk transcription gateway relay", () => {
     });
   });
 
+  it("advertises pcm16/16k relay audio when the provider requests it", async () => {
+    const sttSession = {
+      connect: vi.fn(async () => {}),
+      sendAudio: vi.fn(),
+      close: vi.fn(),
+      isConnected: vi.fn(() => true),
+    };
+    const provider: RealtimeTranscriptionProviderPlugin = {
+      id: "xfyun",
+      label: "XFYun",
+      isConfigured: () => true,
+      createSession: vi.fn(() => sttSession),
+    };
+    const context = {
+      getRuntimeConfig: () => ({}),
+      broadcastToConnIds: vi.fn(),
+    } as never;
+
+    const session = createTalkTranscriptionRelaySession({
+      context,
+      connId: "conn-1",
+      provider,
+      providerConfig: { encoding: "pcm_s16le", sampleRate: 16000 },
+    });
+    await Promise.resolve();
+
+    expectRecordFields(session.audio, "session audio", {
+      inputEncoding: "pcm16",
+      inputSampleRateHz: 16000,
+    });
+    clearTalkTranscriptionRelaySessionsForTest();
+  });
+
   it("rejects provider configs that do not match relay audio input", () => {
     const provider = createTranscriptionProvider(createSttSessionMock());
     const { context } = createBroadcastContext();
@@ -216,9 +253,9 @@ describe("talk transcription gateway relay", () => {
         context,
         connId: "conn-1",
         provider,
-        providerConfig: { encoding: "linear16", sampleRate: 16000 },
+        providerConfig: { encoding: "linear16", sampleRate: 32_000 },
       }),
-    ).toThrow("Gateway transcription relay requires g711_ulaw/8000 audio");
+    ).toThrow("Gateway transcription relay pcm16 audio supports 8000 or 16000 Hz");
     expect(provider.createSession).not.toHaveBeenCalled();
   });
 

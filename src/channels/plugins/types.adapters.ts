@@ -348,6 +348,7 @@ export type ChannelGatewayAdapter<ResolvedAccount = unknown> = {
   loginWithQrWait?: (params: {
     accountId?: string;
     timeoutMs?: number;
+    sessionKey?: string;
     currentQrDataUrl?: string;
   }) => Promise<ChannelLoginWithQrWaitResult>;
   logoutAccount?: (ctx: ChannelLogoutContext<ResolvedAccount>) => Promise<ChannelLogoutResult>;
@@ -360,7 +361,10 @@ export type ChannelAuthAdapter = {
     runtime: RuntimeEnv;
     verbose?: boolean;
     channelInput?: string | null;
-  }) => Promise<void>;
+  }) => Promise<void | {
+    /** Override `channels.start` account after CLI login when credentials key differs from CLI default. */
+    reconcileAccountId?: string;
+  }>;
 };
 
 export type ChannelHeartbeatAdapter = {

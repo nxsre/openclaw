@@ -1,10 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+const providerHttpErrorLogInfo = vi.hoisted(() => vi.fn());
+
+vi.mock("../logging/subsystem.js", () => ({
+  createSubsystemLogger: () => ({
+    info: providerHttpErrorLogInfo,
+    warn: vi.fn(),
+    debug: vi.fn(),
+    error: vi.fn(),
+    child: vi.fn(),
+  }),
+}));
+
 import {
   assertOkOrThrowProviderError,
   assertOkOrThrowHttpError,
   extractProviderErrorDetail,
   extractProviderErrorInfo,
   extractProviderRequestId,
+  maybeLogProviderHttpErrorResponse,
   ProviderHttpError,
   readProviderBinaryResponse,
   readProviderJsonResponse,
@@ -188,5 +202,47 @@ describe("provider error utils", () => {
     ).rejects.toThrow("Provider TTS failed: audio response exceeds 2048 bytes");
 
     expect(streamed.getReadCount()).toBeLessThan(20);
+  });
+
+  it("logs full non-ok response bodies by default", async () => {
+    const previous = process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
+    delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
+    providerHttpErrorLogInfo.mockClear();
+    try {
+      const body = "x".repeat(900);
+      const response = new Response(body, {
+        status: 502,
+        headers: { "content-type": "text/plain" },
+      });
+      await maybeLogProviderHttpErrorResponse(response, { label: "test-fetch" });
+      expect(providerHttpErrorLogInfo).toHaveBeenCalledTimes(1);
+      const message = String(providerHttpErrorLogInfo.mock.calls[0]?.[0] ?? "");
+      expect(message).toContain("[provider-http-error] test-fetch status=502");
+      expect(message).toContain(body);
+      await expect(response.text()).resolves.toBe(body);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
+      } else {
+        process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY = previous;
+      }
+    }
+  });
+
+  it("does not log non-ok response bodies when explicitly disabled", async () => {
+    const previous = process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
+    process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY = "off";
+    providerHttpErrorLogInfo.mockClear();
+    try {
+      const response = new Response("secret-body", { status: 500 });
+      await maybeLogProviderHttpErrorResponse(response, { label: "test-fetch" });
+      expect(providerHttpErrorLogInfo).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
+      } else {
+        process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY = previous;
+      }
+    }
   });
 });

@@ -25,7 +25,11 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveDebugProxySettings } from "../proxy-capture/env.js";
 import { emitModelTransportDebug } from "./model-transport-debug.js";
 import { formatModelTransportDebugUrl } from "./model-transport-url.js";
-import { ProviderHttpError, readResponseTextLimited } from "./provider-http-errors.js";
+import {
+  maybeLogProviderHttpErrorResponse,
+  ProviderHttpError,
+  readResponseTextLimited,
+} from "./provider-http-errors.js";
 import {
   ensureModelProviderLocalService,
   type ProviderLocalServiceLease,
@@ -739,6 +743,12 @@ export function buildGuardedModelFetch(
       throw error;
     }
     let response = result.response;
+    if (!response.ok) {
+      await maybeLogProviderHttpErrorResponse(response, {
+        label: "model-fetch",
+        url: formatModelTransportDebugUrl(url),
+      });
+    }
     emitModelTransportDebug(
       log,
       `[model-fetch] response provider=${model.provider} api=${model.api} model=${model.id} ` +

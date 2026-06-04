@@ -14,6 +14,10 @@ export function createGatewayNodeSessionRuntime(params: {
   const nodeSubscriptions = createNodeSubscriptionManager();
   const sessionEventSubscribers = createSessionEventSubscriberRegistry();
   const sessionMessageSubscribers = createSessionMessageSubscriberRegistry();
+  // Per-sessionKey subscribers for `stream:"thinking"` agent events. Lets
+  // channel-driven runs (OpenIM / QQ / Weixin etc.) deliver thinking deltas to
+  // operator-style clients that subscribed by sessionKey rather than by runId.
+  const thinkingSessionSubscribers = createSessionMessageSubscriberRegistry();
   const nodeSendEvent = (opts: {
     nodeId: string;
     event: string;
@@ -35,6 +39,7 @@ export function createGatewayNodeSessionRuntime(params: {
     nodePresenceTimers,
     sessionEventSubscribers,
     sessionMessageSubscribers,
+    thinkingSessionSubscribers,
     nodeSendToSession,
     nodeSendToAllSubscribed,
     nodeSubscribe: nodeSubscriptions.subscribe,

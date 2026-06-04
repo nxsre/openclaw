@@ -243,6 +243,13 @@ export type AgentEventHandlerOptions = {
   resolveSessionKeyForRun: (runId: string) => string | undefined;
   clearAgentRunContext: (runId: string) => void;
   toolEventRecipients: ToolEventRecipientRegistry;
+  thinkingEventRecipients: ToolEventRecipientRegistry;
+  /**
+   * Per-sessionKey thinking subscribers. Lets channel-driven runs (e.g.
+   * OpenIM inbound, scheduled cron triggers) deliver thinking deltas to
+   * operator clients that registered by sessionKey rather than runId.
+   */
+  thinkingSessionSubscribers?: SessionMessageSubscriberRegistry;
   sessionEventSubscribers: SessionEventSubscriberRegistry;
   sessionMessageSubscribers: SessionMessageSubscriberRegistry;
   loadGatewaySessionRowForSnapshot?: typeof loadGatewaySessionRow;
@@ -264,6 +271,8 @@ export function createAgentEventHandler({
   resolveSessionKeyForRun,
   clearAgentRunContext,
   toolEventRecipients,
+  thinkingEventRecipients,
+  thinkingSessionSubscribers,
   sessionEventSubscribers,
   sessionMessageSubscribers,
   loadGatewaySessionRowForSnapshot = loadGatewaySessionRow,
@@ -519,6 +528,7 @@ export function createAgentEventHandler({
     }
 
     toolEventRecipients.markFinal(evt.runId);
+    thinkingEventRecipients.markFinal(evt.runId);
     clearBufferedChatState(clientRunId);
     clearAgentRunContext(evt.runId);
     agentRunSeq.delete(evt.runId);
@@ -995,6 +1005,7 @@ export function createAgentEventHandler({
       : false;
     const last = agentRunSeq.get(evt.runId) ?? 0;
     const isToolEvent = evt.stream === "tool";
+    const isThinkingEvent = evt.stream === "thinking";
     const isItemEvent = evt.stream === "item";
     const toolVerbose = isToolEvent ? resolveToolVerboseLevel(evt.runId, sessionKey) : "off";
     const suppressHeartbeatToolEvents =
@@ -1028,7 +1039,31 @@ export function createAgentEventHandler({
       });
     }
     agentRunSeq.set(evt.runId, evt.seq);
-    if (isToolEvent) {
+    if (isThinkingEvent) {
+      const runRecipients = thinkingEventRecipients.get(evt.runId);
+      const sessionRecipients =
+        sessionKey && thinkingSessionSubscribers
+          ? thinkingSessionSubscribers.get(sessionKey)
+          : undefined;
+      const recipients: ReadonlySet<string> | undefined =
+        runRecipients && runRecipients.size > 0 && sessionRecipients && sessionRecipients.size > 0
+          ? new Set<string>([...runRecipients, ...sessionRecipients])
+          : runRecipients && runRecipients.size > 0
+            ? runRecipients
+            : sessionRecipients && sessionRecipients.size > 0
+              ? sessionRecipients
+              : undefined;
+      // Explicit per-session subscribers (sessions.thinking.subscribe) bypass
+      // the isControlUiVisible gate: they registered with intent and consent.
+      // This lets channel-driven runs (OpenIM/QQ/Weixin etc.) deliver thinking
+      // deltas to clients that opted in by sessionKey.
+      const hasExplicitSessionSubscriber = !!(sessionRecipients && sessionRecipients.size > 0);
+      const shouldBroadcast =
+        recipients && recipients.size > 0 && (isControlUiVisible || hasExplicitSessionSubscriber);
+      if (shouldBroadcast) {
+        broadcastToConnIds("agent", agentPayload, recipients, { dropIfSlow: true });
+      }
+    } else if (isToolEvent) {
       const toolPhase = typeof evt.data?.phase === "string" ? evt.data.phase : "";
       // Flush pending assistant text before tool-start events so clients can
       // render complete pre-tool text above tool cards (not truncated by delta throttle).
@@ -1146,12 +1181,10 @@ export function createAgentEventHandler({
     if ((isControlUiVisible || hasSessionMessageSubscribers) && sessionKey) {
       // Send tool events to node/channel subscribers only when verbose is enabled;
       // WS clients already received the event above via broadcastToConnIds.
-      if (
-        isControlUiVisible &&
-        isToolEvent &&
-        !suppressHeartbeatToolEvents &&
-        toolVerbose !== "off"
-      ) {
+      // XCPH: thinking/tool events are capability-scoped to WS recipients above
+      // (the isControlUiVisible gate from upstream HEAD is intentionally dropped
+      // so node/channel subscribers still receive them when verbose).
+      if (isToolEvent && !suppressHeartbeatToolEvents && toolVerbose !== "off") {
         sendNodeAgentPayload(
           sessionKey,
           projectToolSearchCodeEventForChannelPayload({

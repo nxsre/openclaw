@@ -3,11 +3,16 @@ import { sanitizeForLog } from "../../packages/terminal-core/src/ansi.js";
 import { resolveInlineAgentImageAttachments } from "../auto-reply/reply/agent-turn-attachments.js";
 import { sanitizePendingFinalDeliveryText } from "../auto-reply/reply/pending-final-delivery.js";
 import {
+  resolveAgentReasoningStateAccess,
+  resolveRunReasoningLevel,
+} from "../auto-reply/reply/resolve-run-reasoning-level.js";
+import {
   formatThinkingLevels,
   isThinkingLevelSupported,
   normalizeThinkLevel,
   normalizeVerboseLevel,
   resolveSupportedThinkingLevel,
+  type ReasoningLevel,
   type VerboseLevel,
 } from "../auto-reply/thinking.js";
 import { resolveChannelModelOverride } from "../channels/model-overrides.js";
@@ -1555,6 +1560,45 @@ async function agentCommandInternal(
         resolvedThinkLevel = fallbackThinkLevel;
       }
     }
+    const reasoningResolution = resolveRunReasoningLevel({
+      message: opts.message ?? body,
+      cfg,
+      agentId: sessionAgentId,
+      sessionEntry,
+      canUseReasoningState: resolveAgentReasoningStateAccess({
+        senderIsOwner: opts.senderIsOwner,
+        gatewayClientScopes: opts.gatewayClientScopes,
+      }),
+    });
+    let resolvedReasoningLevel: ReasoningLevel = reasoningResolution.reasoningLevel;
+    if (
+      reasoningResolution.shouldPersistReasoningToSession &&
+      reasoningResolution.reasoningLevelFromDirective &&
+      sessionStore &&
+      sessionKey &&
+      !suppressVisibleSessionEffects
+    ) {
+      const now = Date.now();
+      const entry = sessionStore[sessionKey] ??
+        sessionEntry ?? { sessionId, updatedAt: now, sessionStartedAt: now };
+      const next: SessionEntry = {
+        ...entry,
+        sessionId,
+        updatedAt: now,
+        sessionStartedAt: entry.sessionStartedAt ?? now,
+        reasoningLevel:
+          reasoningResolution.reasoningLevelFromDirective === "off"
+            ? "off"
+            : reasoningResolution.reasoningLevelFromDirective,
+      };
+      await persistSessionEntry({
+        sessionStore,
+        sessionKey,
+        storePath,
+        entry: next,
+      });
+      sessionEntry = next;
+    }
     const { resolveSessionTranscriptFile } = await loadTranscriptResolveRuntime();
     let sessionFile: string | undefined;
     if (sessionStore && sessionKey) {
@@ -1767,6 +1811,7 @@ async function agentCommandInternal(
               body,
               isFallbackRetry,
               resolvedThinkLevel,
+              resolvedReasoningLevel,
               fastMode: resolveFastModeState({
                 cfg,
                 provider: providerOverride,

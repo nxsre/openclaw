@@ -341,6 +341,11 @@ import {
   runAttemptContextEngineBootstrap,
 } from "./attempt.context-engine-helpers.js";
 import {
+  assistantStopErrorIndicatesNonOkHttp,
+  revertEmbeddedSessionToPrePromptLeaf,
+  resolveNonOkHttpStatusFromUnknown,
+} from "./attempt.http400-revert.js";
+import {
   installModelPromptTransform,
   installRuntimeContextMessageForPrompt,
   normalizeMessagesForCurrentPromptBoundary,
@@ -2273,6 +2278,7 @@ export async function runEmbeddedAttempt(
           await baseConvertToLlm(normalizeMessagesForLlmBoundary(messages));
       }
       let prePromptMessageCount = activeSession.messages.length;
+      let prePromptSessionLeafId: string | null = null;
       let contextEngineAfterTurnCheckpoint: number | null = null;
       let unwindowedContextEngineMessagesForPrecheck: AgentMessage[] | undefined;
       let contextEnginePromptAuthority: NonNullable<AssembleResult["promptAuthority"]> =
@@ -3762,6 +3768,7 @@ export async function runEmbeddedAttempt(
             activeSession.agent.state.messages = filteredMessages;
           }
           prePromptMessageCount = activeSession.messages.length;
+          prePromptSessionLeafId = sessionManager.getLeafId();
           const contextTokenBudget = params.contextTokenBudget ?? DEFAULT_CONTEXT_TOKENS;
           const promptToolResultMaxChars = resolveLiveToolResultMaxChars({
             contextWindowTokens: contextTokenBudget,
@@ -4608,23 +4615,111 @@ export async function runEmbeddedAttempt(
               fallbackLastCacheTouchAt,
             }),
           });
-
-          if (promptError && promptErrorSource === "prompt" && !compactionOccurredThisAttempt) {
-            try {
-              activeSessionManager.appendCustomEntry("openclaw:prompt-error", {
-                timestamp: Date.now(),
-                runId: params.runId,
-                sessionId: params.sessionId,
-                provider: params.provider,
-                model: params.modelId,
-                api: params.model.api,
-                error: formatErrorMessage(promptError),
-              });
-            } catch (entryErr) {
-              log.warn(`failed to persist prompt error entry: ${String(entryErr)}`);
-            }
-          }
         });
+
+        const httpErrorStatusFromPromptThrow =
+          promptErrorSource === "prompt"
+            ? resolveNonOkHttpStatusFromUnknown(promptError)
+            : undefined;
+        const httpErrorFromPromptThrow = httpErrorStatusFromPromptThrow !== undefined;
+        const httpErrorFromAssistant =
+          currentAttemptAssistant !== undefined &&
+          assistantStopErrorIndicatesNonOkHttp(currentAttemptAssistant);
+        const shouldRevertHttpErrorTurn =
+          !compactionOccurredThisAttempt &&
+          !aborted &&
+          !yieldAborted &&
+          (httpErrorFromPromptThrow || httpErrorFromAssistant);
+        if (shouldRevertHttpErrorTurn) {
+          const preservedHttpErrorForRunner = httpErrorFromPromptThrow
+            ? formatErrorMessage(promptError)
+            : currentAttemptAssistant?.errorMessage?.trim() || "LLM request failed.";
+          revertEmbeddedSessionToPrePromptLeaf({
+            activeSession,
+            sessionManager: activeSessionManager,
+            prePromptMessageCount,
+            prePromptLeafId: prePromptSessionLeafId,
+            runId: params.runId,
+            sessionId: params.sessionId,
+          });
+          // Revert rewrites the transcript while the prompt fence is active (lock released
+          // for model I/O). Refresh the fence so cleanup does not treat our own revert as
+          // an external session takeover.
+          sessionLockController.refreshAfterOwnedSessionWrite();
+          messagesSnapshot = projectToolSearchTargetTranscriptMessages(
+            activeSession.messages.slice(),
+            toolSearchTargetTranscriptProjections,
+          );
+          lastAssistant = messagesSnapshot
+            .slice()
+            .toReversed()
+            .find((m) => m.role === "assistant");
+          currentAttemptAssistant = findCurrentAttemptAssistantMessage({
+            messagesSnapshot,
+            prePromptMessageCount,
+          });
+          attemptUsage = getUsageTotals();
+          const lastCallUsageAfterRevert = normalizeUsage(currentAttemptAssistant?.usage);
+          const fallbackLastCacheTouchAtAfterRevert = readLastCacheTtlTimestamp(
+            activeSessionManager,
+            {
+              provider: params.provider,
+              modelId: params.modelId,
+            },
+          );
+          // `cacheBreak` is only assigned inside the prompt closure above, so at this outer
+          // scope TS narrows it back toward its null initializer. Cast to the declared type
+          // (same idiom as `cacheBreakForLog` below) so the observation fields resolve.
+          const cacheBreakForRevert = cacheBreak as PromptCacheBreak | null;
+          const promptCacheObservationAfterRevert =
+            cacheObservabilityEnabled &&
+            (cacheBreakForRevert ||
+              promptCacheChangesForTurn ||
+              typeof attemptUsage?.cacheRead === "number")
+              ? {
+                  broke: Boolean(cacheBreakForRevert),
+                  ...(typeof cacheBreakForRevert?.previousCacheRead === "number"
+                    ? { previousCacheRead: cacheBreakForRevert.previousCacheRead }
+                    : {}),
+                  ...(typeof cacheBreakForRevert?.cacheRead === "number"
+                    ? { cacheRead: cacheBreakForRevert.cacheRead }
+                    : typeof attemptUsage?.cacheRead === "number"
+                      ? { cacheRead: attemptUsage.cacheRead }
+                      : {}),
+                  changes: cacheBreakForRevert?.changes ?? promptCacheChangesForTurn,
+                }
+              : undefined;
+          promptCache = buildContextEnginePromptCacheInfo({
+            retention: effectivePromptCacheRetention,
+            lastCallUsage: lastCallUsageAfterRevert,
+            observation: promptCacheObservationAfterRevert,
+            lastCacheTouchAt: resolvePromptCacheTouchTimestamp({
+              lastCallUsage: lastCallUsageAfterRevert,
+              assistantTimestamp: currentAttemptAssistant?.timestamp,
+              fallbackLastCacheTouchAt: fallbackLastCacheTouchAtAfterRevert,
+            }),
+          });
+          if (!httpErrorFromPromptThrow) {
+            promptError = new Error(preservedHttpErrorForRunner);
+            promptErrorSource = "prompt";
+          }
+        }
+
+        if (promptError && promptErrorSource === "prompt" && !compactionOccurredThisAttempt) {
+          try {
+            activeSessionManager.appendCustomEntry("openclaw:prompt-error", {
+              timestamp: Date.now(),
+              runId: params.runId,
+              sessionId: params.sessionId,
+              provider: params.provider,
+              model: params.modelId,
+              api: params.model.api,
+              error: formatErrorMessage(promptError),
+            });
+          } catch (entryErr) {
+            log.warn(`failed to persist prompt error entry: ${String(entryErr)}`);
+          }
+        }
 
         // Let the active context engine run its post-turn lifecycle. These hooks
         // may call runtime LLM capabilities, so only their transcript rewrite

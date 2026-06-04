@@ -1,7 +1,7 @@
 import type { SessionConfig, SessionResetConfig } from "../types.base.js";
 import { DEFAULT_IDLE_MINUTES } from "./types.js";
 
-export type SessionResetMode = "daily" | "idle";
+export type SessionResetMode = "daily" | "idle" | "never";
 export type SessionResetType = "direct" | "group" | "thread";
 
 export type SessionResetPolicy = {
@@ -15,7 +15,8 @@ export type SessionFreshness = {
   fresh: boolean;
   dailyResetAt?: number;
   idleExpiresAt?: number;
-  staleReason?: SessionResetMode;
+  // "never" 模式的会话从不过期,所以不会作为 stale 原因(排除掉,避免流入不含 "never" 的 end-reason 类型)。
+  staleReason?: Exclude<SessionResetMode, "never">;
 };
 
 export const DEFAULT_RESET_MODE: SessionResetMode = "daily";
@@ -66,6 +67,11 @@ export function resolveSessionResetPolicy(params: {
   } else if (mode === "idle") {
     idleMinutes = DEFAULT_IDLE_MINUTES;
   }
+  // mode "never" disables both daily and idle expiry; the only way to roll
+  // the session is an explicit reset trigger like /new.
+  if (mode === "never") {
+    idleMinutes = undefined;
+  }
 
   return { mode, atHour, idleMinutes, configured };
 }
@@ -81,6 +87,9 @@ export function evaluateSessionFreshness(params: {
   const sessionStartedAt = resolveTimestamp(params.sessionStartedAt, params.now) ?? updatedAt;
   const lastInteractionAt =
     resolveTimestamp(params.lastInteractionAt, params.now) ?? sessionStartedAt;
+  if (params.policy.mode === "never") {
+    return { fresh: true };
+  }
   const dailyResetAt =
     params.policy.mode === "daily"
       ? resolveDailyResetAtMs(params.now, params.policy.atHour)

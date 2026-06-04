@@ -687,7 +687,14 @@ export async function getReplyFromConfig(
         defaultActivation: "always",
         resolvedThinkLevel: undefined,
         resolvedVerboseLevel: normalizeVerboseLevel(agentCfg?.verboseDefault),
-        resolvedReasoningLevel: "off",
+        // Fast path: honor configured reasoningDefault (agents[id].reasoningDefault
+        // or agents.defaults.reasoningDefault). Without this, all casual chat
+        // inbound bypasses reasoning entirely even when the operator configured
+        // "stream" intent for channel-driven runs.
+        resolvedReasoningLevel:
+          (agentCfg?.reasoningDefault as "off" | "on" | "stream" | undefined) ??
+          (cfg.agents?.defaults?.reasoningDefault as "off" | "on" | "stream" | undefined) ??
+          "off",
         resolvedElevatedLevel: "off",
         execOverrides: undefined,
         elevatedEnabled: false,

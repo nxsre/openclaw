@@ -893,6 +893,7 @@ export async function startGatewayServer(
     removeChatRun,
     chatAbortControllers,
     toolEventRecipients,
+    thinkingEventRecipients,
   } = await startupTrace.measure("runtime.state", () =>
     createGatewayRuntimeState({
       cfg: cfgAtStart,
@@ -929,6 +930,7 @@ export async function startGatewayServer(
     nodePresenceTimers,
     sessionEventSubscribers,
     sessionMessageSubscribers,
+    thinkingSessionSubscribers,
     nodeSendToSession,
     nodeSendToAllSubscribed,
     nodeSubscribe,
@@ -1132,6 +1134,8 @@ export async function startGatewayServer(
         agentRunSeq,
         chatRunState,
         toolEventRecipients,
+        thinkingEventRecipients,
+        thinkingSessionSubscribers,
         sessionEventSubscribers,
         sessionMessageSubscribers,
         chatAbortControllers,
@@ -1420,12 +1424,16 @@ export async function startGatewayServer(
           unsubscribeSessionEvents: sessionEventSubscribers.unsubscribe,
           subscribeSessionMessageEvents: sessionMessageSubscribers.subscribe,
           unsubscribeSessionMessageEvents: sessionMessageSubscribers.unsubscribe,
+          subscribeThinkingSessionEvents: thinkingSessionSubscribers.subscribe,
+          unsubscribeThinkingSessionEvents: thinkingSessionSubscribers.unsubscribe,
           unsubscribeAllSessionEvents: (connId: string) => {
             sessionEventSubscribers.unsubscribe(connId);
             sessionMessageSubscribers.unsubscribeAll(connId);
+            thinkingSessionSubscribers.unsubscribeAll(connId);
           },
           getSessionEventSubscriberConnIds: sessionEventSubscribers.getAll,
           registerToolEventRecipient: toolEventRecipients.add,
+          registerThinkingEventRecipient: thinkingEventRecipients.add,
           dedupe,
           wizardSessions,
           findRunningWizard,

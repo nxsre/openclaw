@@ -137,7 +137,9 @@ export type SessionSendPolicyConfig = {
   rules?: SessionSendPolicyRule[];
 };
 
-export type SessionResetMode = "daily" | "idle";
+// "never" mode (xcph): only an explicit /new rolls the session; it never auto-resets.
+// Keep in sync with the SessionResetMode union in sessions/reset-policy.ts.
+export type SessionResetMode = "daily" | "idle" | "never";
 export type SessionResetConfig = {
   mode?: SessionResetMode;
   /** Local hour (0-23) for the daily reset boundary. */

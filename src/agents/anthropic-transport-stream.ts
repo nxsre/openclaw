@@ -12,6 +12,7 @@ import {
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./copilot-dynamic-headers.js";
 import { parseJsonObjectPreservingUnsafeIntegers } from "./json-unsafe-integers.js";
 import { resolveProviderEndpoint } from "./provider-attribution.js";
+import { maybeLogProviderHttpErrorBodyText } from "./provider-http-errors.js";
 import { buildGuardedModelFetch } from "./provider-transport-fetch.js";
 import type { StreamFn } from "./runtime/index.js";
 import { transformTransportMessages } from "./transport-message-transform.js";
@@ -699,6 +700,13 @@ function createAnthropicMessagesClient(params: {
         });
         if (!response.ok) {
           const detail = await response.text().catch(() => "");
+          maybeLogProviderHttpErrorBodyText({
+            label: "Anthropic Messages",
+            status: response.status,
+            url,
+            contentType: response.headers.get("content-type") ?? undefined,
+            body: detail,
+          });
           throw new Error(
             detail || `Anthropic Messages request failed with HTTP ${response.status}`,
           );

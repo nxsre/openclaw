@@ -2436,14 +2436,21 @@ export async function dispatchReplyFromConfig(
       };
     };
 
+    const _tResolverPick = Date.now();
+    console.info(`[trace-firstbyte] T4a pick replyResolver start ts=${_tResolverPick}`);
     const replyResolver =
       params.replyResolver ??
       (await traceReplyPhase("reply.load_reply_resolver", () => loadGetReplyFromConfigRuntime()))
         .getReplyFromConfig;
+    console.info(
+      `[trace-firstbyte] T4b replyResolver loaded ts=${Date.now()} dT=${Date.now() - _tResolverPick}ms`,
+    );
     const replyConfig = withFullRuntimeReplyConfig(
       params.configOverride ? (applyMergePatch(cfg, params.configOverride) as OpenClawConfig) : cfg,
     );
     recordAgentDispatchStarted();
+    const _tResolverCall = Date.now();
+    console.info(`[trace-firstbyte] T5 replyResolver call start ts=${_tResolverCall}`);
     const replyResult = await runWithDispatchAbortSignal(getDispatchAbortSignal(), () =>
       traceReplyPhase("reply.run_reply_resolver", () =>
         replyResolver(

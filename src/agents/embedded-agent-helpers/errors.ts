@@ -10,6 +10,8 @@ import {
   formatRawAssistantErrorForUi,
   isGenericProviderInternalError,
   parseApiErrorInfo,
+  userFacingFallbackText,
+  applyFallbackVars,
 } from "../../shared/assistant-error-format.js";
 export {
   extractLeadingHttpStatus,
@@ -1158,6 +1160,13 @@ export function formatAssistantErrorText(
   const raw = (msg.errorMessage ?? "").trim();
   if (msg.stopReason !== "error" && !raw) {
     return undefined;
+  }
+  // XCPH: OPENCLAW_LLM_ERROR_FALLBACK_TEXT 已设 → 任意 LLM 异常一律返回该兜底文案。
+  // 跳过下面所有按 provider runtime / role ordering / billing / reasoning 等细分类的
+  // 英文提示，对应统一面向用户输出（详情仍写到 provider-http-error 日志）。
+  const fallback = userFacingFallbackText();
+  if (fallback !== null) {
+    return applyFallbackVars(fallback, raw);
   }
   if (!raw) {
     return "LLM request failed with an unknown error.";

@@ -2027,6 +2027,18 @@ export const agentHandlers: GatewayRequestHandlers = {
           }
         }
       }
+      const wantsThinkingEvents = hasGatewayClientCap(
+        client?.connect?.caps,
+        GATEWAY_CLIENT_CAPS.THINKING_EVENTS,
+      );
+      if (connId && wantsThinkingEvents) {
+        context.registerThinkingEventRecipient(runId, connId);
+        for (const [activeRunId, active] of context.chatAbortControllers) {
+          if (activeRunId !== runId && active.sessionKey === requestedSessionKey) {
+            context.registerThinkingEventRecipient(activeRunId, connId);
+          }
+        }
+      }
 
       const wantsDelivery = request.deliver === true;
       const explicitTo =
@@ -2448,6 +2460,7 @@ export const agentHandlers: GatewayRequestHandlers = {
                 sessionEntry,
               }),
               allowModelOverride,
+              gatewayClientScopes: client?.connect?.scopes,
             },
             runId,
             dedupeKeys: agentDedupeKeys,

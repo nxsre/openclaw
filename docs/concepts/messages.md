@@ -166,7 +166,7 @@ OpenClaw can expose or hide model reasoning:
 
 - `/reasoning on|off|stream` controls visibility.
 - Reasoning content still counts toward token usage when produced by the model.
-- Telegram supports reasoning stream into a transient draft bubble that is deleted after final delivery; use `/reasoning on` for persistent reasoning output.
+- `stream` emits reasoning deltas as gateway `agent` events with `stream: "thinking"`. Any WS client that advertises the `thinking-events` capability on `connect` (control UI, openclaw-macos, custom clients) receives them in real time. Telegram additionally renders the same deltas into a transient draft bubble that is deleted after final delivery; use `/reasoning on` for persistent reasoning output.
 
 Details: [Thinking + reasoning directives](/tools/thinking) and [Token use](/reference/token-use).
 

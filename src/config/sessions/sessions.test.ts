@@ -266,6 +266,30 @@ describe("resolveSessionResetPolicy", () => {
     expect(freshness.fresh).toBe(false);
     expect(freshness.idleExpiresAt).toBe(5 * 60_000);
   });
+
+  it('mode "never" reports fresh regardless of age (only manual /new can roll the session)', () => {
+    const now = Date.UTC(2026, 5, 1, 12, 0, 0);
+    const oneYearAgo = now - 365 * 24 * 60 * 60_000;
+    const freshness = evaluateSessionFreshness({
+      updatedAt: oneYearAgo,
+      sessionStartedAt: oneYearAgo,
+      lastInteractionAt: oneYearAgo,
+      now,
+      policy: { mode: "never", atHour: 4 },
+    });
+    expect(freshness.fresh).toBe(true);
+    expect(freshness.dailyResetAt).toBeUndefined();
+    expect(freshness.idleExpiresAt).toBeUndefined();
+  });
+
+  it('resolveSessionResetPolicy with mode "never" leaves idleMinutes unset', () => {
+    const policy = resolveSessionResetPolicy({
+      sessionCfg: { reset: { mode: "never" } },
+      resetType: "direct",
+    });
+    expect(policy.mode).toBe("never");
+    expect(policy.idleMinutes).toBeUndefined();
+  });
 });
 
 describe("session lifecycle timestamps", () => {

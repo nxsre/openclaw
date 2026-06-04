@@ -173,10 +173,12 @@ export function subscribeEmbeddedAgentSession(params: SubscribeEmbeddedAgentSess
     reasoningMode,
     includeReasoning: reasoningMode === "on" && canShowReasoning,
     shouldEmitPartialReplies: !(reasoningMode === "on" && !params.onBlockReply),
-    streamReasoning:
-      reasoningMode === "stream" &&
-      canShowReasoning &&
-      typeof params.onReasoningStream === "function",
+    // Thinking deltas ride the gateway `agent` WS bus (stream: "thinking") and
+    // are fanned out to clients that advertise the `thinking-events` capability.
+    // The optional `onReasoningStream` callback is an additional sink used by
+    // surfaces such as Telegram (typing indicator / draft streaming); its
+    // presence is no longer required to keep the agent-bus stream alive.
+    streamReasoning: reasoningMode === "stream" && canShowReasoning,
     deltaBuffer: "",
     blockBuffer: "",
     // Track if a streamed chunk opened a <think> block (stateful across chunks).
@@ -1137,7 +1139,7 @@ export function subscribeEmbeddedAgentSession(params: SubscribeEmbeddedAgentSess
     if (params.silentExpected) {
       return;
     }
-    if (!state.streamReasoning || !params.onReasoningStream) {
+    if (!state.streamReasoning) {
       return;
     }
     const trimmed = text.trim();
@@ -1153,7 +1155,11 @@ export function subscribeEmbeddedAgentSession(params: SubscribeEmbeddedAgentSess
     const delta = trimmed.startsWith(prior) ? trimmed.slice(prior.length) : trimmed;
     state.lastStreamedReasoning = trimmed;
 
-    // Broadcast thinking event to WebSocket clients in real-time
+    // Broadcast thinking event to WebSocket clients in real-time. This path
+    // is always taken when streamReasoning is enabled, regardless of whether
+    // the caller supplied an `onReasoningStream` sink — control UI / webchat
+    // clients that advertise the `thinking-events` capability rely on this
+    // bus to receive reasoning deltas.
     emitAgentEvent({
       runId: params.runId,
       stream: "thinking",
@@ -1163,7 +1169,7 @@ export function subscribeEmbeddedAgentSession(params: SubscribeEmbeddedAgentSess
       },
     });
 
-    void params.onReasoningStream({
+    void params.onReasoningStream?.({
       text: trimmed,
     });
   };

@@ -1142,6 +1142,35 @@ describe("server-channels auto restart", () => {
     await manager.stopChannel("discord");
   });
 
+  it("aborts running accounts dropped from listAccountIds without an explicit stopChannel", async () => {
+    let accountIds = ["ghost-acc"];
+    const startAccount = vi.fn(
+      async ({ abortSignal }: { abortSignal: AbortSignal; accountId: string }) =>
+        await new Promise<void>((resolve) => {
+          abortSignal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+    );
+    installTestRegistry(
+      createTestPlugin({
+        startAccount,
+        listAccountIds: () => accountIds,
+      }),
+    );
+    const manager = createManager();
+
+    await manager.startChannel("discord");
+    expect(startAccount).toHaveBeenCalledTimes(1);
+    expect(startAccount.mock.calls[0]?.[0]?.accountId).toBe("ghost-acc");
+
+    accountIds = ["kept-acc"];
+    await manager.startChannel("discord");
+
+    expect(startAccount).toHaveBeenCalledTimes(2);
+    expect(startAccount.mock.calls[1]?.[0]?.accountId).toBe("kept-acc");
+
+    await manager.stopChannel("discord");
+  });
+
   it("reuses plugin account resolution for health monitor overrides", () => {
     installTestRegistry(
       createTestPlugin({

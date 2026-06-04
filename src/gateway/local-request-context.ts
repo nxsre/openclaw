@@ -84,6 +84,10 @@ export function createLocalGatewayRequestContext(
     nodeSubscribe: () => {},
     nodeUnsubscribe: () => {},
     nodeUnsubscribeAll: () => {},
+    // 本地上下文无 WS 客户端,thinking 订阅为无操作(xcph thinking 补丁要求 GatewayRequestContext 提供)。
+    subscribeThinkingSessionEvents: () => {},
+    unsubscribeThinkingSessionEvents: () => {},
+    registerThinkingEventRecipient: () => {},
     hasConnectedTalkNode: () => false,
     nodeRegistry: new NodeRegistry(),
     agentRunSeq: new Map(),

@@ -162,6 +162,11 @@ async function reconcileGatewayRuntimeAfterLocalLogin(params: {
     return;
   }
   try {
+    // Weixin credentials are written under OPENCLAW_STATE_DIR as JSON; bind mounts / NFS
+    // can briefly hide updates from the gateway process that handles channels.start.
+    if (params.channelId === "openclaw-weixin") {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
     await callGateway({
       config: params.cfg,
       method: "channels.start",
@@ -243,18 +248,25 @@ export async function runChannelLogin(
   // Auth-only flow: do not mutate channel config here.
   setVerbose(Boolean(opts.verbose));
   const { accountId } = resolveAccountContext(plugin, opts, cfg);
-  await login({
+  const loginResult = await login({
     cfg,
     accountId,
     runtime,
     verbose: Boolean(opts.verbose),
     channelInput,
   });
+  const reconcileAccountId =
+    loginResult &&
+    typeof loginResult === "object" &&
+    typeof loginResult.reconcileAccountId === "string" &&
+    loginResult.reconcileAccountId.trim()
+      ? loginResult.reconcileAccountId.trim()
+      : accountId;
   await reconcileGatewayRuntimeAfterLocalLogin({
     cfg,
     plugin,
     channelId: plugin.id,
-    accountId,
+    accountId: reconcileAccountId,
     runtime,
   });
 }

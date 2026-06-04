@@ -65,6 +65,20 @@ minimumReleaseAgeExclude:
 nodeLinker: hoisted
 blockExoticSubdeps: true
 
+# Restrict optional-dep / per-platform package fetches to what this build
+# actually needs. pnpm 11 reads these from pnpm-workspace.yaml only; the
+# equivalent `supportedArchitectures.*` keys in .npmrc are silently ignored.
+# Without this, install pulls win32 / darwin / non-current-arch binaries
+# (claude-agent-sdk-win32-*, lancedb-darwin-*, codex-*-darwin-*, etc.) and
+# wastes minutes of network on every container build.
+supportedArchitectures:
+  os:
+    - linux
+  cpu:
+    - current
+  libc:
+    - glibc
+
 overrides:
   "@anthropic-ai/sdk": 0.100.1
   "@aws-sdk/core": 3.974.13
