@@ -1750,6 +1750,42 @@ function createChatAbortOps(context: GatewayRequestContext): ChatAbortOps {
   };
 }
 
+// Abort every in-flight chat/agent run owned by a given WS connection. Used by the
+// connection layer to cancel a disconnected caller's unfinished work (after a grace
+// window). Re-checks ownerConnId per run before aborting: during the grace window a run
+// may have finished (removed from the registry) or been taken over by a same-device
+// reconnect (ownerConnId rewritten) — both are skipped so we never abort the wrong run.
+export function abortChatRunsByConnId(
+  context: GatewayRequestContext,
+  connId: string,
+  stopReason: string,
+): string[] {
+  const ops = createChatAbortOps(context);
+  // Snapshot runIds first so aborting (which mutates the registry) doesn't disturb iteration.
+  const targets: { runId: string; sessionKey: string }[] = [];
+  for (const [runId, entry] of context.chatAbortControllers) {
+    if (entry.ownerConnId === connId) {
+      targets.push({ runId, sessionKey: entry.sessionKey });
+    }
+  }
+  const aborted: string[] = [];
+  for (const target of targets) {
+    const current = context.chatAbortControllers.get(target.runId);
+    if (!current || current.ownerConnId !== connId) {
+      continue; // finished, or taken over by a reconnect
+    }
+    const res = abortChatRunById(ops, {
+      runId: target.runId,
+      sessionKey: current.sessionKey,
+      stopReason,
+    });
+    if (res.aborted) {
+      aborted.push(target.runId);
+    }
+  }
+  return aborted;
+}
+
 function normalizeOptionalText(value?: string | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed || undefined;

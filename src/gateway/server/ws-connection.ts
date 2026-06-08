@@ -25,6 +25,11 @@ import { clearNodeWakeState } from "../server-methods/nodes-wake-state.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "../server-methods/types.js";
 import { formatError } from "../server-utils.js";
 import { logWs } from "../ws-log.js";
+import {
+  cancelDisconnectRunAbortForDevice,
+  isDisconnectRunAbortEnabled,
+  scheduleDisconnectRunAbort,
+} from "./disconnect-run-abort.js";
 import { getHealthVersion, incrementPresenceVersion } from "./health-state.js";
 import type { PreauthConnectionBudget } from "./preauth-connection-budget.js";
 import { broadcastPresenceSnapshot } from "./presence-events.js";
@@ -172,6 +177,16 @@ export type AttachGatewayWsConnectionHandlerParams = GatewayWsSharedHandlerParam
     },
   ) => void;
   buildRequestContext: () => GatewayRequestContext;
+  /**
+   * Abort all in-flight runs owned by a disconnected connection. Injected (rather than
+   * imported) so the connection layer doesn't take a dependency on server-methods/chat.
+   * When absent, disconnect-driven abort is disabled. Returns the aborted runIds.
+   */
+  abortRunsForConn?: (
+    context: GatewayRequestContext,
+    connId: string,
+    stopReason: string,
+  ) => string[];
 };
 
 function attachGatewayWsMessageHandlerOnDemand(params: GatewayWsMessageHandlerParams): void {
@@ -238,6 +253,7 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
     getMethodRegistry,
     broadcast,
     buildRequestContext,
+    abortRunsForConn,
   } = params;
   const originCheckMetrics: WsOriginCheckMetrics = { hostHeaderFallbackAccepted: 0 };
 
@@ -438,6 +454,21 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
       }
       const context = buildRequestContext();
       context.unsubscribeAllSessionEvents(connId);
+      // 调用方断开 → 宽限后 abort 该连接还没跑完的 run(同 device 重连则取消接管)。默认开,可经
+      // OPENCLAW_ABORT_RUN_ON_DISCONNECT / *_GRACE_MS 调整(见 disconnect-run-abort)。
+      if (client && abortRunsForConn && isDisconnectRunAbortEnabled()) {
+        const abortRuns = abortRunsForConn;
+        scheduleDisconnectRunAbort({
+          connId,
+          deviceId: client.connect?.device?.id,
+          abort: () => {
+            const aborted = abortRuns(buildRequestContext(), connId, "disconnect");
+            if (aborted.length > 0) {
+              logWsControl.info(`aborted ${aborted.length} run(s) after disconnect conn=${connId}`);
+            }
+          },
+        });
+      }
       let currentDisconnectedNodeId: string | null = null;
       if (client?.connect?.role === "node") {
         currentDisconnectedNodeId = context.nodeRegistry.unregister(connId);
@@ -526,6 +557,8 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
         releasePreauthBudget();
         client = next;
         clients.add(next);
+        // 同 device 重连接管:取消该 device 之前断开时调度的 abort,让仍在跑的 run 继续。
+        cancelDisconnectRunAbortForDevice(next.connect?.device?.id);
         pingTimer = setInterval(() => {
           try {
             socket.ping();
