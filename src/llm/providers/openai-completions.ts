@@ -50,6 +50,16 @@ const LLM_FIRST_CHUNK_TIMEOUT_MS = (() => {
   return Number.isFinite(raw) && raw > 0 ? raw : 90_000;
 })();
 
+// 绝对墙钟上限:从「单次 LLM 流式调用」开始计时,无论期间是否在出字节,超过 timeoutMs 一律 abort
+// 底层 fetch + 抛错。这封死「慢速 hang」—— 上游每隔不到 idle 阈值挤一个字节,让首 chunk / idle
+// 超时永不触发,run 却被无限拖住。绝对上限不看活动,到点必停,把「无限等待」硬转成「超时异常退出」。
+// 注意:这是单次调用的墙钟,不是整个 run(一个 run 里工具循环会多次调用、各自重新计时),所以不影响
+// 多步长任务。默认 10 分钟,可经 env 调整;<=0 关闭(留给确有超长单次回复的部署放宽/关闭)。
+const LLM_ABSOLUTE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.OPENCLAW_LLM_ABSOLUTE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 600_000;
+})();
+
 function withFirstChunkTimeout<T>(
   stream: AsyncIterable<T> & { controller?: { abort?: () => void } },
   timeoutMs: number,
@@ -82,6 +92,44 @@ function withFirstChunkTimeout<T>(
         yield first.value;
         for (;;) {
           const next = await it.next();
+          if (next.done) return;
+          yield next.value;
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+  };
+}
+
+// 见 LLM_ABSOLUTE_TIMEOUT_MS。从流开始计一个不可重置的 deadline:到点 abort 底层 fetch 并抛错,
+// 不管期间是否在出字节。返回对象透传 controller,使外层(首 chunk 超时)仍能 abort 同一底层请求。
+function withAbsoluteTimeout<T>(
+  stream: AsyncIterable<T> & { controller?: { abort?: () => void } },
+  timeoutMs: number,
+  label: string,
+): AsyncIterable<T> & { controller?: { abort?: () => void } } {
+  if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) return stream;
+  return {
+    controller: stream.controller,
+    async *[Symbol.asyncIterator]() {
+      const it = stream[Symbol.asyncIterator]();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      // reject-only deadline:正常结束时 timer 被清、此 promise 永远 pending(不会 settle,无
+      // unhandled rejection);只有到点才 reject 并 abort 底层 fetch。
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          try {
+            stream.controller?.abort?.();
+          } catch {
+            /* ignore abort errors */
+          }
+          reject(new Error(`LLM stream exceeded absolute timeout ${timeoutMs}ms (${label})`));
+        }, timeoutMs);
+      });
+      try {
+        for (;;) {
+          const next = await Promise.race([it.next(), deadline]);
           if (next.done) return;
           yield next.value;
         }
@@ -373,7 +421,8 @@ export const streamOpenAICompletions: StreamFunction<
       };
 
       for await (const chunk of withFirstChunkTimeout(
-        openaiStream,
+        // 内层先套绝对墙钟(透传 controller),外层再套首 chunk 超时;两者 abort 同一底层 fetch。
+        withAbsoluteTimeout(openaiStream, LLM_ABSOLUTE_TIMEOUT_MS, `${model.provider}/${model.id}`),
         LLM_FIRST_CHUNK_TIMEOUT_MS,
         `${model.provider}/${model.id}`,
       )) {
