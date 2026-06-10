@@ -99,6 +99,18 @@ function normalizeLockfilePackageKey(key) {
   return (key.startsWith("/") ? key.slice(1) : key).replace(/\(.+\)$/, "");
 }
 
+function packageSpecFromLockfileKey(key) {
+  const normalizedKey = normalizeLockfilePackageKey(key);
+  if (!normalizedKey) {
+    return undefined;
+  }
+  const separator = normalizedKey.lastIndexOf("@");
+  if (separator <= 0) {
+    return undefined;
+  }
+  return packageSpec(normalizedKey.slice(0, separator), normalizedKey.slice(separator + 1));
+}
+
 function snapshotForSpec(lockfile, spec) {
   const snapshots = lockfile?.snapshots;
   if (!snapshots) {
@@ -188,7 +200,7 @@ function addSnapshotClosure(lockfile) {
         return;
       }
       if (!packageMatchesBuildPlatform(packages[depSpec])) {
-        continue;
+        return;
       }
       specs.add(depSpec);
       pending.push(depSpec);
@@ -206,6 +218,7 @@ const lockfile = readLockfile();
 for (const root of roots) {
   visitListNode(lockfile, root);
 }
+addLockfilePackages(lockfile);
 addSnapshotClosure(lockfile);
 
 process.stdout.write([...specs].toSorted((a, b) => a.localeCompare(b)).join("\n"));
