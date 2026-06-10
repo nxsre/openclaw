@@ -23,7 +23,7 @@ import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommandFromIngress } from "../commands/agent.js";
 import type { GatewayHttpChatCompletionsConfig } from "../config/types.gateway.js";
 import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
-import { logWarn } from "../logger.js";
+import { logInfo, logWarn } from "../logger.js";
 import {
   DEFAULT_INPUT_IMAGE_MAX_BYTES,
   DEFAULT_INPUT_IMAGE_MIMES,
@@ -42,6 +42,7 @@ import {
 } from "./agent-prompt.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
+import { getHeader } from "./http-auth-utils.js";
 import { sendJson, setSseHeaders, watchClientDisconnect, writeDone } from "./http-common.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import {
@@ -983,7 +984,24 @@ export async function handleOpenAiHttpRequest(
   }
   const activeTurnContext = resolveActiveTurnContext(payload.messages);
   const prompt = buildAgentPrompt(payload.messages, activeTurnContext.activeUserMessageIndex);
-  let resolvedClientTools: ClientToolDefinition[];
+  // xcph: 把进入网关的「用户输入」(含语音 STT 转写文本)打到网关日志,便于在
+  // `docker compose logs -f openclaw-gateway-supervised` 里看到语音输入内容。
+  // 工具调用过程由各插件自行打日志(如 xim 的 `🔧 工具 openim_send_*`)。
+  try {
+    const _msgs = asMessages(payload.messages);
+    const _uIdx = activeTurnContext.activeUserMessageIndex;
+    const _userText = _uIdx >= 0 ? extractTextContent(_msgs[_uIdx]?.content).trim() : "";
+    const _imgN = activeTurnContext.urls.length;
+    const _toolN = Array.isArray(payload.tools) ? payload.tools.length : 0;
+    logInfo(
+      `[chat] agent=${agentId} model=${model} 输入「${_userText.slice(0, 300)}${
+        _userText.length > 300 ? "…" : ""
+      }」${_imgN ? ` +${_imgN}图` : ""}${_toolN ? ` tools=${_toolN}` : ""}`,
+    );
+  } catch {
+    // 日志不影响主流程
+  }
+  let resolvedClientTools: ClientToolDefinition[] = [];
   let toolChoicePrompt: string | undefined;
   let toolChoiceConstraint: ToolChoiceConstraint | undefined;
   try {
@@ -1191,11 +1209,54 @@ export async function handleOpenAiHttpRequest(
     maybeFinalize();
   };
 
+  // xcph: 语音链路(voice-agent-go)设 `x-openclaw-progress: 1` 时,把工具调用进度也
+  // 顺着 SSE 吐出来(非标准 chunk,标准 OpenAI 客户端忽略),好让客户端把「正在调用 X」
+  // 这类进度实时投到 IM 聊天框(思考文本走 assistant delta,已在下面流式)。
+  const emitProgress = getHeader(req, "x-openclaw-progress") === "1";
   const unsubscribe = onAgentEvent((evt) => {
     if (evt.runId !== runId) {
       return;
     }
     if (closed) {
+      return;
+    }
+
+    if (emitProgress && evt.stream === "item") {
+      const d = (evt as { data?: Record<string, unknown> }).data ?? {};
+      // 透传完整 item 结构(AgentItemEventData)+ run 级字段(runId/seq/ts/sessionKey),
+      // 客户端据此组织结构化、可扩展的 IM 消息(非标准 chunk,标准 OpenAI 客户端忽略)。
+      // 仅 phase=start 投一条进度气泡(避免每个工具 start+end 刷两条)。
+      if (d.kind === "tool" && d.phase === "start") {
+        writeSse(res, {
+          x_openclaw_progress: {
+            runId: evt.runId,
+            sessionKey: evt.sessionKey,
+            seq: evt.seq,
+            ts: evt.ts,
+            stream: "item",
+            item: d,
+          },
+        });
+      }
+      return;
+    }
+
+    if (emitProgress && evt.stream === "thinking") {
+      // 思考(reasoning)流:逐 delta 顺 SSE 吐出,客户端累积成一条「思考」消息(供调试)。
+      const d = (evt as { data?: Record<string, unknown> }).data ?? {};
+      const delta = typeof d.delta === "string" ? d.delta : "";
+      if (delta) {
+        writeSse(res, {
+          x_openclaw_progress: {
+            runId: evt.runId,
+            sessionKey: evt.sessionKey,
+            seq: evt.seq,
+            ts: evt.ts,
+            stream: "thinking",
+            delta,
+          },
+        });
+      }
       return;
     }
 

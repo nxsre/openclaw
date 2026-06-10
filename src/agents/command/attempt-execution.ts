@@ -6,6 +6,7 @@ import { sanitizeForLog } from "../../../packages/terminal-core/src/ansi.js";
 import { formatAcpErrorChain } from "../../acp/runtime/errors.js";
 import { normalizeReplyPayload } from "../../auto-reply/reply/normalize-reply.js";
 import type { ThinkLevel, VerboseLevel } from "../../auto-reply/thinking.js";
+import type { ReasoningLevel } from "../../auto-reply/thinking.js";
 import { appendSessionTranscriptMessage } from "../../config/sessions/transcript-append.js";
 import {
   readTailAssistantTextFromSessionTranscript,
@@ -442,6 +443,7 @@ export function runAgentAttempt(params: {
   body: string;
   isFallbackRetry: boolean;
   resolvedThinkLevel: ThinkLevel;
+  resolvedReasoningLevel?: ReasoningLevel;
   fastMode?: boolean;
   timeoutMs: number;
   runId: string;
@@ -722,6 +724,7 @@ export function runAgentAttempt(params: {
     authProfileId,
     authProfileIdSource: authProfileId ? harnessAuthSelection.authProfileIdSource : undefined,
     thinkLevel: params.resolvedThinkLevel,
+    reasoningLevel: params.resolvedReasoningLevel,
     fastMode: params.fastMode,
     verboseLevel: params.resolvedVerboseLevel,
     bashElevated: params.opts.bashElevated,

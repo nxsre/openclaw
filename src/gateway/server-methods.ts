@@ -486,6 +486,11 @@ export const coreGatewayHandlers: GatewayRequestHandlers = {
       "sessions.delete",
       "sessions.get",
       "sessions.compact",
+      // 这两个方法 sessionsHandlers 里有定义、core-descriptors 里也列了,但之前漏在
+      // 这份懒注册列表外 → getHandler 取不到 → 客户端订阅 thinking 流时 "unknown method"。
+      // demo-app 靠 sessions.thinking.subscribe 拿实时思考流,缺它就退化到 OpenIM 轮询(不流式)。
+      "sessions.thinking.subscribe",
+      "sessions.thinking.unsubscribe",
     ],
     loadHandlers: loadSessionsHandlers,
   }),

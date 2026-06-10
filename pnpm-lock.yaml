@@ -1732,6 +1732,12 @@ importers:
         specifier: 8.21.0
         version: 8.21.0
 
+  extensions/xfyun:
+    devDependencies:
+      '@openclaw/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+
   extensions/xiaomi:
     devDependencies:
       '@openclaw/plugin-sdk':

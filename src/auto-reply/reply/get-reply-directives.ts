@@ -475,7 +475,18 @@ export async function resolveReplyDirectives(params: {
     configuredReasoningDefault != null;
   let resolvedReasoningLevel: ReasoningLevel =
     directives.reasoningLevel ?? sessionReasoningLevel ?? configuredReasoningDefault ?? "off";
-  if (reasoningUsesConfiguredDefault && !canUseReasoningState) {
+  // Original code forced "off" for unauthenticated senders even when the
+  // operator had set `agents.defaults.reasoningDefault` deliberately. That
+  // policy makes sense for chat.send from arbitrary users, but for channel-
+  // driven runs (OpenIM / QQ / Weixin etc.) the config is set by the operator
+  // and should be honored. Restrict the override-to-off only when configured
+  // default is "stream" — the "stream" mode is visibility-only over reasoning
+  // tokens that already get spent regardless.
+  if (
+    reasoningUsesConfiguredDefault &&
+    !canUseReasoningState &&
+    configuredReasoningDefault !== "stream"
+  ) {
     resolvedReasoningLevel = "off";
   }
   const resolvedElevatedLevel = elevatedAllowed

@@ -122,6 +122,7 @@ export async function createGatewayRuntimeState(params: {
   ) => ChatRunEntry | undefined;
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   toolEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
+  thinkingEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
 }> {
   pinActivePluginHttpRouteRegistry(params.pluginRegistry);
   if (params.pinChannelRegistry !== false) {
@@ -337,6 +338,7 @@ export async function createGatewayRuntimeState(params: {
     const removeChatRun = chatRunRegistry.remove;
     const chatAbortControllers = new Map<string, ChatAbortControllerEntry>();
     const toolEventRecipients = createToolEventRecipientRegistry();
+    const thinkingEventRecipients = createToolEventRecipientRegistry();
 
     return {
       releasePluginRouteRegistry: () => {
@@ -370,6 +372,7 @@ export async function createGatewayRuntimeState(params: {
       removeChatRun,
       chatAbortControllers,
       toolEventRecipients,
+      thinkingEventRecipients,
     };
   } catch (err) {
     // If state creation fails after pins are installed, release them immediately so later

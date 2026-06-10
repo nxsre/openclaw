@@ -425,6 +425,83 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
     }
   };
 
+  const stopRemovedChannelAccounts = async (
+    channelId: ChannelId,
+    store: ChannelRuntimeStore,
+    activeAccountIds: readonly string[],
+  ): Promise<void> => {
+    const plugin = getChannelPlugin(channelId);
+    if (!plugin?.gateway?.startAccount) {
+      return;
+    }
+    const active = new Set(activeAccountIds);
+    const staleIds = [
+      ...new Set([...store.tasks.keys(), ...store.aborts.keys(), ...store.starting.keys()]),
+    ].filter((id) => !active.has(id));
+    if (staleIds.length === 0) {
+      return;
+    }
+
+    const cfg = getRuntimeConfig();
+    const log = ensureChannelLog(channelId);
+    log.info?.(
+      `[${channelId}] stopping ${staleIds.length} removed account task(s): ${staleIds.join(", ")}`,
+    );
+
+    await Promise.all(
+      staleIds.map(async (id) => {
+        const rKey = restartKey(channelId, id);
+        manuallyStopped.add(rKey);
+        const abort = store.aborts.get(id);
+        const task = store.tasks.get(id);
+        abort?.abort();
+        const runtime = ensureChannelRuntime(channelId);
+        if (plugin.gateway?.stopAccount) {
+          try {
+            const account = plugin.config.resolveAccount(cfg, id);
+            await plugin.gateway.stopAccount({
+              cfg,
+              accountId: id,
+              account,
+              runtime,
+              abortSignal: abort?.signal ?? new AbortController().signal,
+              log,
+              getStatus: () => getRuntime(channelId, id),
+              setStatus: (next) => setRuntime(channelId, id, next),
+            });
+          } catch (err) {
+            log.warn?.(
+              `[${id}] stopAccount while stopping removed account failed: ${formatErrorMessage(err)}`,
+            );
+          }
+        }
+        const stoppedCleanly = await waitForChannelStopGracefully(
+          task,
+          CHANNEL_STOP_ABORT_TIMEOUT_MS,
+        );
+        if (!stoppedCleanly) {
+          log.warn?.(
+            `[${id}] removed-account stop exceeded ${CHANNEL_STOP_ABORT_TIMEOUT_MS}ms after abort`,
+          );
+        }
+        store.aborts.delete(id);
+        store.tasks.delete(id);
+        store.starting.delete(id);
+        recoveryStopTimedOut.delete(rKey);
+        restartAttempts.delete(rKey);
+        setRuntime(channelId, id, {
+          accountId: id,
+          running: false,
+          restartPending: false,
+          lastStopAt: Date.now(),
+          ...(stoppedCleanly
+            ? {}
+            : { lastError: `channel stop timed out after ${CHANNEL_STOP_ABORT_TIMEOUT_MS}ms` }),
+        });
+      }),
+    );
+  };
+
   const startChannelInternal = async (
     channelId: ChannelId,
     accountId?: string,
@@ -439,13 +516,16 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
     const cfg = getRuntimeConfig();
     resetDirectoryCache({ channel: channelId, accountId });
     const store = getStore(channelId);
-    const accountIds = accountId
-      ? [accountId]
-      : await measureStartup(`channels.${channelId}.list-accounts`, () =>
-          plugin.config.listAccountIds(cfg),
-        );
-    if (!accountId) {
-      evictStaleChannelAccountState(channelId, store, accountIds);
+    let accountIds: readonly string[];
+    if (accountId) {
+      accountIds = [accountId];
+    } else {
+      const listedIds = await measureStartup(`channels.${channelId}.list-accounts`, () =>
+        plugin.config.listAccountIds(cfg),
+      );
+      await stopRemovedChannelAccounts(channelId, store, listedIds);
+      evictStaleChannelAccountState(channelId, store, listedIds);
+      accountIds = listedIds;
     }
     if (accountIds.length === 0) {
       return;
@@ -689,6 +769,24 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
                 } catch {
                   // abort or startup failure — runtime state was recorded by startChannelInternal
                 }
+                return;
+              }
+              const cfgNow = getRuntimeConfig();
+              let listedNow: readonly string[] = [];
+              try {
+                listedNow = await Promise.resolve(plugin.config.listAccountIds(cfgNow));
+              } catch {
+                listedNow = [];
+              }
+              if (manuallyStopped.has(rKey)) {
+                return;
+              }
+              if (!listedNow.includes(id)) {
+                restartAttempts.delete(rKey);
+                recoveryStopTimedOut.delete(rKey);
+                log.info?.(
+                  `[${id}] skipping auto-restart (account no longer listed for ${channelId})`,
+                );
                 return;
               }
               const attempt = (restartAttempts.get(rKey) ?? 0) + 1;

@@ -246,6 +246,14 @@ export function emitAgentEvent(event: Omit<AgentEventPayload, "seq" | "ts">) {
   if (context) {
     context.lastActiveAt = Date.now();
   }
+  // ── [trace-firstbyte] 打点 lifecycle event 流(start / step / end / error) ──
+  // 配合 plugin 侧记录 thinking 首帧时间,可以拼出完整 first-token 时序。
+  if (event.stream === "lifecycle") {
+    const phase = (event.data as { phase?: unknown })?.phase;
+    console.info(
+      `[trace-firstbyte] T-lifecycle/${String(phase)} run=${event.runId.slice(0, 8)} ts=${Date.now()}`,
+    );
+  }
   const isControlUiVisible = context?.isControlUiVisible ?? true;
   const eventSessionKey =
     typeof event.sessionKey === "string" && event.sessionKey.trim() ? event.sessionKey : undefined;

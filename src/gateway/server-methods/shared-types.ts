@@ -117,9 +117,17 @@ export type GatewayRequestContext = {
   unsubscribeSessionEvents: (connId: string) => void;
   subscribeSessionMessageEvents: (connId: string, sessionKey: string) => void;
   unsubscribeSessionMessageEvents: (connId: string, sessionKey: string) => void;
+  /**
+   * Subscribe to `stream:"thinking"` agent events for any run that targets
+   * the given sessionKey. Used by operator UIs and channel-driven clients
+   * that want thinking deltas without knowing run IDs in advance.
+   */
+  subscribeThinkingSessionEvents: (connId: string, sessionKey: string) => void;
+  unsubscribeThinkingSessionEvents: (connId: string, sessionKey: string) => void;
   unsubscribeAllSessionEvents: (connId: string) => void;
   getSessionEventSubscriberConnIds: () => ReadonlySet<string>;
   registerToolEventRecipient: (runId: string, connId: string) => void;
+  registerThinkingEventRecipient: (runId: string, connId: string) => void;
   dedupe: Map<string, DedupeEntry>;
   wizardSessions: Map<string, WizardSession>;
   findRunningWizard: () => string | null;

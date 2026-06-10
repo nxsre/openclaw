@@ -40,7 +40,11 @@ vi.mock("openai", () => {
   return { default: MockOpenAI };
 });
 
-import { streamOpenAICompletions, streamSimpleOpenAICompletions } from "./openai-completions.js";
+import {
+  convertMessages,
+  streamOpenAICompletions,
+  streamSimpleOpenAICompletions,
+} from "./openai-completions.js";
 
 const model = {
   id: "gpt-5.5",
@@ -735,5 +739,37 @@ describe("openai-completions stop-reason tool-call guard", () => {
 
     expect(result.stopReason).toBe("stop");
     expect(result.content.filter((b) => b.type === "toolCall")).toStrictEqual([]);
+  });
+});
+
+describe("convertMessages — image input gating", () => {
+  const imageMessages = {
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look at this" },
+          { type: "image", mimeType: "image/png", data: "QUJD" },
+        ],
+        timestamp: 1,
+      },
+    ],
+  } as unknown as Context;
+
+  it("strips images to a text placeholder for text-only models", () => {
+    const out = convertMessages(model, imageMessages, {} as never); // model.input = ["text"]
+    const user = out.find((m) => m.role === "user")!;
+    const parts = user.content as Array<{ type: string; text?: string }>;
+    expect(parts.some((p) => p.type === "image_url")).toBe(false);
+    expect(parts.some((p) => p.type === "text" && /image omitted/i.test(p.text ?? ""))).toBe(true);
+  });
+
+  it("keeps images for image-capable models", () => {
+    const visionModel = { ...model, input: ["text", "image"] } as typeof model;
+    const out = convertMessages(visionModel, imageMessages, {} as never);
+    const user = out.find((m) => m.role === "user")!;
+    expect((user.content as Array<{ type: string }>).some((p) => p.type === "image_url")).toBe(
+      true,
+    );
   });
 });

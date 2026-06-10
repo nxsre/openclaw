@@ -74,6 +74,8 @@ export type GatewayClientInfo = {
 /** Capability flags a client may advertise during the gateway handshake. */
 export const GATEWAY_CLIENT_CAPS = {
   TOOL_EVENTS: "tool-events",
+  /** Control UI / gateway clients that want `agent` WS events with `stream: "thinking"`. */
+  THINKING_EVENTS: "thinking-events",
 } as const;
 
 /** Optional capability advertised by clients during gateway handshake. */

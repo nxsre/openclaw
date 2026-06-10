@@ -52,9 +52,12 @@ export type GatewayRequestContextParams = {
   unsubscribeSessionEvents: GatewayRequestContext["unsubscribeSessionEvents"];
   subscribeSessionMessageEvents: GatewayRequestContext["subscribeSessionMessageEvents"];
   unsubscribeSessionMessageEvents: GatewayRequestContext["unsubscribeSessionMessageEvents"];
+  subscribeThinkingSessionEvents: GatewayRequestContext["subscribeThinkingSessionEvents"];
+  unsubscribeThinkingSessionEvents: GatewayRequestContext["unsubscribeThinkingSessionEvents"];
   unsubscribeAllSessionEvents: GatewayRequestContext["unsubscribeAllSessionEvents"];
   getSessionEventSubscriberConnIds: GatewayRequestContext["getSessionEventSubscriberConnIds"];
   registerToolEventRecipient: GatewayRequestContext["registerToolEventRecipient"];
+  registerThinkingEventRecipient: GatewayRequestContext["registerThinkingEventRecipient"];
   dedupe: GatewayRequestContext["dedupe"];
   wizardSessions: GatewayRequestContext["wizardSessions"];
   findRunningWizard: GatewayRequestContext["findRunningWizard"];
@@ -193,9 +196,12 @@ export function createGatewayRequestContext(
     unsubscribeSessionEvents: params.unsubscribeSessionEvents,
     subscribeSessionMessageEvents: params.subscribeSessionMessageEvents,
     unsubscribeSessionMessageEvents: params.unsubscribeSessionMessageEvents,
+    subscribeThinkingSessionEvents: params.subscribeThinkingSessionEvents,
+    unsubscribeThinkingSessionEvents: params.unsubscribeThinkingSessionEvents,
     unsubscribeAllSessionEvents: params.unsubscribeAllSessionEvents,
     getSessionEventSubscriberConnIds: params.getSessionEventSubscriberConnIds,
     registerToolEventRecipient: params.registerToolEventRecipient,
+    registerThinkingEventRecipient: params.registerThinkingEventRecipient,
     dedupe: params.dedupe,
     wizardSessions: params.wizardSessions,
     findRunningWizard: params.findRunningWizard,

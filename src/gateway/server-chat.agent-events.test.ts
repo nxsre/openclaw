@@ -95,6 +95,7 @@ describe("agent event handler", () => {
     const agentRunSeq = new Map<string, number>();
     const chatRunState = createChatRunState();
     const toolEventRecipients = createToolEventRecipientRegistry();
+    const thinkingEventRecipients = createToolEventRecipientRegistry();
     const sessionEventSubscribers = createSessionEventSubscriberRegistry();
     const sessionMessageSubscribers = createSessionMessageSubscriberRegistry();
 
@@ -107,6 +108,7 @@ describe("agent event handler", () => {
       resolveSessionKeyForRun: params?.resolveSessionKeyForRun ?? (() => undefined),
       clearAgentRunContext,
       toolEventRecipients,
+      thinkingEventRecipients,
       sessionEventSubscribers,
       sessionMessageSubscribers,
       loadGatewaySessionRowForSnapshot: loadGatewaySessionRow,
@@ -125,6 +127,7 @@ describe("agent event handler", () => {
       agentRunSeq,
       chatRunState,
       toolEventRecipients,
+      thinkingEventRecipients,
       sessionEventSubscribers,
       sessionMessageSubscribers,
       handler,
@@ -155,6 +158,10 @@ describe("agent event handler", () => {
 
   function agentBroadcastCalls(broadcast: ReturnType<typeof vi.fn>) {
     return broadcast.mock.calls.filter(([event]) => event === "agent");
+  }
+
+  function agentBroadcastToConnCalls(broadcastToConnIds: ReturnType<typeof vi.fn>) {
+    return broadcastToConnIds.mock.calls.filter(([event]) => event === "agent");
   }
 
   function sessionChatCalls(nodeSendToSession: ReturnType<typeof vi.fn>) {
@@ -543,11 +550,19 @@ describe("agent event handler", () => {
   it("flushes older cross-stream agent deltas before immediate text", () => {
     let now = 23_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
-    const { broadcast, nodeSendToSession, chatRunState, handler } = createHarness();
+    const {
+      broadcast,
+      broadcastToConnIds,
+      nodeSendToSession,
+      chatRunState,
+      thinkingEventRecipients,
+      handler,
+    } = createHarness();
     chatRunState.registry.add("run-agent-cross-stream", {
       sessionKey: "session-agent-cross-stream",
       clientRunId: "client-agent-cross-stream",
     });
+    thinkingEventRecipients.add("run-agent-cross-stream", "conn-thinking");
 
     handler({
       runId: "run-agent-cross-stream",
@@ -573,15 +588,17 @@ describe("agent event handler", () => {
       data: { text: "Answer", delta: "Answer" },
     });
 
-    const agentCalls = agentBroadcastCalls(broadcast);
-    expect(agentCalls.map(([, payload]) => (payload as { seq?: number }).seq)).toEqual([1, 2, 3]);
-    expect(agentCalls.map(([, payload]) => (payload as { stream?: string }).stream)).toEqual([
+    const thinkingCalls = agentBroadcastToConnCalls(broadcastToConnIds);
+    expect(thinkingCalls.map(([, payload]) => (payload as { seq?: number }).seq)).toEqual([1, 2]);
+    expect(thinkingCalls.map(([, payload]) => (payload as { stream?: string }).stream)).toEqual([
       "thinking",
       "thinking",
-      "assistant",
     ]);
-    expect((agentCalls[1][1] as { data?: { delta?: string } }).data?.delta).toBe("ing");
-    expect(sessionAgentCalls(nodeSendToSession)).toHaveLength(3);
+    expect((thinkingCalls[1]?.[1] as { data?: { delta?: string } }).data?.delta).toBe("ing");
+    const agentCalls = agentBroadcastCalls(broadcast);
+    expect(agentCalls).toHaveLength(1);
+    expect((agentCalls[0]?.[1] as { stream?: string }).stream).toBe("assistant");
+    expect(sessionAgentCalls(nodeSendToSession)).toHaveLength(1);
     nowSpy.mockRestore();
   });
 
@@ -618,14 +635,21 @@ describe("agent event handler", () => {
     nowSpy.mockRestore();
   });
 
-  it("coalesces thinking agent events under the chat delta throttle", () => {
+  it("delivers thinking agent events immediately to registered recipients", () => {
     let now = 27_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
-    const { broadcast, nodeSendToSession, chatRunState, handler } = createHarness();
+    const {
+      broadcastToConnIds,
+      nodeSendToSession,
+      chatRunState,
+      thinkingEventRecipients,
+      handler,
+    } = createHarness();
     chatRunState.registry.add("run-agent-thinking", {
       sessionKey: "session-agent-thinking",
       clientRunId: "client-agent-thinking",
     });
+    thinkingEventRecipients.add("run-agent-thinking", "conn-thinking");
 
     for (let i = 0; i < 5; i += 1) {
       now = 27_000 + i * 20;
@@ -638,11 +662,11 @@ describe("agent event handler", () => {
       });
     }
 
-    const agentCalls = agentBroadcastCalls(broadcast);
-    expect(agentCalls).toHaveLength(1);
-    expect(sessionAgentCalls(nodeSendToSession)).toHaveLength(1);
-    expect((agentCalls[0][1] as { stream?: string }).stream).toBe("thinking");
-    expect((agentCalls[0][1] as { data?: { text?: string } }).data?.text).toBe("t");
+    const thinkingCalls = agentBroadcastToConnCalls(broadcastToConnIds);
+    expect(thinkingCalls).toHaveLength(5);
+    expect(nodeSendToSession).not.toHaveBeenCalled();
+    expect((thinkingCalls[0]?.[1] as { stream?: string }).stream).toBe("thinking");
+    expect((thinkingCalls[0]?.[1] as { data?: { text?: string } }).data?.text).toBe("t");
     nowSpy.mockRestore();
   });
 
@@ -1365,6 +1389,31 @@ describe("agent event handler", () => {
 
     expect(broadcast).not.toHaveBeenCalled();
     expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
+    resetAgentRunContextForTest();
+  });
+
+  it("routes thinking events only to registered thinking recipients", () => {
+    const { broadcast, broadcastToConnIds, nodeSendToSession, thinkingEventRecipients, handler } =
+      createHarness({
+        resolveSessionKeyForRun: () => "session-1",
+      });
+
+    registerAgentRunContext("run-thinking", { sessionKey: "session-1", verboseLevel: "on" });
+    thinkingEventRecipients.add("run-thinking", "conn-thinking");
+
+    handler({
+      runId: "run-thinking",
+      seq: 1,
+      stream: "thinking",
+      ts: Date.now(),
+      data: { text: "reasoning chunk" },
+    });
+
+    expect(broadcast).not.toHaveBeenCalled();
+    expect(nodeSendToSession).not.toHaveBeenCalled();
+    expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
+    expect(broadcastToConnIds.mock.calls[0]?.[0]).toBe("agent");
+    expect(broadcastToConnIds.mock.calls[0]?.[2]).toEqual(new Set(["conn-thinking"]));
     resetAgentRunContextForTest();
   });
 

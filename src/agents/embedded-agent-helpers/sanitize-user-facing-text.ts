@@ -15,6 +15,8 @@ import {
   MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE,
   parseApiErrorInfo,
   parseApiErrorPayload,
+  userFacingFallbackText,
+  applyFallbackVars,
 } from "../../shared/assistant-error-format.js";
 import { coerceChatContentText } from "../../shared/chat-content.js";
 import {
@@ -434,6 +436,13 @@ export function sanitizeUserFacingText(text: unknown, opts?: { errorContext?: bo
     return formatRawAssistantErrorForUi(trimmed);
   }
   if (errorContext) {
+    // XCPH: OPENCLAW_LLM_ERROR_FALLBACK_TEXT 已设 → 任意 LLM 错误清洗成统一兜底文案。
+    // 覆盖所有 channel auto-reply 路径（微信 / QQ / NIM / OpenIM / 飞书）的错误返回。
+    // 详情仍在 provider-http-error 日志可查。
+    const fallback = userFacingFallbackText();
+    if (fallback !== null) {
+      return applyFallbackVars(fallback, trimmed);
+    }
     const execDeniedMessage = formatExecDeniedUserMessage(trimmed);
     if (execDeniedMessage) {
       return execDeniedMessage;

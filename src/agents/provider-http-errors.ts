@@ -8,11 +8,18 @@ export { asFiniteNumber } from "../../packages/normalization-core/src/number-coe
 import { readResponseWithLimit } from "@openclaw/media-core/read-response-with-limit";
 import { normalizeOptionalString as trimToUndefined } from "../../packages/normalization-core/src/string-coerce.js";
 import { redactSensitiveText } from "../logging/redact.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 export { asBoolean } from "../utils/boolean.js";
 export { normalizeOptionalString as trimToUndefined } from "../../packages/normalization-core/src/string-coerce.js";
+import {
+  isModelHttpErrorBodyDebugEnabled,
+  resolveModelHttpErrorBodyReadLimitBytes,
+  shouldRedactModelHttpErrorBody,
+} from "./model-transport-debug.js";
 
 const ERROR_BODY_METADATA_LIMIT = 500;
 const PROVIDER_BINARY_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
+const providerHttpErrorLog = createSubsystemLogger("provider-http-error");
 
 /** Returns a plain object view for provider JSON payloads when one exists. */
 export function asObject(value: unknown): Record<string, unknown> | undefined {
@@ -32,6 +39,86 @@ export function redactProviderErrorBody(body: string): string {
 }
 
 /** Reads at most `limitBytes` from a response body without buffering provider-sized failures. */
+function formatProviderHttpErrorBodyForDebug(body: string, limitBytes: number): string {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const normalized = shouldRedactModelHttpErrorBody() ? redactSensitiveText(trimmed) : trimmed;
+  if (normalized.length <= limitBytes) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, limitBytes - 14))}…[truncated]`;
+}
+
+export type ProviderHttpErrorLogContext = {
+  label: string;
+  status: number;
+  url?: string;
+  contentType?: string;
+  requestId?: string;
+};
+
+function emitProviderHttpErrorBodyLog(body: string, context: ProviderHttpErrorLogContext): void {
+  const limitBytes = resolveModelHttpErrorBodyReadLimitBytes();
+  const formatted = formatProviderHttpErrorBodyForDebug(body, limitBytes);
+  const parts = [
+    `[provider-http-error] ${context.label} status=${context.status}`,
+    context.url ? `url=${context.url}` : undefined,
+    context.contentType ? `contentType=${context.contentType}` : undefined,
+    context.requestId ? `requestId=${context.requestId}` : undefined,
+    `bodyBytes=${body.length}`,
+    formatted ? `body=${formatted}` : "body=<empty>",
+  ].filter((part): part is string => Boolean(part));
+  providerHttpErrorLog.info(parts.join(" "));
+}
+
+function isNonOkHttpStatus(status: number): boolean {
+  return status < 200 || status >= 300;
+}
+
+export async function maybeLogProviderHttpErrorResponse(
+  response: Response,
+  context: Omit<ProviderHttpErrorLogContext, "status" | "contentType" | "requestId"> & {
+    status?: number;
+  },
+): Promise<void> {
+  if (!isModelHttpErrorBodyDebugEnabled()) {
+    return;
+  }
+  const status = context.status ?? response.status;
+  if (!isNonOkHttpStatus(status)) {
+    return;
+  }
+  try {
+    const limitBytes = resolveModelHttpErrorBodyReadLimitBytes();
+    const rawBody = await readResponseTextLimited(response.clone(), limitBytes + 1);
+    emitProviderHttpErrorBodyLog(rawBody, {
+      label: context.label,
+      status,
+      url: context.url,
+      contentType: response.headers.get("content-type") ?? undefined,
+      requestId: extractProviderRequestId(response),
+    });
+  } catch {
+    providerHttpErrorLog.info(
+      `[provider-http-error] ${context.label} status=${status} body=<read_failed>`,
+    );
+  }
+}
+
+export function maybeLogProviderHttpErrorBodyText(
+  context: ProviderHttpErrorLogContext & { body: string },
+): void {
+  if (!isModelHttpErrorBodyDebugEnabled()) {
+    return;
+  }
+  if (!isNonOkHttpStatus(context.status)) {
+    return;
+  }
+  emitProviderHttpErrorBodyLog(context.body, context);
+}
+
 export async function readResponseTextLimited(
   response: Response,
   limitBytes = 16 * 1024,

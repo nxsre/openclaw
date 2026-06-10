@@ -479,14 +479,22 @@ function resolveStalledEmbeddedRunAbortMs(stuckSessionWarnMs: number): number {
 
 function isStalledEmbeddedRunRecoveryEligible(params: {
   classification: SessionAttentionClassification | undefined;
-  ageMs: number;
+  activity?: DiagnosticSessionActivitySnapshot;
   stuckSessionAbortMs: number;
 }): boolean {
+  // 用 run 自身的「无进展时长」(lastProgressAgeMs) 判定,而非 session age。session age 会被
+  // 持续到来的新消息(排队进 processing)反复刷新 —— 通话里用户不停说话、STT 不停注入,age 永远
+  // 够不到 abort 阈值,卡死的 embedded run 因此永不被中止、堵死整条会话。lastProgressAgeMs 只
+  // 反映这个 run 多久没产出进展,不受排队刷新影响(与 blocked_tool_call / stalled_model_call
+  // 两条恢复判定保持一致)。activeWorkKind=embedded_run 表示当前没有进行中的 model_call(否则归
+  // model_call 那条),即 LLM 流已断/结束而 run 卡住未推进 —— 正是应当 abort 的情形。
+  const lastProgressAgeMs = params.activity?.lastProgressAgeMs;
   return (
     params.classification?.eventType === "session.stalled" &&
     params.classification.classification === "stalled_agent_run" &&
     params.classification.activeWorkKind === "embedded_run" &&
-    params.ageMs >= params.stuckSessionAbortMs
+    typeof lastProgressAgeMs === "number" &&
+    lastProgressAgeMs >= params.stuckSessionAbortMs
   );
 }
 

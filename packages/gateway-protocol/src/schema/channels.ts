@@ -844,6 +844,8 @@ export const WebLoginWaitParamsSchema = Type.Object(
   {
     timeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
     accountId: Type.Optional(Type.String()),
+    /** Forwarded to channels that key QR sessions by UUID (e.g. openclaw-weixin bind-new). */
+    sessionKey: Type.Optional(Type.String({ maxLength: 512 })),
     currentQrDataUrl: Type.Optional(QrDataUrlSchema),
   },
   { additionalProperties: false },

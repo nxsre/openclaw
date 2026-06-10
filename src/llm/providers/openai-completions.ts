@@ -46,6 +46,105 @@ import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.js";
 import { buildBaseOptions } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
+// 首 chunk 超时:LLM 流式请求在 timeoutMs 内没拿到第一个 chunk(上游半开/卡住)→ 主动
+// abort 底层 fetch + 抛错,让 embedded run 立刻失败、释放 session 锁。否则一个挂死的请求会
+// 永久占着 session 锁(stuck-session 恢复也 abort 不掉无超时的 socket 读)→ 卡死整条会话。
+// 首 chunk 到达后即停止计时,不影响长流(长思考/长回答)。可经 env 调整,默认 90s。
+const LLM_FIRST_CHUNK_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.OPENCLAW_LLM_FIRST_CHUNK_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 90_000;
+})();
+
+// 绝对墙钟上限:从「单次 LLM 流式调用」开始计时,无论期间是否在出字节,超过 timeoutMs 一律 abort
+// 底层 fetch + 抛错。这封死「慢速 hang」—— 上游每隔不到 idle 阈值挤一个字节,让首 chunk / idle
+// 超时永不触发,run 却被无限拖住。绝对上限不看活动,到点必停,把「无限等待」硬转成「超时异常退出」。
+// 注意:这是单次调用的墙钟,不是整个 run(一个 run 里工具循环会多次调用、各自重新计时),所以不影响
+// 多步长任务。默认 10 分钟,可经 env 调整;<=0 关闭(留给确有超长单次回复的部署放宽/关闭)。
+const LLM_ABSOLUTE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.OPENCLAW_LLM_ABSOLUTE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 600_000;
+})();
+
+function withFirstChunkTimeout<T>(
+  stream: AsyncIterable<T> & { controller?: { abort?: () => void } },
+  timeoutMs: number,
+  label: string,
+): AsyncIterable<T> {
+  if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) return stream;
+  return {
+    async *[Symbol.asyncIterator]() {
+      const it = stream[Symbol.asyncIterator]();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const first = await new Promise<IteratorResult<T>>((resolve, reject) => {
+          timer = setTimeout(() => {
+            try {
+              stream.controller?.abort?.();
+            } catch {
+              /* ignore abort errors */
+            }
+            reject(
+              new Error(`LLM stream stalled: no first chunk within ${timeoutMs}ms (${label})`),
+            );
+          }, timeoutMs);
+          it.next().then(resolve, reject);
+        });
+        if (timer) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        if (first.done) return;
+        yield first.value;
+        for (;;) {
+          const next = await it.next();
+          if (next.done) return;
+          yield next.value;
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+  };
+}
+
+// 见 LLM_ABSOLUTE_TIMEOUT_MS。从流开始计一个不可重置的 deadline:到点 abort 底层 fetch 并抛错,
+// 不管期间是否在出字节。返回对象透传 controller,使外层(首 chunk 超时)仍能 abort 同一底层请求。
+function withAbsoluteTimeout<T>(
+  stream: AsyncIterable<T> & { controller?: { abort?: () => void } },
+  timeoutMs: number,
+  label: string,
+): AsyncIterable<T> & { controller?: { abort?: () => void } } {
+  if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) return stream;
+  return {
+    controller: stream.controller,
+    async *[Symbol.asyncIterator]() {
+      const it = stream[Symbol.asyncIterator]();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      // reject-only deadline:正常结束时 timer 被清、此 promise 永远 pending(不会 settle,无
+      // unhandled rejection);只有到点才 reject 并 abort 底层 fetch。
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          try {
+            stream.controller?.abort?.();
+          } catch {
+            /* ignore abort errors */
+          }
+          reject(new Error(`LLM stream exceeded absolute timeout ${timeoutMs}ms (${label})`));
+        }, timeoutMs);
+      });
+      try {
+        for (;;) {
+          const next = await Promise.race([it.next(), deadline]);
+          if (next.done) return;
+          yield next.value;
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+  };
+}
+
 /**
  * Check if conversation messages contain tool calls or tool results.
  * This is needed because Anthropic (via proxy) requires the tools param
@@ -326,7 +425,12 @@ export const streamOpenAICompletions: StreamFunction<
         }
       };
 
-      for await (const chunk of openaiStream) {
+      for await (const chunk of withFirstChunkTimeout(
+        // 内层先套绝对墙钟(透传 controller),外层再套首 chunk 超时;两者 abort 同一底层 fetch。
+        withAbsoluteTimeout(openaiStream, LLM_ABSOLUTE_TIMEOUT_MS, `${model.provider}/${model.id}`),
+        LLM_FIRST_CHUNK_TIMEOUT_MS,
+        `${model.provider}/${model.id}`,
+      )) {
         if (!chunk || typeof chunk !== "object") {
           continue;
         }
@@ -950,12 +1054,23 @@ export function convertMessages(
           content: sanitizeSurrogates(msg.content),
         });
       } else {
+        // Only send image content to models that declare image input. Otherwise a
+        // text-only model rejects the request ("not a multimodal model", HTTP 400)
+        // — and because the image lives in history, it re-poisons every later turn.
+        // Replace images with a text placeholder so the request stays valid.
+        const supportsImageInput = model.input.includes("image");
         const content: ChatCompletionContentPart[] = msg.content.map(
           (item): ChatCompletionContentPart => {
             if (item.type === "text") {
               return {
                 type: "text",
                 text: sanitizeSurrogates(item.text),
+              } satisfies ChatCompletionContentPartText;
+            }
+            if (!supportsImageInput) {
+              return {
+                type: "text",
+                text: "[image omitted: model has no image input]",
               } satisfies ChatCompletionContentPartText;
             }
             return {

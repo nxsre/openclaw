@@ -480,6 +480,9 @@ export async function dispatchInboundMessage(params: {
   replyResolver?: GetReplyFromConfig;
   onSessionMetadataChanges?: (changes: CommandSessionMetadataChange[]) => void;
 }): Promise<DispatchInboundResult> {
+  // ── [trace-firstbyte] 计时点 T1: dispatchInboundMessage 入口 ──
+  const _tDispatchEnter = Date.now();
+  console.info(`[trace-firstbyte] T1 dispatchInboundMessage enter ts=${_tDispatchEnter}`);
   const replyOptions = applyRuntimeToolsAllow(params.replyOptions, params.toolsAllow);
   const finalized = measureDiagnosticsTimelineSpanSync(
     "auto_reply.finalize_context",
@@ -489,6 +492,9 @@ export async function dispatchInboundMessage(params: {
       config: params.cfg,
       attributes: buildDispatchTimelineAttributes(params.ctx),
     },
+  );
+  console.info(
+    `[trace-firstbyte] T2 finalized ts=${Date.now()} dT=${Date.now() - _tDispatchEnter}ms`,
   );
   if (isDiagnosticsEnabled(params.cfg)) {
     logMessageReceived({
@@ -523,6 +529,9 @@ export async function dispatchInboundMessage(params: {
         },
       ),
   });
+  console.info(
+    `[trace-firstbyte] T7 dispatchInboundMessage exit ts=${Date.now()} dT=${Date.now() - _tDispatchEnter}ms (total)`,
+  );
   return finalizeDispatchResult(result, params.dispatcher);
 }
 

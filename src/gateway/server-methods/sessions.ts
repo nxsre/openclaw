@@ -1137,6 +1137,56 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     }
     respond(true, { subscribed: false, key: canonicalKey }, undefined);
   },
+  // Subscribe to thinking deltas for any run scoped to this sessionKey. Used
+  // by clients (e.g. the IM channel demo-app) that need thinking flow without
+  // owning chat.send / runId visibility — particularly for channel-driven
+  // runs where the agent run is kicked off by inbound message dispatch.
+  "sessions.thinking.subscribe": ({ params, client, context, respond }) => {
+    if (
+      !assertValidParams(
+        params,
+        validateSessionsMessagesSubscribeParams,
+        "sessions.thinking.subscribe",
+        respond,
+      )
+    ) {
+      return;
+    }
+    const connId = client?.connId?.trim();
+    const key = requireSessionKey((params as { key?: unknown }).key, respond);
+    if (!key) {
+      return;
+    }
+    const { canonicalKey } = loadSessionEntry(key);
+    if (connId) {
+      context.subscribeThinkingSessionEvents(connId, canonicalKey);
+      respond(true, { subscribed: true, key: canonicalKey }, undefined);
+      return;
+    }
+    respond(true, { subscribed: false, key: canonicalKey }, undefined);
+  },
+  "sessions.thinking.unsubscribe": ({ params, client, context, respond }) => {
+    if (
+      !assertValidParams(
+        params,
+        validateSessionsMessagesUnsubscribeParams,
+        "sessions.thinking.unsubscribe",
+        respond,
+      )
+    ) {
+      return;
+    }
+    const connId = client?.connId?.trim();
+    const key = requireSessionKey((params as { key?: unknown }).key, respond);
+    if (!key) {
+      return;
+    }
+    const { canonicalKey } = loadSessionEntry(key);
+    if (connId) {
+      context.unsubscribeThinkingSessionEvents(connId, canonicalKey);
+    }
+    respond(true, { subscribed: false, key: canonicalKey }, undefined);
+  },
   "sessions.preview": ({ params, respond, context }) => {
     if (!assertValidParams(params, validateSessionsPreviewParams, "sessions.preview", respond)) {
       return;

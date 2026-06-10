@@ -500,7 +500,11 @@ describe("formatAssistantErrorText", () => {
     });
     const friendly = formatAssistantErrorText(missingScope);
     expect(friendly).not.toBe(authInvalidTokenCopy);
-    expect(friendly).toContain("permission_error");
+    // XCPH: 本 fork 故意把任意非 2xx 的 provider HTTP 错误（含 provider-less 的 401
+    // permission_error）统一收敛成面向用户的双语兜底文案，原始 permission_error 详情仅写到
+    // provider-http-error 日志。上游此处会保留 "permission_error" 字样，本 fork 不保留。
+    expect(friendly).toContain("Authentication failed while contacting the model provider");
+    expect(friendly).toContain("联系模型服务时鉴权失败");
   });
 
   it("returns a proxy-specific message for proxy misroutes", () => {
@@ -569,9 +573,11 @@ describe("formatRawAssistantErrorForUi", () => {
       '429 {"type":"error","error":{"type":"rate_limit_error","message":"Rate limited."},"request_id":"req_123"}',
     );
 
+    expect(text).toContain("rate-limiting");
     expect(text).toContain("HTTP 429");
-    expect(text).toContain("rate_limit_error");
-    expect(text).toContain("Rate limited.");
+    expect(text).toContain("Your message was not saved");
+    expect(text).toContain("限流");
+    expect(text).toContain("本条消息未保存");
     expect(text).not.toContain("req_123");
   });
 
@@ -580,13 +586,18 @@ describe("formatRawAssistantErrorForUi", () => {
   });
 
   it("formats plain HTTP status lines", () => {
-    expect(formatRawAssistantErrorForUi("500 Internal Server Error")).toBe(
-      "HTTP 500: Internal Server Error",
-    );
+    const formatted = formatRawAssistantErrorForUi("500 Internal Server Error");
+    expect(formatted).toContain("temporarily unavailable (HTTP 500)");
+    expect(formatted).toContain("Your message was not saved");
+    expect(formatted).toContain("模型服务暂时不可用");
+    expect(formatted).toContain("本条消息未保存");
   });
 
   it("formats colon-delimited HTTP status lines", () => {
-    expect(formatRawAssistantErrorForUi("HTTP 410: No body")).toBe("HTTP 410: No body");
+    const formatted = formatRawAssistantErrorForUi("HTTP 410: No body");
+    expect(formatted).toContain("HTTP 410");
+    expect(formatted).toContain("Your message was not saved");
+    expect(formatted).toContain("本条消息未保存");
   });
 
   it("formats plain provider internal errors without request ids", () => {
@@ -604,9 +615,10 @@ describe("formatRawAssistantErrorForUi", () => {
   <body>Ray ID: abc123</body>
 </html>`;
 
-    expect(formatRawAssistantErrorForUi(htmlError)).toBe(
-      "The AI service is temporarily unavailable (HTTP 521). Please try again in a moment.",
-    );
+    expect(formatRawAssistantErrorForUi(htmlError)).toContain("temporarily unavailable (HTTP 521)");
+    expect(formatRawAssistantErrorForUi(htmlError)).toContain("Your message was not saved");
+    expect(formatRawAssistantErrorForUi(htmlError)).toContain("模型服务暂时不可用");
+    expect(formatRawAssistantErrorForUi(htmlError)).toContain("本条消息未保存");
   });
 
   it("formats standalone Cloudflare challenge HTML into a clean provider error", () => {

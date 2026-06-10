@@ -1,5 +1,6 @@
 // WebSocket runtime adapter wires a built GatewayRequestContext into the lower
 // level connection handler and shared gateway WebSocket plumbing.
+import { abortChatRunsByConnId } from "./server-methods/chat.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import {
   attachGatewayWsConnectionHandler,
@@ -43,5 +44,6 @@ export function attachGatewayWsHandlers(params: GatewayWsRuntimeParams) {
     getMethodRegistry: params.getMethodRegistry,
     broadcast: params.broadcast,
     buildRequestContext: () => params.context,
+    abortRunsForConn: abortChatRunsByConnId,
   });
 }

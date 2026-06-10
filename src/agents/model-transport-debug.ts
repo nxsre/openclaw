@@ -31,6 +31,13 @@ function isTruthyEnv(value: unknown): boolean {
 }
 
 /** Resolves model payload debug verbosity from `OPENCLAW_DEBUG_MODEL_PAYLOAD`. */
+function isFalsyEnv(value: unknown): boolean {
+  const normalized = normalizeEnv(value);
+  return (
+    normalized === "0" || normalized === "false" || normalized === "off" || normalized === "no"
+  );
+}
+
 export function resolveModelPayloadDebugMode(
   env: ModelTransportDebugEnv = process.env,
 ): ModelPayloadDebugMode {
@@ -59,6 +66,39 @@ export function resolveModelSseDebugMode(
 }
 
 /** Returns whether any model transport debug channel is enabled. */
+export const DEFAULT_MODEL_HTTP_ERROR_BODY_DEBUG_LIMIT_BYTES = 4 * 1024 * 1024;
+
+export function isModelHttpErrorBodyDebugEnabled(
+  env: ModelTransportDebugEnv = process.env,
+): boolean {
+  const raw = env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    if (isFalsyEnv(raw)) {
+      return false;
+    }
+    return isTruthyEnv(raw) || normalizeEnv(raw) === "raw";
+  }
+  // Default on: operators can disable with OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY=0|off|false|no
+  return true;
+}
+
+export function resolveModelHttpErrorBodyReadLimitBytes(
+  env: ModelTransportDebugEnv = process.env,
+): number {
+  const raw = normalizeEnv(env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY_LIMIT_BYTES);
+  if (raw) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_MODEL_HTTP_ERROR_BODY_DEBUG_LIMIT_BYTES;
+}
+
+export function shouldRedactModelHttpErrorBody(env: ModelTransportDebugEnv = process.env): boolean {
+  return normalizeEnv(env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY) !== "raw";
+}
+
 export function isModelTransportDebugEnabled(env: ModelTransportDebugEnv = process.env): boolean {
   return (
     isTruthyEnv(env.OPENCLAW_DEBUG_MODEL_TRANSPORT) ||
