@@ -12,7 +12,7 @@ import {
   type MemoryQmdStartupMode,
   type OpenClawConfig,
   parseDurationMs,
-  resolveAgentWorkspaceDir,
+  resolveSessionWorkspaceDir,
   normalizeAgentId,
   resolveUserPath,
   type SessionSendPolicyConfig,
@@ -393,6 +393,7 @@ function resolveDefaultCollections(
 export function resolveMemoryBackendConfig(params: {
   cfg: OpenClawConfig;
   agentId: string;
+  sessionKey?: string | null;
 }): ResolvedMemoryBackendConfig {
   const normalizedAgentId = normalizeAgentId(params.agentId);
   const backend = params.cfg.memory?.backend ?? DEFAULT_BACKEND;
@@ -401,7 +402,14 @@ export function resolveMemoryBackendConfig(params: {
     return { backend: "builtin", citations };
   }
 
-  const workspaceDir = resolveAgentWorkspaceDir(params.cfg, normalizedAgentId);
+  // Group/channel sessions resolve to <base>/groups/<gid> so the qmd default
+  // memory collections index/recall that group's memory files only; direct/main
+  // sessions keep the unchanged per-agent base workspace.
+  const workspaceDir = resolveSessionWorkspaceDir(
+    params.cfg,
+    normalizedAgentId,
+    params.sessionKey,
+  );
   const qmdCfg = params.cfg.memory?.qmd;
   const includeDefaultMemory = qmdCfg?.includeDefaultMemory !== false;
   const nameSet = new Set<string>();

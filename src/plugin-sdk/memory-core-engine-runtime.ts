@@ -132,6 +132,7 @@ type FacadeModule = {
     cfg: OpenClawConfig;
     agentId: string;
     purpose?: "default" | "status";
+    sessionKey?: string | null;
   }) => Promise<{
     manager: MemorySearchManager | null;
     error?: string;

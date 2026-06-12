@@ -347,6 +347,76 @@ export function resolveAgentWorkspaceDir(
   return stripNullBytes(path.join(resolveStateDir(env), `workspace-${id}`));
 }
 
+/**
+ * Sanitize one path segment so it cannot escape the workspace root. Mirrors the
+ * host `sanitizeSegment` (src/agents/agent-scope.ts) exactly so the qmd group
+ * collection directory matches the reply/dispatch group workspace bit-for-bit.
+ */
+function sanitizeGroupSegment(value: string): string {
+  const cleaned = (value ?? "").replace(/[^A-Za-z0-9_.-]/g, "");
+  if (cleaned === "" || cleaned === "." || cleaned === "..") {
+    return "";
+  }
+  return cleaned;
+}
+
+/** Extract a group id from a session key. Mirrors the host `extractGroupId`. */
+function extractGroupIdFromSessionKey(sessionKey: string | undefined | null): string | undefined {
+  const raw = normalizeOptionalString(sessionKey);
+  if (!raw) {
+    return undefined;
+  }
+  const segments = raw.split(":");
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const marker = segments[i].toLowerCase();
+    if (marker === "group" || marker === "channel") {
+      const remainder = segments.slice(i + 1).join("_");
+      return remainder || undefined;
+    }
+  }
+  return undefined;
+}
+
+/** True when a session is a group/channel chat (by key shape). */
+function isGroupLikeSessionKey(sessionKey: string | undefined | null): boolean {
+  const raw = normalizeOptionalString(sessionKey);
+  if (!raw) {
+    return false;
+  }
+  const lowered = raw.toLowerCase();
+  return lowered.includes(":group:") || lowered.includes(":channel:");
+}
+
+/**
+ * Resolve the workspace directory for a session, isolating group/channel chats
+ * into a per-group subdirectory (`<base>/groups/<gid>`) so qmd indexes/recalls
+ * that group's memory only. Mirrors the host `resolveSessionWorkspaceDir` path
+ * convention (package-local to keep this SDK decoupled from the host config
+ * type). Pure: no filesystem side effects — the dispatch path already seeds the
+ * group dir. Direct/main/non-group sessions and malformed tokens return base.
+ */
+export function resolveSessionWorkspaceDir(
+  cfg: OpenClawConfig,
+  agentId: string,
+  sessionKey?: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const base = resolveAgentWorkspaceDir(cfg, agentId, env);
+  try {
+    if (!isGroupLikeSessionKey(sessionKey)) {
+      return base;
+    }
+    const gid = extractGroupIdFromSessionKey(sessionKey);
+    const safeGid = gid ? sanitizeGroupSegment(gid) : "";
+    if (!safeGid) {
+      return base;
+    }
+    return stripNullBytes(path.join(base, "groups", safeGid));
+  } catch {
+    return base;
+  }
+}
+
 /** Resolve context limits for an agent with defaults fallback. */
 export function resolveAgentContextLimits(
   cfg: OpenClawConfig | undefined,

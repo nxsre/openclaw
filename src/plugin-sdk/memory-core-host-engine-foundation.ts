@@ -8,6 +8,8 @@ export {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
   resolveSessionAgentId,
+  resolveSessionMemoryGroupSegment,
+  resolveSessionWorkspaceDir,
 } from "../agents/agent-scope.js";
 export {
   resolveMemorySearchConfig,

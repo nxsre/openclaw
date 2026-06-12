@@ -60,6 +60,8 @@ export async function getActiveMemorySearchManager(params: {
   cfg: OpenClawConfig;
   agentId: string;
   purpose?: "default" | "status" | "cli";
+  /** Session key used to scope group/channel memory collections per-group. */
+  sessionKey?: string | null;
 }) {
   const runtime = ensureMemoryRuntime(params.cfg);
   if (!runtime) {

@@ -4,9 +4,10 @@ import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   createSubsystemLogger,
   resolveAgentContextLimits,
-  resolveAgentWorkspaceDir,
   resolveGlobalSingleton,
   resolveMemorySearchSyncConfig,
+  resolveSessionMemoryGroupSegment,
+  resolveSessionWorkspaceDir,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import {
@@ -30,6 +31,8 @@ type QmdManagerRuntimeConfig = {
   workspaceDir: string;
   syncSettings: ReturnType<typeof resolveMemorySearchSyncConfig>;
   contextLimits: ReturnType<typeof resolveAgentContextLimits>;
+  /** Per-group token; scopes the qmd index db so group recall stays isolated. */
+  groupSegment?: string;
 };
 
 type CachedQmdManagerEntry = {
@@ -153,15 +156,22 @@ export async function getMemorySearchManager(params: {
   cfg: OpenClawConfig;
   agentId: string;
   purpose?: MemorySearchManagerPurpose;
+  sessionKey?: string | null;
 }): Promise<MemorySearchManagerResult> {
-  const resolved = resolveMemoryBackendConfig(params);
+  const groupSegment = resolveSessionMemoryGroupSegment(params.sessionKey);
+  const resolved = resolveMemoryBackendConfig({ ...params, sessionKey: params.sessionKey });
   if (resolved.backend === "qmd" && resolved.qmd) {
     const qmdResolved = resolved.qmd;
     const normalizedAgentId = normalizeAgentId(params.agentId);
-    const runtimeConfig = resolveQmdManagerRuntimeConfig(params.cfg, normalizedAgentId);
+    const runtimeConfig = resolveQmdManagerRuntimeConfig(
+      params.cfg,
+      normalizedAgentId,
+      params.sessionKey,
+    );
+    runtimeConfig.groupSegment = groupSegment;
     const { workspaceDir } = runtimeConfig;
     const transient = params.purpose === "status" || params.purpose === "cli";
-    const scopeKey = buildQmdManagerScopeKey(normalizedAgentId);
+    const scopeKey = buildQmdManagerScopeKey(normalizedAgentId, groupSegment);
     const identityKey = buildQmdManagerIdentityKey(normalizedAgentId, qmdResolved, runtimeConfig);
 
     const createPrimaryQmdManager = async (
@@ -635,8 +645,8 @@ async function closeQmdManagerForReplacement(manager: MemorySearchManager): Prom
   await manager.close?.();
 }
 
-function buildQmdManagerScopeKey(agentId: string): string {
-  return agentId;
+function buildQmdManagerScopeKey(agentId: string, groupSegment?: string): string {
+  return groupSegment ? `${agentId} group:${groupSegment}` : agentId;
 }
 
 function buildQmdManagerIdentityKey(
@@ -652,9 +662,12 @@ function buildQmdManagerIdentityKey(
 function resolveQmdManagerRuntimeConfig(
   cfg: OpenClawConfig,
   agentId: string,
+  sessionKey?: string | null,
 ): QmdManagerRuntimeConfig {
   return {
-    workspaceDir: resolveAgentWorkspaceDir(cfg, agentId),
+    // Per-group sessions resolve to <base>/groups/<gid>, isolating which memory
+    // files this agent's qmd collections index/recall. Direct/main return base.
+    workspaceDir: resolveSessionWorkspaceDir(cfg, agentId, sessionKey),
     syncSettings: resolveMemorySearchSyncConfig(cfg, agentId),
     contextLimits: resolveAgentContextLimits(cfg, agentId),
   };

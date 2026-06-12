@@ -392,7 +392,12 @@ export function createMemorySearchTool(options: {
             const memory = shouldQueryMemory
               ? await runUnavailablePhase(
                   "memory",
-                  async () => await getMemoryManagerContext({ cfg, agentId }),
+                  async () =>
+                    await getMemoryManagerContext({
+                      cfg,
+                      agentId,
+                      sessionKey: options.agentSessionKey,
+                    }),
                 )
               : null;
             if (shouldQueryMemory && memory && "error" in memory && !shouldQuerySupplements) {
@@ -465,7 +470,11 @@ export function createMemorySearchTool(options: {
                   if (!isClosedMemoryStoreError(error)) {
                     throw error;
                   }
-                  const refreshed = await getMemoryManagerContext({ cfg, agentId });
+                  const refreshed = await getMemoryManagerContext({
+                    cfg,
+                    agentId,
+                    sessionKey: options.agentSessionKey,
+                  });
                   if ("error" in refreshed) {
                     throw error;
                   }
@@ -655,6 +664,7 @@ export function createMemoryGetTool(options: {
           cfg,
           agentId,
           purpose: "status",
+          sessionKey: options.agentSessionKey,
         });
         if ("error" in memory) {
           return jsonResult({ path: relPath, text: "", disabled: true, error: memory.error });

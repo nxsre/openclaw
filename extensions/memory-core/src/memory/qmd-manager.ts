@@ -268,6 +268,12 @@ type QmdManagerRuntimeConfig = {
   workspaceDir: string;
   syncSettings: ReturnType<typeof resolveMemorySearchSyncConfig>;
   contextLimits: ReturnType<typeof resolveAgentContextLimits>;
+  /**
+   * Filesystem-safe group token for group/channel sessions. When present, the
+   * qmd index db (XDG state) is isolated under a per-group subdirectory so a
+   * group's vector collection cannot reach another group's (or main's) index.
+   */
+  groupSegment?: string;
 };
 type BuiltinQmdMcpTool = "query" | "search" | "vector_search" | "deep_search";
 type QmdMcporterSearchParams =
@@ -402,7 +408,12 @@ export class QmdMemoryManager implements MemorySearchManager {
     this.contextLimits = params.runtimeConfig.contextLimits;
     this.stateDir = resolveStateDir(process.env, os.homedir);
     this.agentStateDir = path.join(this.stateDir, "agents", this.agentId);
-    this.qmdDir = path.join(this.agentStateDir, "qmd");
+    // Group/channel sessions get an isolated qmd index db under groups/<gid> so
+    // recall stays per-group; direct/main keep the unchanged per-agent location.
+    const groupSegment = params.runtimeConfig.groupSegment;
+    this.qmdDir = groupSegment
+      ? path.join(this.agentStateDir, "qmd", "groups", groupSegment)
+      : path.join(this.agentStateDir, "qmd");
     this.syncSettings = params.runtimeConfig.syncSettings;
     // QMD uses XDG base dirs for its internal state.
     // Collections are managed via `qmd collection add` and stored inside the index DB.

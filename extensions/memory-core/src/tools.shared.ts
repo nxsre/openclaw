@@ -62,6 +62,7 @@ function resolveMemoryToolContext(options: MemoryToolOptions) {
 export async function getMemoryManagerContext(params: {
   cfg: OpenClawConfig;
   agentId: string;
+  sessionKey?: string | null;
 }): Promise<
   | {
       manager: NonNullable<MemorySearchManagerResult["manager"]>;
@@ -77,6 +78,7 @@ export async function getMemoryManagerContextWithPurpose(params: {
   cfg: OpenClawConfig;
   agentId: string;
   purpose?: "default" | "status" | "cli";
+  sessionKey?: string | null;
 }): Promise<
   | {
       manager: NonNullable<MemorySearchManagerResult["manager"]>;
@@ -90,6 +92,7 @@ export async function getMemoryManagerContextWithPurpose(params: {
     cfg: params.cfg,
     agentId: params.agentId,
     purpose: params.purpose,
+    sessionKey: params.sessionKey,
   });
   return manager ? { manager } : { error };
 }

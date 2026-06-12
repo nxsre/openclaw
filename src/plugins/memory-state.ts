@@ -100,6 +100,8 @@ export type MemoryPluginRuntime = {
     cfg: OpenClawConfig;
     agentId: string;
     purpose?: "default" | "status" | "cli";
+    /** Session key used to scope group/channel memory collections per-group. */
+    sessionKey?: string | null;
   }): Promise<{
     manager: RegisteredMemorySearchManager | null;
     error?: string;
@@ -107,6 +109,7 @@ export type MemoryPluginRuntime = {
   resolveMemoryBackendConfig(params: {
     cfg: OpenClawConfig;
     agentId: string;
+    sessionKey?: string | null;
   }): MemoryRuntimeBackendConfig;
   closeMemorySearchManager?(params: { cfg: OpenClawConfig; agentId: string }): Promise<void>;
   closeAllMemorySearchManagers?(): Promise<void>;

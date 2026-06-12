@@ -26,7 +26,8 @@ import {
 import { getEmbeddingProvider } from "../plugins/embedding-provider-runtime.js";
 import { getMemoryEmbeddingProvider } from "../plugins/memory-embedding-providers.js";
 import { clampInt, clampNumber, resolveUserPath } from "../utils.js";
-import { resolveAgentConfig } from "./agent-scope.js";
+import { resolveAgentConfig, resolveSessionMemoryGroupSegment } from "./agent-scope.js";
+import type { SessionEntry } from "../config/sessions/types.js";
 
 export type ResolvedMemorySearchConfig = {
   enabled: boolean;
@@ -177,14 +178,49 @@ function normalizeSources(
   return Array.from(normalized);
 }
 
-function resolveStorePath(agentId: string, raw?: string): string {
+/**
+ * Resolve the on-disk memory store (collection sqlite) path for an agent,
+ * isolating group/channel sessions into a per-group subdirectory so a group's
+ * recall cannot reach another group's (or main's) memory.
+ *
+ * - Default path: `<stateDir>/memory/<agentId>.sqlite`. When a group token is
+ *   present, the path becomes `<stateDir>/memory/groups/<safeGid>/<agentId>.sqlite`,
+ *   mirroring the per-group workspace isolation.
+ * - When `store.path` is explicitly configured, the user's value wins verbatim
+ *   (no group segment is injected) so explicit overrides keep their semantics.
+ * - Direct/main/non-group sessions and any malformed group token fall back to
+ *   the unchanged global default path, guaranteeing zero regression.
+ */
+export function resolveMemoryStorePath(params: {
+  agentId: string;
+  raw?: string;
+  sessionKey?: string | null;
+  sessionEntry?: Pick<SessionEntry, "chatType"> | null;
+  groupSegment?: string;
+}): string {
   const stateDir = resolveStateDir(process.env, os.homedir);
-  const fallback = path.join(stateDir, "memory", `${agentId}.sqlite`);
-  if (!raw) {
-    return fallback;
+  if (params.raw) {
+    // Explicit user configuration wins verbatim; only resolve {agentId} tokens.
+    const withToken = params.raw.includes("{agentId}")
+      ? params.raw.replaceAll("{agentId}", params.agentId)
+      : params.raw;
+    return resolveUserPath(withToken);
   }
-  const withToken = raw.includes("{agentId}") ? raw.replaceAll("{agentId}", agentId) : raw;
-  return resolveUserPath(withToken);
+  const groupSegment =
+    params.groupSegment ??
+    resolveSessionMemoryGroupSegment(params.sessionKey, params.sessionEntry);
+  if (groupSegment) {
+    return path.join(stateDir, "memory", "groups", groupSegment, `${params.agentId}.sqlite`);
+  }
+  return path.join(stateDir, "memory", `${params.agentId}.sqlite`);
+}
+
+function resolveStorePath(
+  agentId: string,
+  raw?: string,
+  groupSegment?: string,
+): string {
+  return resolveMemoryStorePath({ agentId, raw, groupSegment });
 }
 
 function getConfiguredMemoryEmbeddingProvider(
@@ -213,6 +249,7 @@ function mergeConfig(
   defaults: MemorySearchConfig | undefined,
   overrides: MemorySearchConfig | undefined,
   agentId: string,
+  groupSegment?: string,
 ): ResolvedMemorySearchConfig {
   const enabled = overrides?.enabled ?? defaults?.enabled ?? true;
   const sessionMemory =
@@ -304,7 +341,11 @@ function mergeConfig(
   };
   const store = {
     driver: overrides?.store?.driver ?? defaults?.store?.driver ?? "sqlite",
-    path: resolveStorePath(agentId, overrides?.store?.path ?? defaults?.store?.path),
+    path: resolveStorePath(
+      agentId,
+      overrides?.store?.path ?? defaults?.store?.path,
+      groupSegment,
+    ),
     fts,
     vector,
   };
@@ -471,10 +512,18 @@ function resolveSyncConfig(
 export function resolveMemorySearchConfig(
   cfg: OpenClawConfig,
   agentId: string,
+  scope?: {
+    sessionKey?: string | null;
+    sessionEntry?: Pick<SessionEntry, "chatType"> | null;
+    groupSegment?: string;
+  },
 ): ResolvedMemorySearchConfig | null {
   const defaults = cfg.agents?.defaults?.memorySearch;
   const overrides = resolveAgentConfig(cfg, agentId)?.memorySearch;
-  const resolved = mergeConfig(cfg, defaults, overrides, agentId);
+  const groupSegment =
+    scope?.groupSegment ??
+    resolveSessionMemoryGroupSegment(scope?.sessionKey, scope?.sessionEntry);
+  const resolved = mergeConfig(cfg, defaults, overrides, agentId, groupSegment);
   if (!resolved.enabled) {
     return null;
   }

@@ -140,6 +140,29 @@ export function resolveSessionWorkspaceDir(
   }
 }
 
+/**
+ * Resolve the filesystem-safe group token for a session key, or undefined for
+ * direct/main/non-group sessions. This is a pure helper (no filesystem side
+ * effects) used to scope per-group memory collections/caches in lockstep with
+ * `resolveSessionWorkspaceDir`. Any malformed input collapses to undefined so
+ * callers fall back to the unscoped (per-agent) path. Never throws.
+ */
+export function resolveSessionMemoryGroupSegment(
+  sessionKey?: string | null,
+  sessionEntry?: Pick<SessionEntry, "chatType"> | null,
+): string | undefined {
+  try {
+    if (!isGroupLikeSession({ sessionKey, chatType: sessionEntry?.chatType })) {
+      return undefined;
+    }
+    const gid = extractGroupId(sessionKey);
+    const safeGid = gid ? sanitizeSegment(gid) : "";
+    return safeGid || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Create the group workspace and copy identity seeds from base when missing. */
 function ensureGroupWorkspaceSeeded(baseDir: string, groupDir: string): void {
   try {

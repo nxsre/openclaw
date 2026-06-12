@@ -6,6 +6,8 @@ export {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
   resolveSessionAgentId,
+  resolveSessionMemoryGroupSegment,
+  resolveSessionWorkspaceDir,
 } from "../../../../src/agents/agent-scope.js";
 export { requireApiKey, resolveApiKeyForProvider } from "../../../../src/agents/model-auth.js";
 export { stripInternalRuntimeContext } from "../../../../src/agents/internal-runtime-context.js";
