@@ -817,6 +817,17 @@ export class SessionManager {
   newSession(options?: NewSessionOptions): string | undefined {
     this.recoveredCorruptHeader = false;
     this.sessionId = options?.id ?? createSessionId();
+    // [xcph] New Session 全量追踪:所有路径(命令 /new、daily/idle 自动 freshness reset、
+    // 损坏恢复、首次创建)都经过 newSession()。via 调用栈可区分触发来源,dir 含 sessionKey/peer。
+    try {
+      const via = (new Error().stack || "").split("\n").slice(2, 7).map((x) => x.trim()).join(" <- ");
+      console.error(
+        `[NEW_SESSION] id=${this.sessionId} persist=${this.shouldPersist} dir=${this.sessionDir || ""} ` +
+          `parent=${options?.parentSession || ""} at=${new Date().toISOString()} via=${via}`,
+      );
+    } catch {
+      /* logging best-effort */
+    }
     const timestamp = new Date().toISOString();
     const header: SessionHeader = {
       type: "session",

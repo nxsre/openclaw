@@ -47,6 +47,124 @@ function stripNullBytes(s: string): string {
   return s.split("\0").join("");
 }
 
+/** Identity seed files copied into a per-group workspace (never memory). */
+const GROUP_IDENTITY_SEED_FILES = ["AGENTS.md", "SOUL.md", "USER.md"] as const;
+
+/**
+ * Sanitize one path segment so it cannot escape the workspace root.
+ * Keeps only [A-Za-z0-9_.-]; returns empty string when nothing remains.
+ */
+export function sanitizeSegment(value: string): string {
+  const cleaned = (value ?? "").replace(/[^A-Za-z0-9_.-]/g, "");
+  // Guard against "." / ".." / leading-dot traversal once non-alnum chars are stripped.
+  if (cleaned === "" || cleaned === "." || cleaned === "..") {
+    return "";
+  }
+  return cleaned;
+}
+
+/**
+ * Extract a group id from a session key of the form
+ * `agent:<agentId>:<channel>:group:<gid...>` or `<channel>:group:<gid...>`
+ * (also handles the `:channel:` peer kind). Returns the joined remainder after
+ * the first group/channel marker, or undefined when no marker is present.
+ */
+export function extractGroupId(sessionKey: string | undefined | null): string | undefined {
+  const raw = normalizeOptionalString(sessionKey);
+  if (!raw) {
+    return undefined;
+  }
+  const segments = raw.split(":");
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const marker = segments[i].toLowerCase();
+    if (marker === "group" || marker === "channel") {
+      // Everything after the marker forms the group id; peer ids can contain
+      // their own separators, so keep the remainder and let sanitizeSegment
+      // collapse it to a filesystem-safe token.
+      const remainder = segments.slice(i + 1).join("_");
+      return remainder || undefined;
+    }
+  }
+  return undefined;
+}
+
+/** True when a session is a group/channel chat (by entry chatType or key shape). */
+function isGroupLikeSession(params: {
+  sessionKey?: string | null;
+  chatType?: SessionEntry["chatType"];
+}): boolean {
+  if (params.chatType === "group" || params.chatType === "channel") {
+    return true;
+  }
+  const raw = normalizeOptionalString(params.sessionKey);
+  if (!raw) {
+    return false;
+  }
+  const lowered = raw.toLowerCase();
+  return lowered.includes(":group:") || lowered.includes(":channel:");
+}
+
+/**
+ * Resolve the workspace directory for a session, isolating group/channel chats
+ * into a per-group subdirectory (`<base>/groups/<gid>`) so each group has its
+ * own memory/, MEMORY.md, and workspace files. Direct/main/non-group sessions
+ * return the unchanged agent base workspace.
+ *
+ * On first access to a group workspace, the directory is created and identity
+ * seed files (AGENTS.md/SOUL.md/USER.md) are copied from the base workspace if
+ * missing — memory (MEMORY.md / memory/) is intentionally NOT copied so each
+ * group starts with a blank, isolated memory. Any failure falls back to base.
+ */
+export function resolveSessionWorkspaceDir(
+  cfg: OpenClawConfig,
+  agentId: string,
+  sessionKey?: string | null,
+  sessionEntry?: Pick<SessionEntry, "chatType"> | null,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const base = resolveAgentWorkspaceDir(cfg, agentId, env);
+  try {
+    if (!isGroupLikeSession({ sessionKey, chatType: sessionEntry?.chatType })) {
+      return base;
+    }
+    const gid = extractGroupId(sessionKey);
+    const safeGid = gid ? sanitizeSegment(gid) : "";
+    if (!safeGid) {
+      return base;
+    }
+    const groupDir = stripNullBytes(path.join(base, "groups", safeGid));
+    ensureGroupWorkspaceSeeded(base, groupDir);
+    return groupDir;
+  } catch {
+    return base;
+  }
+}
+
+/** Create the group workspace and copy identity seeds from base when missing. */
+function ensureGroupWorkspaceSeeded(baseDir: string, groupDir: string): void {
+  try {
+    fs.mkdirSync(groupDir, { recursive: true });
+  } catch {
+    // If we cannot create the directory, the caller falls back to base.
+    throw new Error("group workspace mkdir failed");
+  }
+  for (const name of GROUP_IDENTITY_SEED_FILES) {
+    try {
+      const dest = path.join(groupDir, name);
+      if (fs.existsSync(dest)) {
+        continue;
+      }
+      const src = path.join(baseDir, name);
+      if (!fs.existsSync(src)) {
+        continue;
+      }
+      fs.copyFileSync(src, dest);
+    } catch {
+      // Best-effort seeding; a missing identity file must not break the run.
+    }
+  }
+}
+
 const AUTO_FALLBACK_PRIMARY_PROBE_INTERVAL_MS = 5 * 60 * 1000;
 const AUTO_FALLBACK_PRIMARY_PROBE_MAX_KEYS = 4096;
 const autoFallbackPrimaryProbeState = new Map<string, number>();

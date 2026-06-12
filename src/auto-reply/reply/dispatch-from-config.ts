@@ -12,8 +12,8 @@ import {
 import { readAcpSessionMeta } from "../../acp/runtime/session-meta.js";
 import {
   resolveAgentConfig,
-  resolveAgentWorkspaceDir,
   resolveSessionAgentId,
+  resolveSessionWorkspaceDir,
 } from "../../agents/agent-scope.js";
 import {
   isToolAllowedByPolicies,
@@ -1188,7 +1188,12 @@ export async function dispatchReplyFromConfig(
   const routeReplyThreadId = replyRoute.threadId ?? routeThreadId;
   const inboundAudio = hasInboundAudio(ctx);
   const sessionTtsAuto = normalizeTtsAutoMode(sessionStoreEntry.entry?.ttsAuto);
-  const workspaceDir = resolveAgentWorkspaceDir(cfg, sessionAgentId);
+  const workspaceDir = resolveSessionWorkspaceDir(
+    cfg,
+    sessionAgentId,
+    acpDispatchSessionKey,
+    sessionStoreEntry.entry,
+  );
   let dispatchReplyOperation: ReplyOperation | undefined;
   let dispatchAbortOperation: ReplyOperation | undefined;
   let preDispatchAbortOperation: ReplyOperation | undefined;
