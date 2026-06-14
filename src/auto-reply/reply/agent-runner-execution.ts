@@ -94,6 +94,7 @@ import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { resolveRunAuthProfile } from "./agent-runner-auth-profile.js";
 import {
   clearDroppedCliSessionBinding,
+  createCliToolSummaryTracker,
   keepCliSessionBindingOnlyWhenReused,
   runCliAgentWithLifecycle,
 } from "./agent-runner-cli-dispatch.js";
@@ -107,6 +108,12 @@ import {
   resolveModelFallbackOptions,
 } from "./agent-runner-utils.js";
 import type { BlockReplyPipeline } from "./block-reply-pipeline.js";
+import {
+  createCompactionHookNoticePayload,
+  createCompactionNoticePayload,
+  readCompactionHookMessages,
+  shouldNotifyUserAboutCompaction,
+} from "./compaction-notice.js";
 import { resolveCurrentTurnImages } from "./current-turn-images.js";
 import { hasInboundAudio } from "./inbound-media.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
@@ -297,6 +304,8 @@ export type AgentRunLoopResult =
       autoCompactionCount: number;
       /** Payload keys sent directly (not via pipeline) during tool flush. */
       directlySentBlockKeys?: Set<string>;
+      /** Payloads successfully sent directly during tool flush. */
+      directlySentBlockPayloads?: ReplyPayload[];
     }
   | { kind: "final"; payload: ReplyPayload };
 
@@ -808,7 +817,7 @@ function buildExternalRunFailureReply(
   if (authProfileFailoverFailure) {
     return { text: authProfileFailoverFailure, isGenericRunnerFailure: false };
   }
-  const providerRequestError = classifyProviderRequestError(normalizedMessage);
+  const providerRequestError = classifyProviderRequestError(error ?? normalizedMessage);
   if (providerRequestError) {
     return {
       text: providerRequestError.userMessage,
@@ -1516,12 +1525,14 @@ export async function runAgentTurnWithFallback(params: {
   resolvedVerboseLevel: VerboseLevel;
   toolProgressDetail?: "explain" | "raw";
   replyMediaContext?: ReplyMediaContext;
+  onCompactionNoticePayload?: (payload: ReplyPayload) => Promise<void> | void;
 }): Promise<AgentRunLoopResult> {
   const TRANSIENT_HTTP_RETRY_DELAY_MS = 2_500;
   let didLogHeartbeatStrip = false;
   let autoCompactionCount = 0;
   // Track payloads sent directly (not via pipeline) during tool flush to avoid duplicates.
   const directlySentBlockKeys = new Set<string>();
+  const directlySentBlockPayloads: Array<ReplyPayload | undefined> = [];
   const runnableRun = resolveRunAfterAutoFallbackPrimaryProbeRecheck({
     run: params.followupRun.run,
     entry: params.activeSessionStore?.[params.sessionKey ?? ""] ?? params.getActiveSessionEntry(),
@@ -1628,56 +1639,40 @@ export async function runAgentTurnWithFallback(params: {
     params.opts?.onAgentRunStart?.(runId);
   };
   const currentMessageId = params.sessionCtx.MessageSidFull ?? params.sessionCtx.MessageSid;
-  const shouldNotifyUserAboutCompaction =
-    runtimeConfig?.agents?.defaults?.compaction?.notifyUser === true;
-  const sendCompactionNotice = async (phase: "start" | "end" | "incomplete") => {
-    if (!params.opts?.onBlockReply) {
-      return;
-    }
-    const text =
-      phase === "start"
-        ? "🧹 Compacting context..."
-        : phase === "end"
-          ? "🧹 Compaction complete"
-          : "🧹 Compaction incomplete";
-    const noticePayload = params.applyReplyToMode({
-      text,
-      replyToId: currentMessageId,
-      replyToCurrent: true,
-      isCompactionNotice: true,
-    });
+  const notifyUserAboutCompaction = shouldNotifyUserAboutCompaction(runtimeConfig);
+  const deliverCompactionNoticePayload = async (noticePayload: ReplyPayload, label: string) => {
     try {
-      await params.opts.onBlockReply(noticePayload);
+      if (params.opts?.onBlockReply) {
+        await params.opts.onBlockReply(noticePayload);
+        return;
+      }
+      await params.onCompactionNoticePayload?.(noticePayload);
     } catch (err) {
       // Non-critical notice delivery failure should not bubble out of the
       // fire-and-forget event handler.
-      logVerbose(`compaction ${phase} notice delivery failed (non-fatal): ${String(err)}`);
+      logVerbose(`compaction ${label} notice delivery failed (non-fatal): ${String(err)}`);
     }
   };
-  const readCompactionHookMessages = (value: unknown): string[] => {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-    return value
-      .filter((entry): entry is string => typeof entry === "string")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0);
+  const sendCompactionNotice = async (phase: "start" | "end" | "incomplete") => {
+    await deliverCompactionNoticePayload(
+      createCompactionNoticePayload({
+        phase,
+        currentMessageId,
+        applyReplyToMode: params.applyReplyToMode,
+      }),
+      phase,
+    );
   };
   const sendCompactionHookMessages = async (messages: string[]) => {
-    if (!params.opts?.onBlockReply || messages.length === 0) {
+    const noticePayload = createCompactionHookNoticePayload({
+      messages,
+      currentMessageId,
+      applyReplyToMode: params.applyReplyToMode,
+    });
+    if (!noticePayload) {
       return;
     }
-    const noticePayload = params.applyReplyToMode({
-      text: messages.join("\n\n"),
-      replyToId: currentMessageId,
-      replyToCurrent: true,
-      isCompactionNotice: true,
-    });
-    try {
-      await params.opts.onBlockReply(noticePayload);
-    } catch (err) {
-      logVerbose(`compaction hook notice delivery failed (non-fatal): ${String(err)}`);
-    }
+    await deliverCompactionNoticePayload(noticePayload, "hook");
   };
   const shouldSurfaceToControlUi = isInternalMessageChannel(
     params.followupRun.run.messageProvider ??
@@ -1966,6 +1961,7 @@ export async function runAgentTurnWithFallback(params: {
             blockStreamingEnabled: params.blockStreamingEnabled,
             blockReplyPipeline,
             directlySentBlockKeys,
+            directlySentBlockPayloads,
           })
         : undefined;
       let messageToolOnlyDeliveryCompleted = false;
@@ -2133,6 +2129,14 @@ export async function runAgentTurnWithFallback(params: {
               const cliCurrentMessageId = isRestartSentinelContinuation
                 ? params.sessionCtx.ReplyToId
                 : (params.sessionCtx.MessageSidFull ?? params.sessionCtx.MessageSid);
+              const cliToolSummaryTracker = createCliToolSummaryTracker({
+                detailMode: params.toolProgressDetail,
+                shouldEmitToolResult: params.shouldEmitToolResult,
+                shouldEmitToolOutput: params.shouldEmitToolOutput,
+                deliver: async (payload) => {
+                  await params.opts?.onToolResult?.(payload);
+                },
+              });
               const result = await agentTurnTiming.measure("cli_run", () =>
                 runCliAgentWithLifecycle({
                   runId,
@@ -2149,7 +2153,12 @@ export async function runAgentTurnWithFallback(params: {
                   onReasoningText: async (text) => {
                     await params.opts?.onReasoningStream?.({ text });
                   },
-                  onToolEvent: async ({ name, phase, args }) => {
+                  onToolEvent: async (payload) => {
+                    await cliToolSummaryTracker.noteToolEvent(payload);
+                    if (payload.phase === "result") {
+                      return;
+                    }
+                    const { name, phase, args } = payload;
                     await Promise.all([
                       params.typingSignals.signalToolStart(),
                       params.opts?.onToolStart?.({
@@ -2160,6 +2169,16 @@ export async function runAgentTurnWithFallback(params: {
                       }),
                     ]);
                   },
+                  onCommentaryText:
+                    params.opts?.commentaryProgressEnabled === true && params.opts.onItemEvent
+                      ? async ({ text, itemId }) => {
+                          await params.opts?.onItemEvent?.({
+                            kind: "preamble",
+                            progressText: text,
+                            itemId,
+                          });
+                        }
+                      : undefined,
                   onErrorBeforeLifecycle: async () => {
                     if (!rollbackFallbackCandidateSelection) {
                       return;
@@ -2205,11 +2224,14 @@ export async function runAgentTurnWithFallback(params: {
                     model,
                     thinkLevel: params.followupRun.run.thinkLevel,
                     timeoutMs: params.followupRun.run.timeoutMs,
+                    runTimeoutOverrideMs: params.followupRun.run.runTimeoutOverrideMs,
                     runId,
                     lane: runLane,
                     extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
                     sourceReplyDeliveryMode: params.followupRun.run.sourceReplyDeliveryMode,
                     silentReplyPromptMode: params.followupRun.run.silentReplyPromptMode,
+                    allowEmptyAssistantReplyAsSilent:
+                      params.followupRun.run.allowEmptyAssistantReplyAsSilent,
                     extraSystemPromptStatic: params.followupRun.run.extraSystemPromptStatic,
                     ownerNumbers: params.followupRun.run.ownerNumbers,
                     cliSessionId: cliSessionBinding?.sessionId,
@@ -2234,6 +2256,7 @@ export async function runAgentTurnWithFallback(params: {
                     currentMessageId: cliCurrentMessageId,
                     currentInboundAudio: hasInboundAudio(params.sessionCtx),
                     agentAccountId: params.followupRun.run.agentAccountId,
+                    senderId: params.followupRun.run.senderId,
                     senderIsOwner: params.followupRun.run.senderIsOwner,
                     toolsAllow: params.opts?.toolsAllow,
                     disableTools: params.opts?.disableTools,
@@ -2569,28 +2592,24 @@ export async function runAgentTurnWithFallback(params: {
                           summary: readStringValue(evt.data.summary),
                         });
                       }
-                      // Track auto-compaction and notify higher layers.
                       if (evt.stream === "compaction") {
                         const phase = readStringValue(evt.data.phase) ?? "";
                         const hookMessages = readCompactionHookMessages(evt.data.messages);
+                        const sendCompactionUserNotices = async (
+                          noticePhase: "start" | "end" | "incomplete",
+                        ) => {
+                          if (hookMessages.length > 0) {
+                            await sendCompactionHookMessages(hookMessages);
+                          }
+                          if (notifyUserAboutCompaction) {
+                            await sendCompactionNotice(noticePhase);
+                          }
+                        };
                         if (phase === "start") {
-                          // Three independent audiences: internal callbacks
-                          // (Control UI) fire regardless; hookMessages deliver
-                          // plugin-authored user-channel text (overlap with the
-                          // default notice, so they suppress it); notifyUser is
-                          // the opt-in user-channel notice. Internal callbacks
-                          // must not suppress the user notice — see #87107.
                           if (params.opts?.onCompactionStart) {
                             await params.opts.onCompactionStart();
                           }
-                          if (hookMessages.length > 0) {
-                            await sendCompactionHookMessages(hookMessages);
-                          } else if (shouldNotifyUserAboutCompaction) {
-                            // Send directly via opts.onBlockReply (bypassing the
-                            // pipeline) so the notice does not cause final payloads
-                            // to be discarded on non-streaming model paths.
-                            await sendCompactionNotice("start");
-                          }
+                          await sendCompactionUserNotices("start");
                         }
                         if (phase === "end") {
                           const completed = evt.data?.completed === true;
@@ -2599,15 +2618,9 @@ export async function runAgentTurnWithFallback(params: {
                             if (params.opts?.onCompactionEnd) {
                               await params.opts.onCompactionEnd();
                             }
-                            if (hookMessages.length > 0) {
-                              await sendCompactionHookMessages(hookMessages);
-                            } else if (shouldNotifyUserAboutCompaction) {
-                              await sendCompactionNotice("end");
-                            }
-                          } else if (hookMessages.length > 0) {
-                            await sendCompactionHookMessages(hookMessages);
-                          } else if (shouldNotifyUserAboutCompaction) {
-                            await sendCompactionNotice("incomplete");
+                            await sendCompactionUserNotices("end");
+                          } else {
+                            await sendCompactionUserNotices("incomplete");
                           }
                         }
                       }
@@ -2961,6 +2974,17 @@ export async function runAgentTurnWithFallback(params: {
         cfg: params.followupRun.run.config,
       });
 
+      emitAgentEvent({
+        runId,
+        ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+        stream: "lifecycle",
+        data: {
+          phase: "error",
+          error: message,
+          endedAt: Date.now(),
+          fallbackExhaustedFailure: true,
+        },
+      });
       params.replyOperation?.fail("run_failed", err);
       return {
         kind: "final",
@@ -3045,5 +3069,8 @@ export async function runAgentTurnWithFallback(params: {
     didLogHeartbeatStrip,
     autoCompactionCount,
     directlySentBlockKeys: directlySentBlockKeys.size > 0 ? directlySentBlockKeys : undefined,
+    directlySentBlockPayloads: directlySentBlockPayloads.filter(
+      (payload): payload is ReplyPayload => payload !== undefined,
+    ),
   };
 }

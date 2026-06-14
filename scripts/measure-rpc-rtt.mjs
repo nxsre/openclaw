@@ -1,19 +1,13 @@
-<<<<<<< HEAD
 // Measures gateway RPC round-trip time by launching an isolated local gateway
 // and writing qa-lab-compatible summary artifacts.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-=======
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import net from "node:net";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-<<<<<<< HEAD
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const DEFAULT_METHODS = ["health", "config.get"];
@@ -26,13 +20,6 @@ const PARENT_TERMINATION_SIGNALS = ["SIGHUP", "SIGINT", "SIGTERM"];
 const IS_DIRECT_RUN =
   typeof process.argv[1] === "string" &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-=======
-import { pathToFileURL } from "node:url";
-
-const DEFAULT_METHODS = ["health", "config.get"];
-const DEFAULT_ITERATIONS = 10;
-const READY_TIMEOUT_MS = 120_000;
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
 
 function usage() {
   return [
@@ -44,7 +31,6 @@ function usage() {
   ].join("\n");
 }
 
-<<<<<<< HEAD
 function readFlagValue(argv, index, flag) {
   const value = argv[index + 1];
   if (!value || value.startsWith("--")) {
@@ -66,9 +52,6 @@ function parsePositiveInt(value, flag) {
 }
 
 export function parseArgs(argv) {
-=======
-function parseArgs(argv) {
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
   const args = {
     iterations: DEFAULT_ITERATIONS,
     methods: DEFAULT_METHODS,
@@ -76,7 +59,6 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--output-dir") {
-<<<<<<< HEAD
       args.outputDir = readFlagValue(argv, index, arg);
       index += 1;
       continue;
@@ -97,24 +79,6 @@ function parseArgs(argv) {
         .map((entry) => entry.trim())
         .filter(Boolean);
       index += 1;
-=======
-      args.outputDir = argv[(index += 1)];
-      continue;
-    }
-    if (arg === "--repo-root") {
-      args.repoRoot = argv[(index += 1)];
-      continue;
-    }
-    if (arg === "--iterations") {
-      args.iterations = Number(argv[(index += 1)]);
-      continue;
-    }
-    if (arg === "--methods") {
-      args.methods = argv[(index += 1)]
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter(Boolean);
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
       continue;
     }
     throw new Error(`Unknown argument: ${arg}\n${usage()}`);
@@ -122,12 +86,6 @@ function parseArgs(argv) {
   if (!args.outputDir) {
     throw new Error(usage());
   }
-<<<<<<< HEAD
-=======
-  if (!Number.isInteger(args.iterations) || args.iterations < 1) {
-    throw new Error("--iterations must be a positive integer.");
-  }
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
   if (args.methods.length === 0) {
     throw new Error("--methods must include at least one gateway method.");
   }
@@ -157,7 +115,6 @@ async function sleep(ms) {
   });
 }
 
-<<<<<<< HEAD
 function formatErrorMessage(error) {
   if (error instanceof Error) {
     return error.message;
@@ -195,15 +152,11 @@ export async function waitForGatewayReady({
   sleepMs = 250,
   stderrPath,
 }) {
-=======
-async function waitForGatewayReady({ child, port, stderrPath }) {
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
   const startedAt = Date.now();
   let childExit = null;
   child.once("exit", (code, signal) => {
     childExit = { code, signal };
   });
-<<<<<<< HEAD
   const getChildExit = () =>
     childExit ??
     (child.exitCode != null || child.signalCode != null
@@ -496,55 +449,10 @@ async function copyGatewayLogs({ outputDir, stderrPath, stdoutPath }) {
   ]);
 }
 
-=======
-  while (Date.now() - startedAt < READY_TIMEOUT_MS) {
-    if (childExit) {
-      const stderr = await fs.readFile(stderrPath, "utf8").catch(() => "");
-      throw new Error(
-        `gateway exited before readiness code=${childExit.code ?? "null"} signal=${childExit.signal ?? "null"}\n${stderr.slice(-4000)}`,
-      );
-    }
-    for (const endpoint of ["/readyz", "/healthz"]) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}${endpoint}`);
-        if (response.ok) {
-          return;
-        }
-      } catch {
-        // The gateway may not have bound the port yet.
-      }
-    }
-    await sleep(250);
-  }
-  const stderr = await fs.readFile(stderrPath, "utf8").catch(() => "");
-  throw new Error(
-    `gateway did not become ready after ${READY_TIMEOUT_MS}ms\n${stderr.slice(-4000)}`,
-  );
-}
-
-async function stopGateway(child) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-  child.kill("SIGTERM");
-  const exited = await new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(false), 1_500);
-    child.once("exit", () => {
-      clearTimeout(timer);
-      resolve(true);
-    });
-  });
-  if (!exited && child.exitCode === null && child.signalCode === null) {
-    child.kill("SIGKILL");
-  }
-}
-
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
 function quantile(sorted, q) {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * q) - 1))];
 }
 
-<<<<<<< HEAD
 function roundMeasuredMs(value, label) {
   if (!Number.isFinite(value) || value < 0) {
     throw new Error(`${label} must be a non-negative finite duration.`);
@@ -652,19 +560,6 @@ export function assertRpcSmokeResponse(method, response) {
   }
 }
 
-=======
-function stats(samples) {
-  const sorted = samples.toSorted((left, right) => left - right);
-  return {
-    avgMs: Math.round(sorted.reduce((sum, value) => sum + value, 0) / sorted.length),
-    maxMs: Math.round(sorted.at(-1)),
-    minMs: Math.round(sorted[0]),
-    p50Ms: Math.round(quantile(sorted, 0.5)),
-    p95Ms: Math.round(quantile(sorted, 0.95)),
-  };
-}
-
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
 function toText(data) {
   if (typeof data === "string") {
     return data;
@@ -678,11 +573,7 @@ function toText(data) {
   return Buffer.from(data).toString("utf8");
 }
 
-<<<<<<< HEAD
 export function createGatewayClient({ WebSocket, openTimeoutMs = 8_000, url }) {
-=======
-function createGatewayClient({ WebSocket, url }) {
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
   const ws = new WebSocket(url, { handshakeTimeout: 8_000 });
   const pending = new Map();
   const rejectPending = (error) => {
@@ -717,7 +608,6 @@ function createGatewayClient({ WebSocket, url }) {
   });
   const waitOpen = async () =>
     await new Promise((resolve, reject) => {
-<<<<<<< HEAD
       let settled = false;
       const settle = (callback) => {
         if (settled) {
@@ -740,17 +630,6 @@ function createGatewayClient({ WebSocket, url }) {
       }, openTimeoutMs);
       ws.once("open", onOpen);
       ws.once("error", onError);
-=======
-      const timer = setTimeout(() => reject(new Error("gateway websocket open timeout")), 8_000);
-      ws.once("open", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-      ws.once("error", (error) => {
-        clearTimeout(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      });
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
     });
   const request = async (method, params, timeoutMs = 10_000) =>
     await new Promise((resolve, reject) => {
@@ -842,18 +721,12 @@ async function main() {
   const stdoutPath = path.join(tempRoot, "gateway.stdout.log");
   const stderrPath = path.join(tempRoot, "gateway.stderr.log");
   let gatewayChild;
-<<<<<<< HEAD
   let client;
   let removeGatewayParentCleanup = () => {};
   let status = "fail";
   let details = "";
   let measurement;
   let cleanupError;
-=======
-  let status = "fail";
-  let details = "";
-  let measurement;
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
   const events = [];
   try {
     await fs.writeFile(
@@ -873,7 +746,6 @@ async function main() {
         2,
       )}\n`,
     );
-<<<<<<< HEAD
     gatewayChild = await startGateway({
       configPath,
       port,
@@ -884,42 +756,6 @@ async function main() {
       token,
     });
     removeGatewayParentCleanup = installGatewayParentCleanup(gatewayChild);
-=======
-    const stdout = await fs.open(stdoutPath, "w");
-    const stderr = await fs.open(stderrPath, "w");
-    gatewayChild = spawn(
-      "pnpm",
-      [
-        "openclaw",
-        "gateway",
-        "run",
-        "--port",
-        String(port),
-        "--bind",
-        "loopback",
-        "--allow-unconfigured",
-      ],
-      {
-        cwd: repoRoot,
-        env: {
-          ...process.env,
-          HOME: path.join(tempRoot, "home"),
-          XDG_CONFIG_HOME: path.join(tempRoot, "xdg-config"),
-          XDG_DATA_HOME: path.join(tempRoot, "xdg-data"),
-          XDG_CACHE_HOME: path.join(tempRoot, "xdg-cache"),
-          OPENCLAW_CONFIG_PATH: configPath,
-          OPENCLAW_STATE_DIR: path.join(tempRoot, "state"),
-          OPENCLAW_GATEWAY_TOKEN: token,
-          OPENCLAW_SKIP_BROWSER_CONTROL_SERVER: "1",
-          OPENCLAW_SKIP_GMAIL_WATCHER: "1",
-          OPENCLAW_SKIP_CANVAS_HOST: "1",
-          OPENCLAW_NO_RESPAWN: "1",
-          OPENCLAW_TEST_FAST: "1",
-        },
-        stdio: ["ignore", stdout.fd, stderr.fd],
-      },
-    );
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
     await waitForGatewayReady({ child: gatewayChild, port, stderrPath });
 
     const requireFromOpenClaw = createRequire(path.join(repoRoot, "package.json"));
@@ -927,11 +763,7 @@ async function main() {
     const protocol = await import(
       pathToFileURL(path.join(repoRoot, "packages/gateway-protocol/src/version.ts")).href
     );
-<<<<<<< HEAD
     client = createGatewayClient({ WebSocket, url: `ws://127.0.0.1:${port}` });
-=======
-    const client = createGatewayClient({ WebSocket, url: `ws://127.0.0.1:${port}` });
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
     await client.waitOpen();
     const connectStarted = performance.now();
     const connect = await client.request(
@@ -964,11 +796,7 @@ async function main() {
       payload: {
         method: "connect",
         ok: true,
-<<<<<<< HEAD
         durationMs: roundMeasuredMs(performance.now() - connectStarted, "connect durationMs"),
-=======
-        durationMs: Math.round(performance.now() - connectStarted),
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
       },
     });
     const samples = [];
@@ -976,7 +804,6 @@ async function main() {
       for (let iteration = 1; iteration <= args.iterations; iteration += 1) {
         const requestStartedAtMs = performance.now();
         const response = await client.request(method, {}, 10_000);
-<<<<<<< HEAD
         const durationMs = performance.now() - requestStartedAtMs;
         const roundedDurationMs = roundMeasuredMs(durationMs, `${method} durationMs`);
         assertRpcSmokeResponse(method, response);
@@ -998,25 +825,6 @@ async function main() {
       args.methods.map((method) => [
         method,
         summarizeRttSamples(
-=======
-        const durationMs = Math.round(performance.now() - requestStartedAtMs);
-        if (!response.ok) {
-          throw new Error(`${method} failed: ${JSON.stringify(response.error)}`);
-        }
-        samples.push({ method, durationMs });
-        events.push({
-          event: "gateway-rpc",
-          payload: { kind: "gateway-rpc", method, ok: true, durationMs, iteration },
-        });
-      }
-    }
-    client.close();
-    const sampleStats = stats(samples.map((sample) => sample.durationMs));
-    const byMethod = Object.fromEntries(
-      args.methods.map((method) => [
-        method,
-        stats(
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
           samples.filter((sample) => sample.method === method).map((sample) => sample.durationMs),
         ),
       ]),
@@ -1037,7 +845,6 @@ async function main() {
   } catch (error) {
     details = error instanceof Error ? (error.stack ?? error.message) : String(error);
   } finally {
-<<<<<<< HEAD
     try {
       client?.close();
       if (gatewayChild) {
@@ -1064,12 +871,6 @@ async function main() {
     const cleanupDetails = formatErrorMessage(cleanupError);
     details = details ? `${details}\n${cleanupDetails}` : cleanupDetails;
     status = "fail";
-=======
-    if (gatewayChild) {
-      await stopGateway(gatewayChild).catch(() => {});
-    }
-    await fs.rm(tempRoot, { force: true, recursive: true }).catch(() => {});
->>>>>>> xcph/v2026.6.1-merge-xcph-patches
   }
   const finishedAt = new Date();
   await writeSummary({ details, events, finishedAt, outputDir, measurement, startedAt, status });
@@ -1078,7 +879,6 @@ async function main() {
   }
 }
 
-<<<<<<< HEAD
 if (IS_DIRECT_RUN) {
   main().catch(
     /** @param {unknown} error */ (error) => {
@@ -1087,11 +887,3 @@ if (IS_DIRECT_RUN) {
     },
   );
 }
-=======
-main().catch(
-  /** @param {unknown} error */ (error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
-  },
-);
->>>>>>> xcph/v2026.6.1-merge-xcph-patches

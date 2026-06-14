@@ -1309,6 +1309,8 @@ export function subscribeEmbeddedAgentSession(params: SubscribeEmbeddedAgentSess
 
   return {
     assistantTexts,
+    getLastAssistantTextMessageIndex: () =>
+      state.lastAssistantTextMessageIndex >= 0 ? state.lastAssistantTextMessageIndex : undefined,
     toolMetas,
     getAcceptedSessionSpawns: () => state.acceptedSessionSpawns.slice(),
     runToolLifecycle: async <T>(toolParams: {
