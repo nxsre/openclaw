@@ -24,9 +24,12 @@ import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withLocalGatewayRequestScope } from "../gateway/local-request-context.js";
 import {
+  assertAgentRunLifecycleGenerationCurrent,
+  captureAgentRunLifecycleGeneration,
   clearAgentRunContext,
   emitAgentEvent,
   registerAgentRunContext,
+  withAgentRunLifecycleGeneration,
 } from "../infra/agent-events.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import {
@@ -127,6 +130,10 @@ import {
 } from "./model-visibility-policy.js";
 import { listOpenAIAuthProfileProvidersForAgentRuntime } from "./openai-routing.js";
 import { resolveProviderIdForAuth } from "./provider-auth-aliases.js";
+import {
+  isAgentRunRestartAbortReason,
+  resolveAgentRunAbortLifecycleFields,
+} from "./run-termination.js";
 import { normalizeSpawnedRunMetadata } from "./spawned-context.js";
 import { resolveAgentTimeoutMs } from "./timeout.js";
 import { ensureAgentWorkspace } from "./workspace.js";
@@ -229,6 +236,23 @@ function parseAgentCommandModelRef(
 
 type AttemptExecutionRuntime = typeof import("./command/attempt-execution.runtime.js");
 type AgentAttemptResult = Awaited<ReturnType<AttemptExecutionRuntime["runAgentAttempt"]>>;
+
+function applyAgentRunAbortMetadata<T extends { meta: object }>(
+  result: T,
+  signal: AbortSignal | undefined,
+): T {
+  const abortFields = resolveAgentRunAbortLifecycleFields(signal);
+  if (abortFields.aborted !== true) {
+    return result;
+  }
+  return {
+    ...result,
+    meta: {
+      ...result.meta,
+      ...abortFields,
+    },
+  };
+}
 type AcpManagerRuntime = typeof import("../acp/control-plane/manager.js");
 type AcpPolicyRuntime = typeof import("../acp/policy.js");
 type AcpRuntimeErrorsRuntime = typeof import("../acp/runtime/errors.js");
@@ -800,6 +824,7 @@ async function prepareAgentCommandExecution(opts: AgentCommandOpts, runtime: Run
     manifestMetadataSnapshot,
     modelManifestContext,
     runId,
+    isSubagentLane,
     acpManager,
     acpResolution,
   };
@@ -840,12 +865,15 @@ async function agentCommandInternal(
     cwd,
     agentDir,
     runId,
+    isSubagentLane,
     acpManager,
     acpResolution,
     pluginsEnabled,
     manifestMetadataSnapshot,
     modelManifestContext,
   } = prepared;
+  let lifecycleGeneration = opts.lifecycleGeneration ?? captureAgentRunLifecycleGeneration(runId);
+  assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration);
   const effectiveCwd = cwd ? resolveUserPath(cwd) : workspaceDir;
   let sessionEntry = prepared.sessionEntry;
   let trackedRestartRecoveryDeliveryContext = false;
@@ -886,6 +914,7 @@ async function agentCommandInternal(
         opts,
         sessionEntry: entry,
       });
+      assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration);
       const next: SessionEntry = {
         ...entry,
         sessionId,
@@ -913,18 +942,20 @@ async function agentCommandInternal(
     }
 
     if (!isRawModelRun && acpResolution?.kind === "ready" && sessionKey) {
+      assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration);
       const attemptExecutionRuntime = await loadAttemptExecutionRuntime();
       const startedAt = Date.now();
       registerAgentRunContext(
         runId,
         suppressVisibleSessionEffects
-          ? { isControlUiVisible: false }
+          ? { isControlUiVisible: false, lifecycleGeneration }
           : {
               sessionKey,
               sessionId,
+              lifecycleGeneration,
             },
       );
-      attemptExecutionRuntime.emitAcpLifecycleStart({ runId, startedAt });
+      attemptExecutionRuntime.emitAcpLifecycleStart({ runId, startedAt, lifecycleGeneration });
 
       const visibleTextAccumulator = attemptExecutionRuntime.createAcpVisibleTextAccumulator();
       let stopReason: string | undefined;
@@ -950,6 +981,7 @@ async function agentCommandInternal(
         }
 
         const acpImageAttachments = resolveInlineAgentImageAttachments(opts.images);
+        assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration);
         await acpManager.runTurn({
           cfg,
           sessionKey,
@@ -999,6 +1031,9 @@ async function agentCommandInternal(
             });
           },
         });
+        if (isAgentRunRestartAbortReason(opts.abortSignal?.reason)) {
+          throw opts.abortSignal?.reason;
+        }
       } catch (error) {
         const { toAcpRuntimeError } = await loadAcpRuntimeErrorsRuntime();
         const acpError = toAcpRuntimeError({
@@ -1010,11 +1045,11 @@ async function agentCommandInternal(
           runId,
           error: acpError,
           sessionKey,
+          lifecycleGeneration,
+          abortSignal: opts.abortSignal,
         });
         throw acpError;
       }
-
-      attemptExecutionRuntime.emitAcpLifecycleEnd({ runId });
 
       const finalTextRaw = visibleTextAccumulator.finalizeRaw();
       const finalText = visibleTextAccumulator.finalize();
@@ -1071,13 +1106,32 @@ async function agentCommandInternal(
           `ACP transcript persistence failed for ${sessionKey}: ${formatErrorMessage(error)}`,
         );
       }
-
-      const result = attemptExecutionRuntime.buildAcpResult({
-        payloadText: finalText,
-        startedAt,
-        stopReason,
+      const restartAbortReason = opts.abortSignal?.reason;
+      if (isAgentRunRestartAbortReason(restartAbortReason)) {
+        attemptExecutionRuntime.emitAcpLifecycleError({
+          runId,
+          error: restartAbortReason,
+          sessionKey,
+          lifecycleGeneration,
+          abortSignal: opts.abortSignal,
+        });
+        throw restartAbortReason;
+      }
+      attemptExecutionRuntime.emitAcpLifecycleEnd({
+        runId,
+        lifecycleGeneration,
         abortSignal: opts.abortSignal,
       });
+
+      const result = applyAgentRunAbortMetadata(
+        attemptExecutionRuntime.buildAcpResult({
+          payloadText: finalText,
+          startedAt,
+          stopReason,
+          abortSignal: opts.abortSignal,
+        }),
+        opts.abortSignal,
+      );
       const payloads = result.payloads;
       const { deliverAgentCommandResult } = await loadDeliveryRuntime();
 
@@ -1090,6 +1144,7 @@ async function agentCommandInternal(
         sessionEntry,
         result,
         payloads,
+        assertDeliveryCurrent: () => assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration),
       });
     }
 
@@ -1097,9 +1152,11 @@ async function agentCommandInternal(
     const resolvedVerboseLevel =
       verboseOverride ?? persistedVerbose ?? (agentCfg?.verboseDefault as VerboseLevel | undefined);
 
+    assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration);
     if (sessionKey || suppressVisibleSessionEffects) {
       registerAgentRunContext(runId, {
         ...(sessionKey && !suppressVisibleSessionEffects ? { sessionKey, sessionId } : {}),
+        lifecycleGeneration,
         verboseLevel: resolvedVerboseLevel,
         isControlUiVisible: !suppressVisibleSessionEffects,
       });
@@ -1547,7 +1604,11 @@ async function agentCommandInternal(
       })
     ) {
       const explicitThink = Boolean(thinkOnce || thinkOverride);
-      if (explicitThink) {
+      const isSubagentSpawnRun = isSubagentLane && isSubagentSessionKey(sessionKey);
+      // Spawn-lane subagents are fire-and-forget; the orchestrator already got
+      // an "accepted" ack, so throwing here strands the run and half-fails fan-outs.
+      // Clamp like the embedded runner; interactive --thinking keeps the throw.
+      if (explicitThink && !isSubagentSpawnRun) {
         throw new Error(
           `Thinking level "${resolvedThinkLevel}" is not supported for ${provider}/${model}. Use one of: ${formatThinkingLevels(provider, model, ", ", thinkingCatalog)}.`,
         );
@@ -1654,6 +1715,7 @@ async function agentCommandInternal(
       attemptLifecycleState.lifecycleFinishing = true;
       emitAgentEvent({
         runId,
+        lifecycleGeneration,
         stream: "lifecycle",
         data: {
           phase: "finishing",
@@ -1661,6 +1723,7 @@ async function agentCommandInternal(
           endedAt: Date.now(),
           aborted: runResult.meta.aborted ?? false,
           stopReason: runResult.meta.stopReason,
+          ...resolveAgentRunAbortLifecycleFields(opts.abortSignal),
         },
       });
     };
@@ -1675,6 +1738,7 @@ async function agentCommandInternal(
       }
       emitAgentEvent({
         runId,
+        lifecycleGeneration,
         stream: "lifecycle",
         data: {
           phase: "end",
@@ -1682,6 +1746,7 @@ async function agentCommandInternal(
           endedAt: Date.now(),
           aborted: runResult.meta.aborted ?? false,
           stopReason,
+          ...resolveAgentRunAbortLifecycleFields(opts.abortSignal),
         },
       });
     };
@@ -1692,12 +1757,14 @@ async function agentCommandInternal(
       attemptLifecycleState.lifecycleEnded = true;
       emitAgentEvent({
         runId,
+        lifecycleGeneration,
         stream: "lifecycle",
         data: {
           phase: "error",
           startedAt,
           endedAt: Date.now(),
           error: error instanceof Error ? error.message : "Agent run failed",
+          ...resolveAgentRunAbortLifecycleFields(opts.abortSignal),
         },
       });
     };
@@ -1826,6 +1893,7 @@ async function agentCommandInternal(
               timeoutMs,
               runTimeoutOverrideMs,
               runId,
+              lifecycleGeneration,
               opts,
               runContext,
               spawnedBy,
@@ -1846,12 +1914,18 @@ async function agentCommandInternal(
                 opts.suppressPromptPersistence === true ||
                 (isFallbackRetry && attemptLifecycleState.currentTurnUserMessagePersisted),
               onUserMessagePersisted: attemptLifecycleCallbacks.onUserMessagePersisted,
+              onLifecycleGenerationChanged: (nextLifecycleGeneration) => {
+                lifecycleGeneration = nextLifecycleGeneration;
+              },
               onAgentEvent: attemptLifecycleCallbacks.onAgentEvent,
               deferTerminalLifecycleEnd: true,
             });
           },
         });
-        result = fallbackResult.result;
+        result = applyAgentRunAbortMetadata(fallbackResult.result, opts.abortSignal);
+        if (isAgentRunRestartAbortReason(opts.abortSignal?.reason)) {
+          throw opts.abortSignal?.reason;
+        }
         fallbackProvider = fallbackResult.provider;
         fallbackModel = fallbackResult.model;
         if (
@@ -1923,6 +1997,7 @@ async function agentCommandInternal(
             if (!attemptLifecycleState.lifecycleEnded) {
               emitAgentEvent({
                 runId,
+                lifecycleGeneration,
                 stream: "lifecycle",
                 data: {
                   phase: "error",
@@ -1953,6 +2028,7 @@ async function agentCommandInternal(
             if (!attemptLifecycleState.lifecycleEnded) {
               emitAgentEvent({
                 runId,
+                lifecycleGeneration,
                 stream: "lifecycle",
                 data: {
                   phase: "error",
@@ -2003,12 +2079,14 @@ async function agentCommandInternal(
         if (!attemptLifecycleState.lifecycleEnded) {
           emitAgentEvent({
             runId,
+            lifecycleGeneration,
             stream: "lifecycle",
             data: {
               phase: "error",
               startedAt,
               endedAt: Date.now(),
               error: err instanceof Error ? err.message : "Agent run failed",
+              ...resolveAgentRunAbortLifecycleFields(opts.abortSignal),
             },
           });
         }
@@ -2189,6 +2267,7 @@ async function agentCommandInternal(
         sessionEntry,
         result,
         payloads,
+        assertDeliveryCurrent: () => assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration),
       };
       const deliveryResult = await deliverAgentCommandResult(
         resolveFreshSessionEntryForDelivery
@@ -2261,7 +2340,7 @@ async function agentCommandInternal(
         );
       }
     }
-    clearAgentRunContext(runId);
+    clearAgentRunContext(runId, lifecycleGeneration);
   }
 }
 
@@ -2272,25 +2351,30 @@ export async function agentCommand(
   deps?: CliDeps,
 ) {
   const resolvedDeps = await resolveAgentCommandDeps(deps);
-  return await withLocalGatewayRequestScope(
-    {
-      deps: resolvedDeps,
-      getRuntimeConfig,
-    },
-    async () =>
-      await agentCommandInternal(
-        {
-          ...opts,
-          // agentCommand is the trusted-operator entrypoint used by CLI/local flows.
-          // Ingress callers must opt into owner identity explicitly via
-          // agentCommandFromIngress so network-facing paths cannot inherit this default by accident.
-          senderIsOwner: opts.senderIsOwner ?? true,
-          // Local/CLI callers are trusted by default for per-run model overrides.
-          allowModelOverride: opts.allowModelOverride ?? true,
-        },
-        runtime,
-        resolvedDeps,
-      ),
+  const lifecycleGeneration =
+    opts.lifecycleGeneration ?? captureAgentRunLifecycleGeneration(opts.runId ?? "");
+  return await withAgentRunLifecycleGeneration(lifecycleGeneration, () =>
+    withLocalGatewayRequestScope(
+      {
+        deps: resolvedDeps,
+        getRuntimeConfig,
+      },
+      async () =>
+        await agentCommandInternal(
+          {
+            ...opts,
+            lifecycleGeneration,
+            // agentCommand is the trusted-operator entrypoint used by CLI/local flows.
+            // Ingress callers must opt into owner identity explicitly via
+            // agentCommandFromIngress so network-facing paths cannot inherit this default by accident.
+            senderIsOwner: opts.senderIsOwner ?? true,
+            // Local/CLI callers are trusted by default for per-run model overrides.
+            allowModelOverride: opts.allowModelOverride ?? true,
+          },
+          runtime,
+          resolvedDeps,
+        ),
+    ),
   );
 }
 
@@ -2303,10 +2387,18 @@ export async function agentCommandFromIngress(
   if (typeof opts.allowModelOverride !== "boolean") {
     throw new Error("allowModelOverride must be explicitly set for ingress agent runs.");
   }
-  return await agentCommandInternal(
-    { ...opts, senderIsOwner: opts.senderIsOwner === true },
-    runtime,
-    deps,
+  const lifecycleGeneration =
+    opts.lifecycleGeneration ?? captureAgentRunLifecycleGeneration(opts.runId ?? "");
+  return await withAgentRunLifecycleGeneration(lifecycleGeneration, () =>
+    agentCommandInternal(
+      {
+        ...opts,
+        lifecycleGeneration,
+        senderIsOwner: opts.senderIsOwner === true,
+      },
+      runtime,
+      deps,
+    ),
   );
 }
 

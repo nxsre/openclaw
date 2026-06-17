@@ -306,9 +306,10 @@ export function hasMemoryRuntime(): boolean {
 function cloneMemoryPublicArtifact(
   artifact: MemoryPluginPublicArtifact,
 ): MemoryPluginPublicArtifact {
+  const agentIds = Array.isArray(artifact.agentIds) ? artifact.agentIds : [];
   return {
     ...artifact,
-    agentIds: [...artifact.agentIds],
+    agentIds: [...agentIds],
   };
 }
 
