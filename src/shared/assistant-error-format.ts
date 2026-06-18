@@ -5,8 +5,16 @@
 // message.content 都经过 formatRawAssistantErrorForUi() 这一层，故仅在此处 short-circuit。
 // 详细日志（provider-http-error 等）仍按原样写到服务端，便于运维查问题。
 const USER_FACING_FALLBACK_ENV = "OPENCLAW_LLM_ERROR_FALLBACK_TEXT";
-export function userFacingFallbackText(): string | null {
-  const raw = process.env[USER_FACING_FALLBACK_ENV];
+// XCPH: 按 HTTP 状态码读 env 配置的面向用户兜底文案。
+// 变量名 = OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status>(如 _402 _429 _500;放在 openclaw.json 的
+// env.vars 里)。配了该状态码 → 返回对应文案(支持 %{http_code}/%{error_message} 等变量替换);
+// 没配该状态码 / 取不到状态码 → 返回 null,调用方回退显示原始错误信息(不再有统一兜底文案)。
+export function userFacingFallbackText(rawError?: string): string | null {
+  if (typeof rawError !== "string") return null;
+  const status =
+    extractLeadingHttpStatus(rawError)?.code ?? extractHttpStatusFromErrorText(rawError);
+  if (status === undefined || !Number.isFinite(status)) return null;
+  const raw = process.env[`${USER_FACING_FALLBACK_ENV}_${status}`];
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   return trimmed === "" ? null : trimmed;
@@ -309,10 +317,10 @@ export function applyFallbackVars(template: string, rawErr: string): string {
 
 export function formatRawAssistantErrorForUi(raw?: string): string {
   const trimmed = (raw ?? "").trim();
-  const fallback = userFacingFallbackText();
+  const fallback = userFacingFallbackText(trimmed);
   if (fallback !== null) {
-    // 任意 LLM 异常（HTTP 4xx/5xx、流式畸形、provider 内部错、敏感内容拒绝等）一律
-    // 用统一兜底文案;%{http_code} 等变量替换为真实值;原始详情仍在 provider-http-error 日志可查。
+    // 该状态码已在 env.vars 配置兜底文案 → 用它;%{http_code} 等变量替换为真实值;
+    // 原始详情仍在 provider-http-error 日志可查。未配置的状态码不走这里,落到下方原始错误。
     return applyFallbackVars(fallback, trimmed);
   }
   if (!trimmed) {
@@ -328,11 +336,9 @@ export function formatRawAssistantErrorForUi(raw?: string): string {
   }
 
   const leadingStatus = extractLeadingHttpStatus(trimmed);
-  const resolvedStatus = leadingStatus?.code ?? extractHttpStatusFromErrorText(trimmed);
   const isHtmlChallenge = isCloudflareOrHtmlErrorPage(trimmed);
-  if (resolvedStatus !== undefined && isNonOkHttpStatus(resolvedStatus)) {
-    return formatNonOkHttpStatusUserMessage(resolvedStatus);
-  }
+  // XCPH: 未在 env.vars 配置该状态码 → 不再用硬编码的英文/中文按类文案,直接落到下方
+  // 解析出的「HTTP <code> <type>: <provider 真实 message>」即原始错误信息。
   if (leadingStatus && isHtmlChallenge) {
     return `The AI service is temporarily unavailable (HTTP ${leadingStatus.code}). Please try again in a moment.`;
   }

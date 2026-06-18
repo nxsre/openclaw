@@ -436,10 +436,9 @@ export function sanitizeUserFacingText(text: unknown, opts?: { errorContext?: bo
     return formatRawAssistantErrorForUi(trimmed);
   }
   if (errorContext) {
-    // XCPH: OPENCLAW_LLM_ERROR_FALLBACK_TEXT 已设 → 任意 LLM 错误清洗成统一兜底文案。
-    // 覆盖所有 channel auto-reply 路径（微信 / QQ / NIM / OpenIM / 飞书）的错误返回。
-    // 详情仍在 provider-http-error 日志可查。
-    const fallback = userFacingFallbackText();
+    // XCPH: 该 HTTP 状态码若在 env.vars 配了 OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status> → 用该文案;
+    // 没配 → 落到下面的原始错误清洗。覆盖所有 channel auto-reply 路径(微信/QQ/NIM/OpenIM/飞书)。
+    const fallback = userFacingFallbackText(trimmed);
     if (fallback !== null) {
       return applyFallbackVars(fallback, trimmed);
     }

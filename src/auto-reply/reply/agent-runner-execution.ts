@@ -799,9 +799,9 @@ function buildAuthProfileFailoverFailureText(error: unknown): string | null {
 }
 
 function formatForwardedExternalRunFailureText(message: string): string {
-  // XCPH: OPENCLAW_LLM_ERROR_FALLBACK_TEXT 已设 → channel 自动回复直接用兜底文案，
-  // 不再拼装 "⚠️ Agent failed before reply: ... use /new ..." 这类英文模板。
-  const fallback = userFacingFallbackText();
+  // XCPH: 该 HTTP 状态码若在 env.vars 配了 OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status> → 用该文案;
+  // 没配 → 落到下面清洗出的原始错误,不再拼装英文模板。
+  const fallback = userFacingFallbackText(message);
   if (fallback !== null) {
     return applyFallbackVars(fallback, message);
   }
@@ -883,18 +883,17 @@ function markAgentRunFailureReplyPayload<T extends ReplyPayload>(payload: T): T 
   // XCPH: 当 OPENCLAW_LLM_ERROR_FALLBACK_TEXT 设置后，所有 channel auto-reply 失败的
   // text 字段统一替换为兜底文案——覆盖所有 channel 与所有失败来源;详细原因仍在服务端日志。
   // SILENT_REPLY_TOKEN 等特殊路由 sentinel 保持不变。先替换文案,再走 6.5 的 isError 标记。
-  const fallback = userFacingFallbackText();
-  if (
-    fallback !== null &&
+  const currentText =
     payload &&
     typeof payload === "object" &&
     "text" in payload &&
     typeof (payload as { text: unknown }).text === "string"
-  ) {
-    const currentText = (payload as { text: string }).text;
-    if (currentText !== SILENT_REPLY_TOKEN) {
-      (payload as { text: string }).text = applyFallbackVars(fallback, currentText);
-    }
+      ? (payload as { text: string }).text
+      : undefined;
+  // XCPH: 按 payload.text 里的 HTTP 状态码查 env.vars 配的兜底文案;没配则保留原始 text。
+  const fallback = userFacingFallbackText(currentText);
+  if (fallback !== null && currentText !== undefined && currentText !== SILENT_REPLY_TOKEN) {
+    (payload as { text: string }).text = applyFallbackVars(fallback, currentText);
   }
   const marked = markReplyPayloadForSourceSuppressionDelivery(payload);
   if (!isSilentReplyText(marked.text, SILENT_REPLY_TOKEN)) {

@@ -1333,10 +1333,9 @@ export function formatAssistantErrorText(
   if (msg.stopReason !== "error" && !raw) {
     return undefined;
   }
-  // XCPH: OPENCLAW_LLM_ERROR_FALLBACK_TEXT 已设 → 任意 LLM 异常一律返回该兜底文案。
-  // 跳过下面所有按 provider runtime / role ordering / billing / reasoning 等细分类的
-  // 英文提示，对应统一面向用户输出（详情仍写到 provider-http-error 日志）。
-  const fallback = userFacingFallbackText();
+  // XCPH: 该 HTTP 状态码若在 env.vars 配了 OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status> → 返回该文案;
+  // 没配 → 落到下面按 provider runtime / billing / reasoning 等细分类的原始/详细错误。
+  const fallback = userFacingFallbackText(raw);
   if (fallback !== null) {
     return applyFallbackVars(fallback, raw);
   }
