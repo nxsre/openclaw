@@ -876,7 +876,7 @@ async function withInProcessShortTermLock<T>(lockPath: string, task: () => Promi
   }
 }
 
-async function withShortTermLock<T>(workspaceDir: string, task: () => Promise<T>): Promise<T> {
+export async function withShortTermLock<T>(workspaceDir: string, task: () => Promise<T>): Promise<T> {
   const lockKey = memoryCoreWorkspaceStateKey(workspaceDir);
   const lockRef = resolveLockPath(workspaceDir);
   const lockStore = openMemoryCoreStateStore<ShortTermLockEntry>({

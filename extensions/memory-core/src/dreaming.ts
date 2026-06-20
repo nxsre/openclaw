@@ -28,6 +28,7 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { peekSystemEventEntries } from "openclaw/plugin-sdk/system-event-runtime";
 import type { NarrativePhaseData } from "./dreaming-narrative.js";
+import { consolidateMemoryFile, isConsolidationEnabled } from "./dreaming-consolidation.js";
 import {
   formatErrorMessage,
   includesSystemEventToken,
@@ -643,6 +644,26 @@ export async function runShortTermDreamingPromotionIfTriggered(params: {
         params.logger.info(
           `memory-core: dreaming applied details [workspace=${workspaceDir}] ${appliedSummary}`,
         );
+      }
+      // Mem0 式整合:去重/合并 MEMORY.md(env 开关 OPENCLAW_MEMORY_DREAMING_CONSOLIDATION,
+      // 保守 + 备份 memory/.backups/ + 大小/marker 护栏,非致命)。在 append 之后跑。
+      if (isConsolidationEnabled() && params.subagent) {
+        try {
+          const cons = await consolidateMemoryFile({
+            workspaceDir,
+            subagent: params.subagent,
+            model: params.config.execution?.model,
+            nowMs: sweepNowMs,
+            logger: params.logger,
+          });
+          reportLines.push(
+            cons.applied
+              ? `- Consolidated MEMORY.md: ${cons.beforeChars}→${cons.afterChars} chars (backup ${cons.backupPath ?? "n/a"}).`
+              : `- Consolidation skipped: ${cons.reason}.`,
+          );
+        } catch (consErr) {
+          reportLines.push(`- Consolidation error: ${String((consErr as Error)?.message ?? consErr)}.`);
+        }
       }
       await writeDeepDreamingReport({
         workspaceDir,
