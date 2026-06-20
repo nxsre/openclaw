@@ -502,6 +502,7 @@ export async function runShortTermDreamingPromotionIfTriggered(params: {
   config: ShortTermPromotionDreamingConfig;
   logger: Logger;
   subagent?: OpenClawPluginApi["runtime"]["subagent"];
+  llm?: OpenClawPluginApi["runtime"]["llm"];
 }): Promise<{ handled: true; reason: string } | undefined> {
   if (params.trigger !== "heartbeat" && params.trigger !== "cron") {
     return undefined;
@@ -647,11 +648,11 @@ export async function runShortTermDreamingPromotionIfTriggered(params: {
       }
       // Mem0 式整合:去重/合并 MEMORY.md(env 开关 OPENCLAW_MEMORY_DREAMING_CONSOLIDATION,
       // 保守 + 备份 memory/.backups/ + 大小/marker 护栏,非致命)。在 append 之后跑。
-      if (isConsolidationEnabled() && params.subagent) {
+      if (isConsolidationEnabled() && params.llm) {
         try {
           const cons = await consolidateMemoryFile({
             workspaceDir,
-            subagent: params.subagent,
+            llm: params.llm,
             model: params.config.execution?.model,
             nowMs: sweepNowMs,
             logger: params.logger,
@@ -979,6 +980,7 @@ export function registerShortTermPromotionDreaming(api: OpenClawPluginApi): void
         config,
         logger: api.logger,
         subagent: config.enabled ? api.runtime?.subagent : undefined,
+        llm: config.enabled ? api.runtime?.llm : undefined,
       });
     } catch (err) {
       api.logger.error(`memory-core: dreaming trigger failed: ${formatErrorMessage(err)}`);

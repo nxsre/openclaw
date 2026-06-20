@@ -2,6 +2,10 @@
 // applyShortTermPromotions(只追加+marker去重)之后,跑一次 LLM 把累积的重复/过时
 // 事实合并掉。保守设计:env 开关、默认不删、备份 + 大小/marker 护栏,降误删风险。
 //
+// 用 runtime 的裸 LLM 补全(api.runtime.llm.complete,无工具、无 session 争用的纯转换),
+// 而非 subagent agent-turn —— 后者会带工具闲聊、不稳定吐文件,且与 narrative run 在
+// agent:main 上并发撞 EmbeddedAttemptSessionTakeoverError。
+//
 // 由 env 控制(不引入主包配置类型,留在本扩展内 → 走 memory-core overlay 即可生效):
 //   OPENCLAW_MEMORY_DREAMING_CONSOLIDATION=1         开启整合(默认关)
 //   OPENCLAW_MEMORY_DREAMING_CONSOLIDATION_DELETE=1  允许删除被新事实明确矛盾的旧项(默认只合并不删)
@@ -9,7 +13,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { extractNarrativeText } from "./dreaming-narrative.js";
 import { withShortTermLock } from "./short-term-promotion.js";
 
 const MEMORY_FILE = "MEMORY.md";
@@ -17,20 +20,17 @@ const MARKER_RE = /<!--[\s\S]*?-->/g;
 const MIN_CHARS = 200;
 const MIN_KEEP_RATIO = 0.5;
 
-type SubagentSurface = {
-  run: (p: {
-    idempotencyKey: string;
-    sessionKey: string;
-    message: string;
+// 结构化最小面,兼容 OpenClawPluginApi["runtime"]["llm"](api.runtime.llm)。
+// 走 simple-completion runtime:纯文本补全,不挂工具,返回 { text }。
+type LlmSurface = {
+  complete: (p: {
+    systemPrompt?: string;
+    messages: { role: "system" | "user" | "assistant"; content: string }[];
     model?: string;
-    extraSystemPrompt?: string;
-    lane?: string;
-    lightContext?: boolean;
-    deliver?: boolean;
-  }) => Promise<{ runId: string }>;
-  waitForRun: (p: { runId: string; timeoutMs?: number }) => Promise<{ status: string; error?: string }>;
-  getSessionMessages: (p: { sessionKey: string; limit?: number }) => Promise<{ messages: unknown[] }>;
-  deleteSession: (p: { sessionKey: string }) => Promise<void>;
+    purpose?: string;
+    temperature?: number;
+    maxTokens?: number;
+  }) => Promise<{ text: string }>;
 };
 
 export function isConsolidationEnabled(): boolean {
@@ -48,7 +48,8 @@ const SYSTEM_PROMPT_BASE = [
   "- 逐字保留所有 HTML 注释标记 `<!-- ... -->`(它们用于去重追踪,绝不能删改或新增)。",
   "- 保持原有 markdown 结构、标题与中文风格。",
   "- {DELETE_POLICY}",
-  "只输出整理后的完整 markdown 文件内容本身,不要任何解释,不要用代码块包裹。",
+  "只输出整理后的完整 markdown 文件内容本身,不要任何解释、前言或对话,不要用代码块包裹。",
+  "即使无需任何改动,也要原样完整输出当前文件内容(绝不能输出「无需修改」之类的说明)。",
 ].join("\n");
 
 export type ConsolidationResult = {
@@ -61,10 +62,9 @@ export type ConsolidationResult = {
 
 export async function consolidateMemoryFile(params: {
   workspaceDir: string;
-  subagent: SubagentSurface;
+  llm: LlmSurface;
   model?: string;
   nowMs: number;
-  timeoutMs?: number;
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
 }): Promise<ConsolidationResult> {
   const memoryPath = path.join(params.workspaceDir, MEMORY_FILE);
@@ -80,25 +80,16 @@ export async function consolidateMemoryFile(params: {
     : "不要删除任何事实(精确重复除外),只合并、不删。";
   const sys = SYSTEM_PROMPT_BASE.replace("{DELETE_POLICY}", deletePolicy);
 
-  const sessionKey = `memory:consolidation:${params.nowMs}`;
   let cleaned: string | null = null;
   try {
-    const run = await params.subagent.run({
-      idempotencyKey: sessionKey,
-      sessionKey,
-      message: original,
+    const result = await params.llm.complete({
+      systemPrompt: sys,
+      messages: [{ role: "user", content: original }],
       ...(params.model ? { model: params.model } : {}),
-      extraSystemPrompt: sys,
-      lane: `memory-consolidation:${params.workspaceDir}`,
-      lightContext: true,
-      deliver: false,
+      purpose: "memory-consolidation",
+      temperature: 0,
     });
-    const res = await params.subagent.waitForRun({ runId: run.runId, timeoutMs: params.timeoutMs ?? 120_000 });
-    if (res.status !== "completed" && res.status !== "ok" && res.status !== "succeeded") {
-      return { applied: false, reason: `run status ${res.status}`, beforeChars: original.length, afterChars: original.length };
-    }
-    const msgs = await params.subagent.getSessionMessages({ sessionKey, limit: 6 });
-    cleaned = extractNarrativeText(msgs.messages);
+    cleaned = (result?.text ?? "").trim() || null;
   } catch (err) {
     return {
       applied: false,
@@ -106,12 +97,6 @@ export async function consolidateMemoryFile(params: {
       beforeChars: original.length,
       afterChars: original.length,
     };
-  } finally {
-    try {
-      await params.subagent.deleteSession({ sessionKey });
-    } catch {
-      /* ignore */
-    }
   }
 
   if (!cleaned) {
@@ -131,6 +116,10 @@ export async function consolidateMemoryFile(params: {
   if (cleanedMarkers < originalMarkers) {
     params.logger?.warn?.(`memory-core: consolidation rejected (lost markers: ${cleanedMarkers} < ${originalMarkers})`);
     return { applied: false, reason: `guard:lost-markers(${cleanedMarkers}/${originalMarkers})`, beforeChars: original.length, afterChars: cleaned.length };
+  }
+  // 无变化则不写(免无谓备份/IO)。
+  if (cleaned.trim() === original.trim()) {
+    return { applied: false, reason: "no-op (already consolidated)", beforeChars: original.length, afterChars: cleaned.length };
   }
 
   let backupPath: string | undefined;
