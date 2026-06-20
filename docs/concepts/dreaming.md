@@ -35,6 +35,22 @@ Dreaming uses three cooperative phases:
 
 These phases are internal implementation details, not separate user-configured "modes."
 
+A full sweep runs the phases in order, then (when enabled) consolidates `MEMORY.md`:
+
+```mermaid
+flowchart TD
+  cron([Dreaming cron]) --> light[Light phase<br/>ingest + stage candidates]
+  light --> rem[REM phase<br/>themes + reflections]
+  rem --> deep[Deep phase<br/>weighted ranking + gates]
+  deep --> append["Append promoted entries<br/>to MEMORY.md (marker dedup)"]
+  append --> gate{"CONSOLIDATION<br/>env enabled? (xcph)"}
+  gate -- no --> report[Deep dreaming report]
+  gate -- yes --> consol["Consolidate MEMORY.md<br/>api.runtime.llm.complete (no tools)"]
+  consol --> guards{"Guards pass?<br/>≥50% length · markers kept · changed"}
+  guards -- "no / no-op" --> keep[Keep original<br/>log reason] --> report
+  guards -- yes --> backup["Backup → memory/.backups/<br/>write merged MEMORY.md"] --> report
+```
+
 <AccordionGroup>
   <Accordion title="Light phase">
     Light phase ingests recent daily memory signals and recall traces, dedupes them, and stages candidate lines.
@@ -51,7 +67,8 @@ These phases are internal implementation details, not separate user-configured "
     - Ranks candidates using weighted scoring and threshold gates.
     - Requires `minScore`, `minRecallCount`, and `minUniqueQueries` to pass.
     - Rehydrates snippets from live daily files before writing, so stale/deleted snippets are skipped.
-    - Appends promoted entries to `MEMORY.md`.
+    - Appends promoted entries to `MEMORY.md` (append-only, deduped by HTML-comment marker).
+    - (xcph) Optionally runs a [MEMORY.md consolidation](#memorymd-consolidation) pass right after appending, merging duplicate/outdated facts via a bare LLM completion. Off by default.
     - Writes a `## Deep Sleep` summary into `DREAMS.md` and optionally writes `memory/dreaming/deep/YYYY-MM-DD.md`.
 
   </Accordion>
@@ -133,6 +150,30 @@ references, then writes a report with `promotion action: report-only`. Helpful
 verdicts map to a `promote` recommendation, neutral verdicts map to `defer`, and
 harmful verdicts map to `reject`; none of those recommendations writes to
 `MEMORY.md` or applies deep-phase promotion.
+
+## MEMORY.md consolidation
+
+<Note>
+This is an **xcph** project feature, controlled by environment variables (not JSON config) because it lives entirely inside the `memory-core` extension and ships via a lightweight overlay image — no base rebuild needed.
+</Note>
+
+Deep-phase promotion is **append-only**: it adds promoted entries to `MEMORY.md` and dedupes by HTML-comment marker, but it never merges or rewrites existing facts. Over time `MEMORY.md` accumulates near-duplicate and outdated entries. Consolidation adds the missing **merge/UPDATE** step (à la Mem0).
+
+When `OPENCLAW_MEMORY_DREAMING_CONSOLIDATION=1`, the deep phase — right after appending — runs a single **bare LLM completion** (`api.runtime.llm.complete`, a simple-completion runtime with **no tools and no agent session**, not a subagent turn) that returns a cleaned full `MEMORY.md`: duplicate facts merged, same-topic facts combined, all markers preserved.
+
+It is deliberately conservative:
+
+- **Backup first** — the current file is copied to `memory/.backups/MEMORY-<ms>.md` before any write.
+- **Guardrails** — the result is rejected (original kept) if it is shorter than 50% of the original, or if its HTML-marker (`<!-- ... -->`) count dropped. Code fences are stripped; if the output is identical to the original it is a no-op (no write).
+- **Merge-only by default** — `OPENCLAW_MEMORY_DREAMING_CONSOLIDATION_DELETE=1` is required before the model may drop an old fact that a newer one **explicitly contradicts**; otherwise nothing is deleted.
+- **Auditable** — the outcome (applied / skipped + reason, before→after chars, backup path) is recorded in the deep dreaming report.
+
+| Env var | Default | Effect |
+| ------- | ------- | ------ |
+| `OPENCLAW_MEMORY_DREAMING_CONSOLIDATION` | `0` (off) | Enable the consolidation pass |
+| `OPENCLAW_MEMORY_DREAMING_CONSOLIDATION_DELETE` | `0` (off) | Allow deleting facts an updated fact explicitly contradicts |
+
+Both default off, so the feature is inert until explicitly enabled. See [memory-config](/reference/memory-config#memorymd-consolidation-env-switches) for config context.
 
 ## Scheduling
 

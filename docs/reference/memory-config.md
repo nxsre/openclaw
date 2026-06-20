@@ -335,6 +335,32 @@ All under `memorySearch.query.hybrid`:
   </Tab>
 </Tabs>
 
+<Note>
+MMR and temporal decay both ship **disabled by default** upstream. Turning them on is a pure-config change — no rebuild or reindex — and usually improves recall quality: MMR removes near-duplicate hits so the model sees a broader set of distinct facts, and temporal decay biases results toward recent memory while leaving evergreen files untouched.
+</Note>
+
+### Recall threshold and pool size
+
+Tune how aggressively `memory_search` recalls candidates under `memorySearch.query`:
+
+| Key          | Type     | Default | Description                                                              |
+| ------------ | -------- | ------- | ------------------------------------------------------------------------ |
+| `minScore`   | `number` | `0.35`  | Minimum hybrid score for a chunk to be returned; lower to widen recall   |
+| `maxResults` | `number` | `6`     | Maximum chunks returned per `memory_search` call                         |
+
+Lower `minScore` and raise `maxResults` when you want broader recall, especially in combination with MMR and temporal decay. For example, this project (xcph) runs `minScore: 0.30` with `maxResults: 8` alongside MMR + decay so more distinct, recency-weighted facts survive into the final result set.
+
+### Startup-context window
+
+The reset/startup prelude injected on the first turn after `/new` or `/reset` carries a bounded slice of recent daily memory. It is tuned under `agents.defaults.startupContext`, not `memorySearch`:
+
+| Key               | Type     | Description                                                              |
+| ----------------- | -------- | ----------------------------------------------------------------------- |
+| `dailyMemoryDays` | `number` | How many recent `memory/YYYY-MM-DD.md` daily files to prepend           |
+| `maxTotalChars`   | `number` | Cap on total characters injected by the startup prelude                 |
+
+Shrinking `dailyMemoryDays` / `maxTotalChars` saves tokens on every reset turn without losing history: older daily notes stay reachable on demand through `memory_search`, whose `memory` source covers `MEMORY.md` plus `memory/*.md`. See [`agents.defaults.startupContext`](/gateway/config-agents#agentsdefaultsstartupcontext) for the full field set.
+
 ### Full example
 
 ```json5
@@ -343,6 +369,8 @@ All under `memorySearch.query.hybrid`:
     defaults: {
       memorySearch: {
         query: {
+          minScore: 0.3,
+          maxResults: 8,
           hybrid: {
             vectorWeight: 0.7,
             textWeight: 0.3,
@@ -622,6 +650,28 @@ For conceptual behavior and slash commands, see [Dreaming](/concepts/dreaming).
 - The light/deep/REM phase policy and thresholds are internal behavior, not user-facing config.
 
 </Note>
+
+### MEMORY.md consolidation (env switches)
+
+<Note>
+These two switches are an **xcph project feature**. They are read from the environment, not from `openclaw.json`, because the consolidation logic lives entirely inside the `memory-core` extension and ships via a lightweight overlay — no base-image rebuild is needed to enable it.
+</Note>
+
+Deep-phase promotion is append-only: it adds strong signals to `MEMORY.md` but never edits or removes existing lines, so duplicate or stale facts accumulate over time. The consolidation pass adds the missing UPDATE capability. When enabled, immediately after deep dreaming appends its promoted entries, `memory-core` runs one **bare LLM completion** (`api.runtime.llm.complete`, no tools) that semantically merges redundant or outdated facts in `MEMORY.md`.
+
+| Env var                                          | Default | Description                                                                                                                                  |
+| ------------------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OPENCLAW_MEMORY_DREAMING_CONSOLIDATION`         | `0`     | Set to `1` to run the consolidation pass after deep-phase promotion. Merges duplicate/outdated facts; does not delete by default.            |
+| `OPENCLAW_MEMORY_DREAMING_CONSOLIDATION_DELETE`  | `0`     | Set to `1` to also allow removing old items that are **directly contradicted** by a newer fact. With the default `0`, consolidation only merges and never deletes. |
+
+Safety behavior:
+
+- **Backup first.** Before rewriting, the original is copied to `memory/.backups/MEMORY-<ms>.md`.
+- **Length guardrail.** If the consolidated result is shorter than 50% of the original, the rewrite is rejected and the original is kept.
+- **Marker guardrail.** If the number of HTML markers (`<!-- ... -->`) drops, the rewrite is rejected and the original is kept.
+- **No-op when unchanged.** If the model output is identical to the original, nothing is written.
+
+For the conceptual behavior, see the **MEMORY.md consolidation** section in [Dreaming](/concepts/dreaming).
 
 ## Related
 
