@@ -1,8 +1,6 @@
 /**
  * Resolves memory-search source, sync, and ranking configuration.
  */
-import os from "node:os";
-import path from "node:path";
 import {
   findNormalizedProviderValue,
   normalizeProviderId,
@@ -16,7 +14,6 @@ import {
   uniqueStrings,
 } from "@openclaw/normalization-core/string-normalization";
 import type { OpenClawConfig, MemorySearchConfig } from "../config/config.js";
-import { resolveStateDir } from "../config/paths.js";
 import type { SecretInput } from "../config/types.secrets.js";
 import {
   isMemoryMultimodalEnabled,
@@ -25,9 +22,9 @@ import {
 } from "../memory-host-sdk/multimodal.js";
 import { getEmbeddingProvider } from "../plugins/embedding-provider-runtime.js";
 import { getMemoryEmbeddingProvider } from "../plugins/memory-embedding-providers.js";
-import { clampInt, clampNumber, resolveUserPath } from "../utils.js";
-import { resolveAgentConfig, resolveSessionMemoryGroupSegment } from "./agent-scope.js";
-import type { SessionEntry } from "../config/sessions/types.js";
+import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
+import { clampInt, clampNumber } from "../utils.js";
+import { resolveAgentConfig } from "./agent-scope.js";
 
 export type ResolvedMemorySearchConfig = {
   enabled: boolean;
@@ -64,7 +61,7 @@ export type ResolvedMemorySearchConfig = {
   };
   store: {
     driver: "sqlite";
-    path: string;
+    databasePath: string;
     fts: {
       tokenizer: "unicode61" | "trigram";
     };
@@ -178,51 +175,6 @@ function normalizeSources(
   return Array.from(normalized);
 }
 
-/**
- * Resolve the on-disk memory store (collection sqlite) path for an agent,
- * isolating group/channel sessions into a per-group subdirectory so a group's
- * recall cannot reach another group's (or main's) memory.
- *
- * - Default path: `<stateDir>/memory/<agentId>.sqlite`. When a group token is
- *   present, the path becomes `<stateDir>/memory/groups/<safeGid>/<agentId>.sqlite`,
- *   mirroring the per-group workspace isolation.
- * - When `store.path` is explicitly configured, the user's value wins verbatim
- *   (no group segment is injected) so explicit overrides keep their semantics.
- * - Direct/main/non-group sessions and any malformed group token fall back to
- *   the unchanged global default path, guaranteeing zero regression.
- */
-export function resolveMemoryStorePath(params: {
-  agentId: string;
-  raw?: string;
-  sessionKey?: string | null;
-  sessionEntry?: Pick<SessionEntry, "chatType"> | null;
-  groupSegment?: string;
-}): string {
-  const stateDir = resolveStateDir(process.env, os.homedir);
-  if (params.raw) {
-    // Explicit user configuration wins verbatim; only resolve {agentId} tokens.
-    const withToken = params.raw.includes("{agentId}")
-      ? params.raw.replaceAll("{agentId}", params.agentId)
-      : params.raw;
-    return resolveUserPath(withToken);
-  }
-  const groupSegment =
-    params.groupSegment ??
-    resolveSessionMemoryGroupSegment(params.sessionKey, params.sessionEntry);
-  if (groupSegment) {
-    return path.join(stateDir, "memory", "groups", groupSegment, `${params.agentId}.sqlite`);
-  }
-  return path.join(stateDir, "memory", `${params.agentId}.sqlite`);
-}
-
-function resolveStorePath(
-  agentId: string,
-  raw?: string,
-  groupSegment?: string,
-): string {
-  return resolveMemoryStorePath({ agentId, raw, groupSegment });
-}
-
 function getConfiguredMemoryEmbeddingProvider(
   providerId: string,
   cfg: OpenClawConfig,
@@ -249,7 +201,6 @@ function mergeConfig(
   defaults: MemorySearchConfig | undefined,
   overrides: MemorySearchConfig | undefined,
   agentId: string,
-  groupSegment?: string,
 ): ResolvedMemorySearchConfig {
   const enabled = overrides?.enabled ?? defaults?.enabled ?? true;
   const sessionMemory =
@@ -341,11 +292,7 @@ function mergeConfig(
   };
   const store = {
     driver: overrides?.store?.driver ?? defaults?.store?.driver ?? "sqlite",
-    path: resolveStorePath(
-      agentId,
-      overrides?.store?.path ?? defaults?.store?.path,
-      groupSegment,
-    ),
+    databasePath: resolveOpenClawAgentSqlitePath({ agentId, env: process.env }),
     fts,
     vector,
   };
@@ -512,18 +459,10 @@ function resolveSyncConfig(
 export function resolveMemorySearchConfig(
   cfg: OpenClawConfig,
   agentId: string,
-  scope?: {
-    sessionKey?: string | null;
-    sessionEntry?: Pick<SessionEntry, "chatType"> | null;
-    groupSegment?: string;
-  },
 ): ResolvedMemorySearchConfig | null {
   const defaults = cfg.agents?.defaults?.memorySearch;
   const overrides = resolveAgentConfig(cfg, agentId)?.memorySearch;
-  const groupSegment =
-    scope?.groupSegment ??
-    resolveSessionMemoryGroupSegment(scope?.sessionKey, scope?.sessionEntry);
-  const resolved = mergeConfig(cfg, defaults, overrides, agentId, groupSegment);
+  const resolved = mergeConfig(cfg, defaults, overrides, agentId);
   if (!resolved.enabled) {
     return null;
   }

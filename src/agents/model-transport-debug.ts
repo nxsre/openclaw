@@ -11,9 +11,9 @@ type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
 type ModelTransportDebugEnv = NodeJS.ProcessEnv;
 
 /** Payload debug detail levels accepted by `OPENCLAW_DEBUG_MODEL_PAYLOAD`. */
-export type ModelPayloadDebugMode = "off" | "summary" | "tools" | "full-redacted";
+type ModelPayloadDebugMode = "off" | "summary" | "tools" | "full-redacted";
 /** SSE debug detail levels accepted by `OPENCLAW_DEBUG_SSE`. */
-export type ModelSseDebugMode = "off" | "events" | "peek";
+type ModelSseDebugMode = "off" | "events" | "peek";
 
 function normalizeEnv(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";

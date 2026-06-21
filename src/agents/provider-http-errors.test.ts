@@ -16,13 +16,14 @@ vi.mock("../logging/subsystem.js", () => ({
 import {
   assertOkOrThrowProviderError,
   assertOkOrThrowHttpError,
+  createProviderHttpError,
   extractProviderErrorDetail,
-  extractProviderErrorInfo,
   extractProviderRequestId,
   maybeLogProviderHttpErrorResponse,
   ProviderHttpError,
   readProviderBinaryResponse,
   readProviderJsonResponse,
+  readResponseTextLimited,
 } from "./provider-http-errors.js";
 
 function createStreamingBinaryResponse(params: {
@@ -122,6 +123,46 @@ describe("provider error utils", () => {
     } satisfies Partial<ProviderHttpError>);
   });
 
+  it("releases provider error body reader locks after bounded reads complete", async () => {
+    const releaseLock = vi.fn();
+    const cancel = vi.fn(async () => undefined);
+    const chunks: Array<ReadableStreamReadResult<Uint8Array>> = [
+      { done: false, value: new TextEncoder().encode("provider error") },
+      { done: true, value: undefined },
+    ];
+    const response = {
+      body: {
+        getReader: () => ({
+          read: async () => chunks.shift() ?? { done: true, value: undefined },
+          cancel,
+          releaseLock,
+        }),
+      },
+    } as unknown as Response;
+
+    await expect(readResponseTextLimited(response, 64)).resolves.toBe("provider error");
+    expect(cancel).not.toHaveBeenCalled();
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels and releases provider error body readers after diagnostic truncation", async () => {
+    const releaseLock = vi.fn();
+    const cancel = vi.fn(async () => undefined);
+    const response = {
+      body: {
+        getReader: () => ({
+          read: async () => ({ done: false, value: new TextEncoder().encode("provider error") }),
+          cancel,
+          releaseLock,
+        }),
+      },
+    } as unknown as Response;
+
+    await expect(readResponseTextLimited(response, 8)).resolves.toBe("provider");
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+  });
+
   it("attaches structured provider error metadata", async () => {
     // API-key-like substrings must be redacted from stored error bodies.
     const response = new Response(
@@ -138,19 +179,8 @@ describe("provider error utils", () => {
       },
     );
 
-    const info = await extractProviderErrorInfo(response.clone());
-    expect(info).toMatchObject({
-      code: "insufficient_quota",
-      type: "rate_limit_error",
-      requestId: "req_456",
-    });
-    expect(info.detail).toContain("Quota exceeded");
-    expect(info.body).toContain("Quota exceeded");
-    expect(info.body).not.toContain("sk-secret1234567890abcd");
-
-    await expect(
-      assertOkOrThrowProviderError(response, "Provider API error"),
-    ).rejects.toMatchObject({
+    const error = await createProviderHttpError(response, "Provider API error");
+    expect(error).toMatchObject({
       name: "ProviderHttpError",
       status: 429,
       statusCode: 429,
@@ -159,6 +189,10 @@ describe("provider error utils", () => {
       errorType: "rate_limit_error",
       requestId: "req_456",
     } satisfies Partial<ProviderHttpError>);
+    const providerError = error as ProviderHttpError;
+    expect(providerError.message).toContain("Quota exceeded");
+    expect(providerError.errorBody).toContain("Quota exceeded");
+    expect(providerError.errorBody).not.toContain("sk-secret1234567890abcd");
   });
 
   it("keeps legacy HTTP status formatting while sharing provider parsing", async () => {

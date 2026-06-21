@@ -207,11 +207,6 @@ export function isApiKeyRateLimitError(message: string): boolean {
   return false;
 }
 
-/** Return whether an Anthropic error message indicates rate limiting. */
-export function isAnthropicRateLimitError(message: string): boolean {
-  return isApiKeyRateLimitError(message);
-}
-
 /** Return whether an Anthropic error message indicates billing exhaustion. */
 export function isAnthropicBillingError(message: string): boolean {
   const lower = normalizeLowercaseStringOrEmpty(message);
