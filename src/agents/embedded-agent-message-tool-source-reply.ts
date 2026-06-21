@@ -476,6 +476,16 @@ export function isDeliveredMessagingToolResult(params: {
   ) {
     return false;
   }
+  // xcph(v2026.6.9 merge):防御性守卫——回执明确表示「未送达 / no-op」时直接判否,
+  // 避免后续正向 OK 信号把它误判为已送达(上游正向逻辑未显式覆盖这两种)。
+  if (
+    deliveryEnvelopeIndicatesNonDelivery(params.result) ||
+    deliveryEnvelopeIndicatesNonDelivery(params.hookResult) ||
+    deliveryEnvelopeIndicatesNoOp(params.result) ||
+    deliveryEnvelopeIndicatesNoOp(params.hookResult)
+  ) {
+    return false;
+  }
   if (
     deliveryEnvelopeIndicatesPartialDelivery(params.result) ||
     deliveryEnvelopeIndicatesPartialDelivery(params.hookResult)

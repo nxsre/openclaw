@@ -24,7 +24,13 @@ import { getEmbeddingProvider } from "../plugins/embedding-provider-runtime.js";
 import { getMemoryEmbeddingProvider } from "../plugins/memory-embedding-providers.js";
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
 import { clampInt, clampNumber } from "../utils.js";
-import { resolveAgentConfig } from "./agent-scope.js";
+import { resolveAgentConfig, resolveSessionMemoryGroupSegment } from "./agent-scope.js";
+import path from "node:path";
+import type { SessionEntry } from "../config/sessions/types.js";
+
+// xcph(v2026.6.9 merge):群组会话记忆隔离选项(群间记忆不互通,安全特性;在上游新
+// agent-db 路径方案上重建——群组库放 <agentDir>/groups/<seg>/ 下,与默认库隔离)。
+type MemoryGroupOpts = { sessionKey?: string | null; sessionEntry?: Pick<SessionEntry, "chatType"> | null };
 
 export type ResolvedMemorySearchConfig = {
   enabled: boolean;
@@ -201,6 +207,7 @@ function mergeConfig(
   defaults: MemorySearchConfig | undefined,
   overrides: MemorySearchConfig | undefined,
   agentId: string,
+  groupOpts?: MemoryGroupOpts,
 ): ResolvedMemorySearchConfig {
   const enabled = overrides?.enabled ?? defaults?.enabled ?? true;
   const sessionMemory =
@@ -290,9 +297,16 @@ function mergeConfig(
   const fts = {
     tokenizer: overrides?.store?.fts?.tokenizer ?? defaults?.store?.fts?.tokenizer ?? "unicode61",
   };
+  // xcph(v2026.6.9 merge):群组会话隔离——群组库放 <agentDir>/groups/<seg>/openclaw-agent.sqlite,
+  // 与默认库及其它群组互不可读;非群组(main/direct)落默认路径,零回归。
+  const defaultDbPath = resolveOpenClawAgentSqlitePath({ agentId, env: process.env });
+  const groupSegment = resolveSessionMemoryGroupSegment(groupOpts?.sessionKey, groupOpts?.sessionEntry);
+  const databasePath = groupSegment
+    ? path.join(path.dirname(path.dirname(defaultDbPath)), "groups", groupSegment, "openclaw-agent.sqlite")
+    : defaultDbPath;
   const store = {
     driver: overrides?.store?.driver ?? defaults?.store?.driver ?? "sqlite",
-    databasePath: resolveOpenClawAgentSqlitePath({ agentId, env: process.env }),
+    databasePath,
     fts,
     vector,
   };
@@ -459,10 +473,11 @@ function resolveSyncConfig(
 export function resolveMemorySearchConfig(
   cfg: OpenClawConfig,
   agentId: string,
+  groupOpts?: MemoryGroupOpts,
 ): ResolvedMemorySearchConfig | null {
   const defaults = cfg.agents?.defaults?.memorySearch;
   const overrides = resolveAgentConfig(cfg, agentId)?.memorySearch;
-  const resolved = mergeConfig(cfg, defaults, overrides, agentId);
+  const resolved = mergeConfig(cfg, defaults, overrides, agentId, groupOpts);
   if (!resolved.enabled) {
     return null;
   }
