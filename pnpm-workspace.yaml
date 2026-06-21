@@ -133,7 +133,9 @@ overrides:
   tar: 7.5.16
   tough-cookie: 4.1.3
   yauzl: 3.2.1
-  protobufjs: 8.4.1
+  # xcph 曾 override 到 8.4.1;v2026.6.9 合并回退到上游 7.6.3 以与上游 lockfile 一致
+  # (避免 --frozen-lockfile CI 失败)。edge gRPC 若需 8.4.1 在 openclaw-edge 仓单独处理。
+  protobufjs: 7.6.3
   uuid: 14.0.0
 
 allowBuilds:
