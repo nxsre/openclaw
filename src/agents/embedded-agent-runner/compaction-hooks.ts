@@ -39,9 +39,7 @@ async function runPostCompactionSessionMemorySync(params: {
       config: params.config,
       agentId: params.agentId,
     });
-    const resolvedMemory = resolveMemorySearchConfig(params.config, agentId, {
-      sessionKey: params.sessionKey,
-    });
+    const resolvedMemory = resolveMemorySearchConfig(params.config, agentId);
     if (!resolvedMemory || !resolvedMemory.sources.includes("sessions")) {
       return;
     }

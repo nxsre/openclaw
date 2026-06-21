@@ -238,6 +238,10 @@ function buildToolCallSummary(toolName: string, args: unknown, meta?: string): T
   const mutation = buildToolMutationState(toolName, args, meta);
   return {
     meta,
+    // xcph merge(v2026.6.9):上游给 ToolCallSummary 加了 replay-safety 字段;此 xcph 版
+    // 保守置 false(不按 replay-safe 优化,始终重执行,行为安全)。待 review/对齐上游。
+    instanceReplaySafe: false,
+    replaySafe: false,
     mutatingAction: mutation.mutatingAction,
     actionFingerprint: mutation.actionFingerprint,
     fileTarget: mutation.fileTarget,

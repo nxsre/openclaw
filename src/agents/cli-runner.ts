@@ -1290,36 +1290,4 @@ export function buildRunClaudeCliAgentParams(params: RunClaudeCliAgentParams): R
     senderId: params.senderId,
     senderIsOwner: params.senderIsOwner,
   };
-
-  let runResult: EmbeddedAgentRunResult | undefined;
-  let runError: unknown;
-  let runFailed = false;
-  try {
-    runResult = await executeRun();
-  } catch (error) {
-    runFailed = true;
-    runError = error;
-  }
-  try {
-    await context.preparedBackend.cleanup?.();
-  } catch (cleanupError) {
-    if (!deliveredMessagingSideEffect) {
-      if (runFailed) {
-        cliBackendLog.warn(
-          `CLI run also failed before backend cleanup: ${formatErrorMessage(runError)}`,
-        );
-      }
-      throw cleanupError;
-    }
-    cliBackendLog.warn(
-      `CLI backend cleanup failed after confirmed message delivery: ${formatErrorMessage(cleanupError)}`,
-    );
-  }
-  if (runFailed) {
-    throw runError;
-  }
-  if (!runResult) {
-    throw new Error("CLI run completed without a result");
-  }
-  return runResult;
 }

@@ -28,6 +28,9 @@ type TelegramRichMessageReplyMarkup =
 export const TELEGRAM_RICH_TEXT_LIMIT = 32_768;
 export const TELEGRAM_RICH_BLOCK_LIMIT = 500;
 export const TELEGRAM_RICH_MEDIA_LIMIT = 50;
+// xcph merge(v2026.6.9):此常量在 xcph HEAD 被引用却从未定义(潜在 bug,本次 typecheck
+// 暴露)。给保守阈值=宽表(列数>3)走特殊处理;请 review 确认 xcph 原意值。
+export const TELEGRAM_RICH_TABLE_COLUMN_LIMIT = 3;
 export const TELEGRAM_RICH_NESTING_LIMIT = 16;
 
 export type TelegramInputRichMessage =
@@ -446,7 +449,9 @@ function normalizeTelegramRichMarkdownTables(markdown: string): string {
   return out.join("\n");
 }
 
-function normalizeTelegramRichMarkdown(markdown: string): string {
+// xcph merge(v2026.6.9):此函数在 xcph HEAD 即为未调用的死代码(noUnusedLocals 暴露)。
+// export 以消除 unused 报错并避免级联;请 review 是否应接线或删除。
+export function normalizeTelegramRichMarkdown(markdown: string): string {
   return preserveTelegramRichMarkdownLineBreaks(normalizeTelegramRichMarkdownTables(markdown));
 }
 
