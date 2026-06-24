@@ -1394,6 +1394,13 @@ export function createAgentEventHandler({
           { agentId: sessionAgentId, controlUiVisible: false, dropIfSlow: true },
         );
       }
+      if (!isControlUiVisible && isItemEvent && sessionKey && hasSessionMessageSubscribers) {
+        sendAgentPayload(
+          sessionKey,
+          { ...agentPayload, ...buildSessionEventSnapshot(sessionKey, undefined, sessionAgentId) },
+          { agentId: sessionAgentId, controlUiVisible: false, dropIfSlow: true },
+        );
+      }
     }
 
     if ((isControlUiVisible || hasSessionMessageSubscribers) && sessionKey) {

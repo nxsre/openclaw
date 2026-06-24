@@ -2,6 +2,7 @@
  * Orchestrates one agent attempt across embedded, CLI, and ACP runtimes.
  */
 import type { AcpRuntimeEvent } from "@openclaw/acp-core/runtime/types";
+import type { FastMode } from "@openclaw/normalization-core/string-coerce";
 import { sanitizeForLog } from "../../../packages/terminal-core/src/ansi.js";
 import { formatAcpErrorChain } from "../../acp/runtime/errors.js";
 import { normalizeReplyPayload } from "../../auto-reply/reply/normalize-reply.js";
@@ -475,7 +476,10 @@ export function runAgentAttempt(params: {
   isFallbackRetry: boolean;
   resolvedThinkLevel: ThinkLevel;
   resolvedReasoningLevel?: ReasoningLevel;
-  fastMode?: boolean;
+  fastMode?: FastMode;
+  fastModeStartedAtMs?: number;
+  fastModeAutoOnSeconds?: number;
+  isFinalFallbackAttempt?: boolean;
   timeoutMs: number;
   runTimeoutOverrideMs?: number;
   runId: string;
@@ -787,6 +791,9 @@ export function runAgentAttempt(params: {
     thinkLevel: params.resolvedThinkLevel,
     reasoningLevel: params.resolvedReasoningLevel,
     fastMode: params.fastMode,
+    fastModeStartedAtMs: params.fastModeStartedAtMs,
+    fastModeAutoOnSeconds: params.fastModeAutoOnSeconds,
+    isFinalFallbackAttempt: params.isFinalFallbackAttempt,
     verboseLevel: params.resolvedVerboseLevel,
     bashElevated: params.opts.bashElevated,
     timeoutMs: params.timeoutMs,
