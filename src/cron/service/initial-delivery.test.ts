@@ -24,7 +24,10 @@ describe("resolveInitialCronDelivery", () => {
       mode: "announce",
       targets: [{ channel: "openclaw-weixin", to: "all" }],
     };
-    expect(resolveInitialCronDelivery(isolatedTurn, configDefault)).toBe(configDefault);
+    const resolved = resolveInitialCronDelivery(isolatedTurn, configDefault);
+    // Equal in value but a distinct object: the job must not alias the live config.
+    expect(resolved).toEqual(configDefault);
+    expect(resolved).not.toBe(configDefault);
   });
 
   it("falls back to plain announce when no config default is set", () => {

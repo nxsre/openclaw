@@ -879,7 +879,7 @@ export const OpenClawSchema = z
           .optional(),
         defaultDelivery: z
           .object({
-            mode: z.enum(["none", "announce", "webhook"]).optional(),
+            mode: z.enum(["none", "announce", "webhook"]),
             channel: z.string().optional(),
             to: z.string().optional(),
             threadId: z.union([z.string(), z.number()]).optional(),

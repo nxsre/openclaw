@@ -1314,6 +1314,9 @@ async function finalizeCronRun(params: {
   if (
     prepared.input.job.delivery?.targets?.length &&
     prepared.deliveryRequested &&
+    // Heartbeat-only responses are suppressed for the primary target; do not
+    // broadcast that suppressed text to the additional targets either.
+    !skipHeartbeatDelivery &&
     typeof fanOutText === "string" &&
     fanOutText.trim().length > 0
   ) {
@@ -1340,8 +1343,10 @@ async function finalizeCronRun(params: {
               prepared.input.abortSignal ?? prepared.input.signal ?? new AbortController().signal,
           });
   }
-  const aggregateDelivered =
-    (deliveryResult.delivered ?? false) || (fanOut ? fanOut.delivered > 0 : false);
+  // Run-level delivered/presentation reflect ONLY the primary target. Fan-out to
+  // additional targets is best-effort: its failures surface via diagnostics and
+  // its successes never mark a failed primary delivery as delivered. Attempted is
+  // safe to aggregate (it only records that some send was tried).
   const aggregateDeliveryAttempted =
     (deliveryResult.deliveryAttempted ?? false) || (fanOut?.attempted ?? false);
   const fanOutDiagnostics =
@@ -1359,7 +1364,7 @@ async function finalizeCronRun(params: {
       prepared.deliveryRequested &&
       deliveryResult.deliveryAttempted &&
       !sourceDeliveryOutcome.satisfiesSourceDelivery,
-    delivered: aggregateDelivered,
+    delivered: deliveryResult.delivered,
   });
   if (deliveryResult.result) {
     const resultWithDeliveryMeta: RunCronAgentTurnResult = {
@@ -1376,22 +1381,22 @@ async function finalizeCronRun(params: {
       ),
     };
     failPendingPresentationWarningUnlessDelivered(
-      resultWithDeliveryMeta.delivered ?? aggregateDelivered,
+      resultWithDeliveryMeta.delivered ?? deliveryResult.delivered,
     );
     if (!hasFatalErrorPayload || deliveryResult.result.status !== "ok") {
       return resultWithDeliveryMeta;
     }
     return resolveRunOutcome({
-      delivered: aggregateDelivered,
+      delivered: deliveryResult.result.delivered,
       deliveryAttempted: resultWithDeliveryMeta.deliveryAttempted,
       delivery: deliveryTrace,
     });
   }
   summary = deliveryResult.summary;
   outputText = deliveryResult.outputText;
-  failPendingPresentationWarningUnlessDelivered(aggregateDelivered);
+  failPendingPresentationWarningUnlessDelivered(deliveryResult.delivered);
   return resolveRunOutcome({
-    delivered: aggregateDelivered,
+    delivered: deliveryResult.delivered,
     deliveryAttempted: aggregateDeliveryAttempted,
     delivery: deliveryTrace,
   });

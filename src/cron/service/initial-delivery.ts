@@ -18,7 +18,9 @@ export function resolveInitialCronDelivery(
     input.sessionTarget === "isolated" &&
     (input.payload.kind === "agentTurn" || input.payload.kind === "command")
   ) {
-    return configDefault ?? { mode: "announce" };
+    // Clone so the persisted job owns its delivery and never aliases the shared
+    // live runtime config object (cfg.cron.defaultDelivery).
+    return configDefault ? structuredClone(configDefault) : { mode: "announce" };
   }
   return undefined;
 }

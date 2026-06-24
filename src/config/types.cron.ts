@@ -68,7 +68,12 @@ export type CronConfig = {
    * created without their own `delivery` config. Lets operators broadcast all
    * scheduled output to a fixed destination, e.g. every channel recipient via
    * `{ mode: "announce", targets: [{ channel: "openclaw-weixin", to: "all" }] }`.
-   * Jobs that specify their own delivery always win.
+   * Jobs that specify their own delivery always win. Limited to the primary
+   * announce/none/webhook fields; per-job webhook completion/failure destinations
+   * are not configurable as a global default.
    */
-  defaultDelivery?: CronDelivery;
+  defaultDelivery?: Pick<
+    CronDelivery,
+    "mode" | "channel" | "to" | "threadId" | "accountId" | "bestEffort" | "targets"
+  >;
 };
