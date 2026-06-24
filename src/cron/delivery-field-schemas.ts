@@ -33,12 +33,21 @@ export const DeliveryThreadIdFieldSchema = z.union([
 /** Accepts non-negative finite timeout seconds from cron delivery payloads. */
 export const TimeoutSecondsFieldSchema = z.number().finite().nonnegative();
 
+/** One parsed announce fan-out destination (channel/recipient/thread/account). */
+export type ParsedDeliveryTarget = {
+  channel?: string;
+  to?: string;
+  threadId?: string | number;
+  accountId?: string;
+};
+
 type ParsedDeliveryInput = {
   mode?: "announce" | "none" | "webhook";
   channel?: string;
   to?: string;
   threadId?: string | number;
   accountId?: string;
+  targets?: ParsedDeliveryTarget[];
 };
 
 /** Parses optional cron delivery fields while dropping invalid values instead of throwing. */
@@ -49,7 +58,38 @@ export function parseDeliveryInput(input: Record<string, unknown>): ParsedDelive
     to: parseOptionalField(TrimmedNonEmptyStringFieldSchema, input.to),
     threadId: parseOptionalField(DeliveryThreadIdFieldSchema, input.threadId),
     accountId: parseOptionalField(TrimmedNonEmptyStringFieldSchema, input.accountId),
+    targets: parseDeliveryTargets(input.targets),
   };
+}
+
+/**
+ * Parses a fan-out target list, dropping entries that resolve to neither a
+ * channel nor an explicit recipient (an empty target cannot be delivered).
+ * Returns undefined when the input is not an array so callers can distinguish
+ * "no targets field" from "empty list".
+ */
+export function parseDeliveryTargets(value: unknown): ParsedDeliveryTarget[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const targets: ParsedDeliveryTarget[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object") {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const target: ParsedDeliveryTarget = {
+      channel: parseOptionalField(LowercaseNonEmptyStringFieldSchema, record.channel),
+      to: parseOptionalField(TrimmedNonEmptyStringFieldSchema, record.to),
+      threadId: parseOptionalField(DeliveryThreadIdFieldSchema, record.threadId),
+      accountId: parseOptionalField(TrimmedNonEmptyStringFieldSchema, record.accountId),
+    };
+    if (target.channel === undefined && target.to === undefined) {
+      continue;
+    }
+    targets.push(target);
+  }
+  return targets;
 }
 
 /** Returns a parsed field value only when the supplied schema accepts it. */

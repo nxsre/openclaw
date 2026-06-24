@@ -14,6 +14,7 @@ import {
   validateWakeParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { parseAllTarget } from "../../cron/delivery-plan.js";
 import { resolveCronDeliveryPreviews } from "../../cron/delivery-preview.js";
 import { assertCronDeliveryInputNonBlankFields } from "../../cron/delivery-target-validation.js";
 import { normalizeCronJobCreate, normalizeCronJobPatch } from "../../cron/normalize.js";
@@ -132,21 +133,52 @@ function assertCompatibleAnnounceTarget(params: {
   }
 }
 
+function assertAnnounceTargetConfigured(params: {
+  cfg: OpenClawConfig;
+  channel?: string;
+  to?: string;
+}) {
+  // The `all`/`<prefix>:all` wildcard is not a concrete recipient, so skip the
+  // provider-prefix compatibility check; the channel itself must still be a
+  // configured announce channel for the broadcast to resolve recipients.
+  const isWildcard = parseAllTarget(params.to).isAll;
+  const channelForValidation = isWildcard
+    ? params.channel
+    : resolveAnnounceValidationChannel({ channel: params.channel, to: params.to });
+  if (!isWildcard) {
+    assertCompatibleAnnounceTarget({
+      channel: params.channel,
+      to: params.to,
+      field: "delivery.channel",
+    });
+  }
+  assertConfiguredAnnounceChannel({
+    cfg: params.cfg,
+    channel: channelForValidation,
+    field: "delivery.channel",
+  });
+}
+
 function assertValidCronAnnounceDelivery(params: { cfg: OpenClawConfig; delivery?: CronDelivery }) {
   if (params.delivery && (params.delivery.mode ?? "announce") === "announce") {
-    assertCompatibleAnnounceTarget({
-      channel: params.delivery.channel,
-      to: params.delivery.to,
-      field: "delivery.channel",
-    });
-    assertConfiguredAnnounceChannel({
-      cfg: params.cfg,
-      channel: resolveAnnounceValidationChannel({
+    const targets = params.delivery.targets;
+    if (targets && targets.length > 0) {
+      // Each fan-out target must name a configured channel on its own; the
+      // top-level channel/to is ignored when targets are present.
+      for (const target of targets) {
+        assertAnnounceTargetConfigured({
+          cfg: params.cfg,
+          channel: target.channel,
+          to: target.to,
+        });
+      }
+    } else {
+      assertAnnounceTargetConfigured({
+        cfg: params.cfg,
         channel: params.delivery.channel,
         to: params.delivery.to,
-      }),
-      field: "delivery.channel",
-    });
+      });
+    }
   }
 
   const failureDestination = params.delivery?.failureDestination;

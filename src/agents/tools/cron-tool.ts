@@ -183,6 +183,18 @@ function cronDeliverySchema(params: { nullableClears: boolean }) {
     { additionalProperties: true },
   );
 
+  // One announce fan-out destination. Inner fields never use nullableClears:
+  // the whole `targets` list is replaced or cleared, not field-by-field.
+  const deliveryTargetObject = Type.Object(
+    {
+      channel: deliveryStringSchema({ description: "Target channel", nullableClears: false }),
+      to: deliveryStringSchema({ description: "Target recipient", nullableClears: false }),
+      threadId: deliveryThreadIdSchema({ nullableClears: false }),
+      accountId: deliveryStringSchema({ description: "Target account", nullableClears: false }),
+    },
+    { additionalProperties: true },
+  );
+
   return Type.Optional(
     Type.Object(
       {
@@ -196,6 +208,18 @@ function cronDeliverySchema(params: { nullableClears: boolean }) {
           nullableClears: params.nullableClears,
         }),
         threadId: deliveryThreadIdSchema({ nullableClears: params.nullableClears }),
+        targets: params.nullableClears
+          ? Type.Optional(
+              Type.Union([Type.Array(deliveryTargetObject), Type.Null()], {
+                description: "Announce fan-out targets, or null to clear",
+              }),
+            )
+          : Type.Optional(
+              Type.Array(deliveryTargetObject, {
+                description:
+                  "Announce to multiple destinations (one {channel,to} per entry); list every channel to broadcast",
+              }),
+            ),
         bestEffort: Type.Optional(Type.Boolean()),
         accountId: deliveryStringSchema({
           description: "Delivery account",

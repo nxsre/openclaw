@@ -303,6 +303,17 @@ export const CronCompletionDestinationSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** One announce fan-out destination (announce delivery only). */
+const CronDeliveryTargetSchema = Type.Object(
+  {
+    channel: Type.Optional(CronAnnounceChannelSchema),
+    to: Type.Optional(NonBlankString),
+    threadId: Type.Optional(Type.Union([Type.String(), Type.Number()])),
+    accountId: Type.Optional(NonEmptyString),
+  },
+  { additionalProperties: false },
+);
+
 const CronDeliverySharedProperties = {
   channel: Type.Optional(CronAnnounceChannelSchema),
   threadId: Type.Optional(Type.Union([Type.String(), Type.Number()])),
@@ -334,6 +345,7 @@ const CronDeliveryAnnounceSchema = Type.Object(
     ...CronDeliverySharedProperties,
     completionDestination: Type.Optional(CronCompletionDestinationSchema),
     to: Type.Optional(NonBlankString),
+    targets: Type.Optional(Type.Array(CronDeliveryTargetSchema)),
   },
   { additionalProperties: false },
 );
@@ -365,6 +377,7 @@ export const CronDeliveryPatchSchema = Type.Object(
       Type.Union([CronCompletionDestinationSchema, Type.Null()]),
     ),
     to: Type.Optional(Type.Union([NonBlankString, Type.Null()])),
+    targets: Type.Optional(Type.Union([Type.Array(CronDeliveryTargetSchema), Type.Null()])),
   },
   { additionalProperties: false },
 );

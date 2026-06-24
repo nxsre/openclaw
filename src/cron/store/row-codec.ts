@@ -2,11 +2,19 @@
 import type { DatabaseSync } from "node:sqlite";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { executeSqliteQuerySync } from "../../infra/kysely-sync.js";
+import { parseDeliveryTargets } from "../delivery-field-schemas.js";
 import { normalizeCronJobIdentityFields } from "../normalize-job-identity.js";
 import { normalizeCronJobInput } from "../normalize.js";
 import { getInvalidPersistedCronJobReason } from "../persisted-shape.js";
 import { tryCronScheduleIdentity } from "../schedule-identity.js";
-import type { CronJob, CronJobState, CronSchedule, CronStoreFile } from "../types.js";
+import type {
+  CronDelivery,
+  CronDeliveryTarget,
+  CronJob,
+  CronJobState,
+  CronSchedule,
+  CronStoreFile,
+} from "../types.js";
 import { bindDeliveryColumns, deliveryFromRow } from "./delivery-codec.js";
 import { bindFailureAlertColumns, failureAlertFromRow } from "./failure-alert-codec.js";
 import { bindPayloadColumns, payloadFromRow } from "./payload-codec.js";
@@ -211,10 +219,38 @@ function scheduleFromRow(row: CronJobRow): CronSchedule | null {
   return null;
 }
 
+/**
+ * Recovers delivery.targets from the job_json sidecar. Fan-out targets are
+ * config-only (no SQLite sentinel projection like failureDestination), so they
+ * persist in job_json rather than split columns; the column codec still carries
+ * the single primary delivery target.
+ */
+function applyDeliveryTargetsFromJobJson(
+  delivery: CronDelivery,
+  jobJson: string | null,
+): CronDelivery {
+  if (!jobJson) {
+    return delivery;
+  }
+  const parsed = parseJsonObject<Record<string, unknown>>(jobJson, {});
+  const rawDelivery = parsed.delivery;
+  if (!isRecord(rawDelivery)) {
+    return delivery;
+  }
+  const targets = parseDeliveryTargets(rawDelivery.targets);
+  if (!targets || targets.length === 0) {
+    return delivery;
+  }
+  return { ...delivery, targets: targets as CronDeliveryTarget[] };
+}
+
 function rowToCronJob(row: CronJobRow): CronJob | null {
   const schedule = scheduleFromRow(row);
   const payload = payloadFromRow(row);
-  const delivery = deliveryFromRow(row);
+  const columnDelivery = deliveryFromRow(row);
+  const delivery = columnDelivery
+    ? applyDeliveryTargetsFromJobJson(columnDelivery, row.job_json)
+    : columnDelivery;
   const failureAlert = failureAlertFromRow(row);
   if (!schedule || !payload) {
     return null;

@@ -509,6 +509,60 @@ describe("cron method validation", () => {
     expectCronSuccess(respond);
   });
 
+  it("accepts announce delivery.targets when each target names a configured channel", async () => {
+    setRuntimeConfig(telegramSlackConfig({ includeMainSession: true }));
+
+    const { context, respond } = await invokeCronAdd(
+      agentTurnCronParams({
+        name: "multi target add",
+        delivery: {
+          mode: "announce",
+          targets: [
+            { channel: "telegram", to: "123" },
+            { channel: "slack", to: "C42" },
+          ],
+        },
+      }),
+    );
+
+    expect(context.cron.add).toHaveBeenCalled();
+    expectCronSuccess(respond);
+  });
+
+  it("accepts an announce delivery.targets all-wildcard for a configured channel", async () => {
+    setRuntimeConfig(telegramSlackConfig({ includeMainSession: true }));
+
+    const { context, respond } = await invokeCronAdd(
+      agentTurnCronParams({
+        name: "all wildcard add",
+        delivery: { mode: "announce", targets: [{ channel: "telegram", to: "all" }] },
+      }),
+    );
+
+    expect(context.cron.add).toHaveBeenCalled();
+    expectCronSuccess(respond);
+  });
+
+  it("rejects announce delivery.targets when a target names an unconfigured channel", async () => {
+    setRuntimeConfig(telegramSlackConfig({ includeMainSession: true }));
+
+    const { context, respond } = await invokeCronAdd(
+      agentTurnCronParams({
+        name: "multi target unconfigured",
+        delivery: {
+          mode: "announce",
+          targets: [
+            { channel: "telegram", to: "123" },
+            { channel: "discord", to: "999" },
+          ],
+        },
+      }),
+    );
+
+    expect(context.cron.add).not.toHaveBeenCalled();
+    expectResponseError(respond, { code: "INVALID_REQUEST", messageIncludes: "must be one of" });
+  });
+
   it("rejects blank announce delivery fields before normalization", async () => {
     const { context, respond } = await invokeCronAdd(
       agentTurnCronParams({

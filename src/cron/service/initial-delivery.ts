@@ -1,8 +1,16 @@
 /** Resolves create-time default delivery for new cron jobs. */
 import type { CronDelivery, CronJobCreate } from "../types.js";
 
-/** Resolves default cron delivery for new jobs when callers omit explicit delivery config. */
-export function resolveInitialCronDelivery(input: CronJobCreate): CronDelivery | undefined {
+/**
+ * Resolves default cron delivery for new jobs when callers omit explicit
+ * delivery config. An explicit per-job delivery always wins. For isolated
+ * agentTurn/command jobs the operator-configured `cron.defaultDelivery` applies
+ * when set, otherwise delivery falls back to plain announce.
+ */
+export function resolveInitialCronDelivery(
+  input: CronJobCreate,
+  configDefault?: CronDelivery,
+): CronDelivery | undefined {
   if (input.delivery) {
     return input.delivery;
   }
@@ -10,7 +18,7 @@ export function resolveInitialCronDelivery(input: CronJobCreate): CronDelivery |
     input.sessionTarget === "isolated" &&
     (input.payload.kind === "agentTurn" || input.payload.kind === "command")
   ) {
-    return { mode: "announce" };
+    return configDefault ?? { mode: "announce" };
   }
   return undefined;
 }

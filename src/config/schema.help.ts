@@ -1723,6 +1723,8 @@ export const FIELD_HELP: Record<string, string> = {
     "Compatibility setting for older file-backed cron run logs (for example `2mb`, default `2000000`). SQLite run history pruning is row-count based.",
   "cron.runLog.keepLines":
     "How many trailing run-history rows to retain per cron job (default `2000`). Increase for longer forensic history or lower for smaller disks.",
+  "cron.defaultDelivery":
+    'Default delivery applied to new isolated agent-turn/command jobs created without their own delivery config. Use to broadcast all scheduled output to a fixed destination, e.g. announce with targets [{ channel: "openclaw-weixin", to: "all" }] to message every channel recipient. Jobs that set their own delivery always win; omit to keep the plain announce default.',
   transcripts:
     "Core transcript capture settings for recording-capable agent tools and configured live meeting auto-start sources. Keep disabled unless operators explicitly want agents to capture or import meeting transcripts.",
   "transcripts.enabled":

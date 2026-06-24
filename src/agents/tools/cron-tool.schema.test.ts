@@ -133,7 +133,7 @@ describe("createCronToolSchema", () => {
     }
   });
 
-  it("job.delivery exposes mode, channel, to, threadId, bestEffort, accountId, failureDestination", () => {
+  it("job.delivery exposes mode, channel, to, threadId, targets, bestEffort, accountId, failureDestination", () => {
     expect(keysAt(schemaRecord, "job.delivery")).toEqual(
       [
         "accountId",
@@ -141,6 +141,7 @@ describe("createCronToolSchema", () => {
         "channel",
         "failureDestination",
         "mode",
+        "targets",
         "threadId",
         "to",
       ].toSorted(),

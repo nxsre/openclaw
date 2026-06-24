@@ -877,6 +877,29 @@ export const OpenClawSchema = z
           })
           .strict()
           .optional(),
+        defaultDelivery: z
+          .object({
+            mode: z.enum(["none", "announce", "webhook"]).optional(),
+            channel: z.string().optional(),
+            to: z.string().optional(),
+            threadId: z.union([z.string(), z.number()]).optional(),
+            accountId: z.string().optional(),
+            bestEffort: z.boolean().optional(),
+            targets: z
+              .array(
+                z
+                  .object({
+                    channel: z.string().optional(),
+                    to: z.string().optional(),
+                    threadId: z.union([z.string(), z.number()]).optional(),
+                    accountId: z.string().optional(),
+                  })
+                  .strict(),
+              )
+              .optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .superRefine((val, ctx) => {

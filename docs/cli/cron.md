@@ -99,6 +99,36 @@ Use `cron add|create --webhook <url>` or `cron edit <job-id> --webhook <url>` to
 
 Reminders created from an active chat preserve the live chat delivery target for fallback announce delivery. Internal session keys may be lowercase; do not use them as a source of truth for case-sensitive provider IDs such as Matrix room IDs.
 
+### Multi-channel fan-out
+
+Announce delivery can fan one job out to several chat targets with `delivery.targets`, a list of `{ channel, to }` entries (each also accepts `accountId`). When the list is present, the job sends the same text to every target and the top-level `channel`/`to` are ignored. Each target must name a configured announce channel, so listing all of your channels delivers everywhere. Fan-out requires `mode: "announce"` and an isolated-style session target, the same as single-channel announce delivery.
+
+On the CLI, repeat `--target <channel>:<dest>` (the recipient is everything after the first colon, so values like `user:alice` are preserved):
+
+```sh
+openclaw cron add "take medication" \
+  --at "2026-06-24T22:16:00+08:00" \
+  --message "Remind me to take my medication" \
+  --session isolated \
+  --target "openclaw-weixin:o9cq80..." \
+  --target "openim:user:alice"
+```
+
+The first target is the primary route (it carries the agent `message` tool and session identity); the remaining targets are best-effort announces. A failed extra target is logged and recorded in run diagnostics but does not flip the primary outcome. Threaded delivery (`--thread-id`) applies only to the primary target. Use `cron edit <job-id> --target ...` to replace the list or `--clear-targets` to return to single-channel delivery.
+
+Use the recipient `all` to broadcast to everyone on a channel: `--target "slack:all"`. The recipient list comes from the channel directory roster when the channel supports it, falling back to recipients seen in this agent's session history (so for channels without a contact API, `all` means everyone who has messaged the bot). A prefixed form restricts by addressing kind: `--target "openim:user:all"` sends only to `user:` recipients on that channel. An `all` target needs an explicit channel (not `last`); if it resolves to zero recipients the broadcast is skipped and logged.
+
+To make every scheduled job broadcast by default without setting `--target` each time, configure `cron.defaultDelivery`. It applies to new isolated agent-turn/command jobs that are created without their own delivery config (jobs that set delivery always win):
+
+```json
+"cron": {
+  "defaultDelivery": {
+    "mode": "announce",
+    "targets": [{ "channel": "openclaw-weixin", "to": "all" }]
+  }
+}
+```
+
 ### Failure delivery
 
 Failure notifications resolve in this order:

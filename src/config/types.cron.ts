@@ -1,4 +1,5 @@
 // Defines cron scheduling configuration types.
+import type { CronDelivery } from "../cron/types.js";
 import type { SecretInput } from "./types.secrets.js";
 
 /** Error types that can trigger retries for one-shot jobs. */
@@ -62,4 +63,12 @@ export type CronConfig = {
   failureAlert?: CronFailureAlertConfig;
   /** Default destination for failure notifications across all cron jobs. */
   failureDestination?: CronFailureDestinationConfig;
+  /**
+   * Default delivery applied to new isolated agentTurn/command jobs that are
+   * created without their own `delivery` config. Lets operators broadcast all
+   * scheduled output to a fixed destination, e.g. every channel recipient via
+   * `{ mode: "announce", targets: [{ channel: "openclaw-weixin", to: "all" }] }`.
+   * Jobs that specify their own delivery always win.
+   */
+  defaultDelivery?: CronDelivery;
 };

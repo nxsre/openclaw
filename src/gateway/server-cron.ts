@@ -17,7 +17,13 @@ import type { AgentDefaultsConfig } from "../config/types.agent-defaults.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { runCronCommandJob } from "../cron/command-runner.js";
 import { resolveCronStoredDeliveryContext } from "../cron/delivery-context.js";
-import { resolveCronDeliveryPlan, sendCronAnnouncePayloadStrict } from "../cron/delivery.js";
+import {
+  expandCronDeliveryPlans,
+  fanOutAdditionalCronAnnounceTargets,
+  resolveCronDeliveryPlan,
+  resolveCronDeliveryPlans,
+  sendCronAnnouncePayloadStrict,
+} from "../cron/delivery.js";
 import { runCronIsolatedAgentTurn } from "../cron/isolated-agent.js";
 import { appendCronRunLog, resolveCronRunLogPruneOptions } from "../cron/run-log.js";
 import type { CronServiceContract } from "../cron/service-contract.js";
@@ -420,7 +426,17 @@ export function buildGatewayCronService(params: {
         abortSignal,
         nowMs: Date.now,
       });
-      const plan = resolveCronDeliveryPlan(job);
+      const { agentId, cfg: runtimeConfig } = resolveCronAgent(job.agentId);
+      // Only expand to the multi-plan path when targets exist, so single-target
+      // jobs keep calling resolveCronDeliveryPlan unchanged. `all` wildcards
+      // expand to concrete recipients (directory roster or session peers).
+      const fanOutPlans = job.delivery?.targets?.length
+        ? await expandCronDeliveryPlans(resolveCronDeliveryPlans(job), {
+            cfg: runtimeConfig,
+            agentId,
+          })
+        : undefined;
+      const plan = fanOutPlans?.[0] ?? resolveCronDeliveryPlan(job);
       const deliveryTrace = {
         intended: pickDefined(
           {
@@ -463,7 +479,6 @@ export function buildGatewayCronService(params: {
           delivery: deliveryTrace,
         };
       }
-      const { agentId, cfg: runtimeConfig } = resolveCronAgent(job.agentId);
       try {
         await sendCronAnnouncePayloadStrict({
           deps: params.deps,
@@ -477,6 +492,19 @@ export function buildGatewayCronService(params: {
             sessionKey: resolveCronDeliverySessionKey(job),
           },
           message,
+          abortSignal: abortSignal ?? new AbortController().signal,
+        });
+        // Broadcast the same text to any additional delivery.targets; their
+        // failures are logged inside the helper and do not fail the command run
+        // (the primary target above already succeeded).
+        await fanOutAdditionalCronAnnounceTargets({
+          deps: params.deps,
+          cfg: runtimeConfig,
+          agentId,
+          jobId: job.id,
+          sessionKey: resolveCronDeliverySessionKey(job),
+          message,
+          additionalPlans: fanOutPlans ? fanOutPlans.slice(1) : [],
           abortSignal: abortSignal ?? new AbortController().signal,
         });
         return {

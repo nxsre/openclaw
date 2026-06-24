@@ -868,6 +868,7 @@ export const FIELD_LABELS: Record<string, string> = {
   "cron.runLog": "Cron Run Log Pruning",
   "cron.runLog.maxBytes": "Cron Run Log Max Bytes",
   "cron.runLog.keepLines": "Cron Run Log Keep Lines",
+  "cron.defaultDelivery": "Cron Default Delivery",
   transcripts: "Transcripts",
   "transcripts.enabled": "Transcripts Enabled",
   "transcripts.maxUtterances": "Transcripts Max Utterances",

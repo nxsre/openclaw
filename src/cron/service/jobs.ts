@@ -790,7 +790,7 @@ export function createJob(state: CronServiceState, input: CronJobCreate): CronJo
     sessionTarget: input.sessionTarget,
     wakeMode: input.wakeMode,
     payload: input.payload,
-    delivery: resolveInitialCronDelivery(input),
+    delivery: resolveInitialCronDelivery(input, state.deps.cronConfig?.defaultDelivery),
     failureAlert: input.failureAlert,
     state: {
       ...input.state,
@@ -1027,6 +1027,7 @@ function mergeCronDelivery(
     to: existing?.to,
     threadId: existing?.threadId,
     accountId: existing?.accountId,
+    targets: existing?.targets,
     bestEffort: existing?.bestEffort,
     completionDestination: existing?.completionDestination,
     failureDestination: existing?.failureDestination,
@@ -1044,6 +1045,8 @@ function mergeCronDelivery(
       next.channel = undefined;
       next.threadId = undefined;
       next.accountId = undefined;
+      // Announce fan-out targets are meaningless for webhook delivery.
+      next.targets = undefined;
     }
     if (!hasCompletionDestinationPatch && (next.mode === "none" || next.mode === "webhook")) {
       next.completionDestination = undefined;
@@ -1060,6 +1063,10 @@ function mergeCronDelivery(
   }
   if ("accountId" in patch) {
     next.accountId = normalizeOptionalString(patch.accountId);
+  }
+  if ("targets" in patch) {
+    // null (or an emptied list) clears fan-out back to single-target delivery.
+    next.targets = patch.targets && patch.targets.length > 0 ? patch.targets : undefined;
   }
   if (typeof patch.bestEffort === "boolean") {
     next.bestEffort = patch.bestEffort;
@@ -1131,6 +1138,7 @@ function mergeCronDelivery(
     next.to === undefined &&
     next.threadId === undefined &&
     next.accountId === undefined &&
+    next.targets === undefined &&
     next.bestEffort === undefined &&
     next.completionDestination === undefined &&
     next.failureDestination === undefined

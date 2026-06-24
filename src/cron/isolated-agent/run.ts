@@ -44,6 +44,7 @@ import type { SkillSnapshot } from "../../skills/types.js";
 import {
   hasExplicitCronDeliveryTarget,
   resolveCronDeliveryPlan,
+  resolveCronDeliveryPlans,
   type CronDeliveryPlan,
 } from "../delivery-plan.js";
 import {
@@ -378,7 +379,22 @@ export async function resolveCronDeliveryContext(params: {
   job: CronJob;
   agentId: string;
 }) {
-  const deliveryPlan = resolveCronDeliveryPlan(params.job);
+  // With delivery.targets the first target is the primary route (message-tool
+  // source delivery, session identity); additional targets fan out after the
+  // run. `all` wildcards expand to concrete recipients first. Without targets,
+  // keep the single-plan path so callers/tests that depend on
+  // resolveCronDeliveryPlan see no behavior change.
+  let deliveryPlan: CronDeliveryPlan;
+  if (params.job.delivery?.targets?.length) {
+    const { expandCronDeliveryPlans } = await loadCronDeliveryRuntime();
+    const expanded = await expandCronDeliveryPlans(resolveCronDeliveryPlans(params.job), {
+      cfg: params.cfg,
+      agentId: params.agentId,
+    });
+    deliveryPlan = expanded[0] ?? resolveCronDeliveryPlan(params.job);
+  } else {
+    deliveryPlan = resolveCronDeliveryPlan(params.job);
+  }
   if (deliveryPlan.mode === "webhook") {
     const resolvedDelivery = {
       ok: false as const,
@@ -1288,6 +1304,53 @@ async function finalizeCronRun(params: {
     abortReason: params.abortReason,
     withRunSession: prepared.withRunSession,
   });
+  // Broadcast the same delivered text to any additional delivery.targets
+  // (targets[1..], with `all` wildcards expanded to concrete recipients). The
+  // primary target (targets[0]) already went through the full dispatch above;
+  // extra targets are best-effort announces whose failures are logged and
+  // surfaced in diagnostics but do not flip the primary outcome.
+  const fanOutText = deliveryResult.outputText ?? outputText;
+  let fanOut: { attempted: boolean; delivered: number; failures: string[] } | undefined;
+  if (
+    prepared.input.job.delivery?.targets?.length &&
+    prepared.deliveryRequested &&
+    typeof fanOutText === "string" &&
+    fanOutText.trim().length > 0
+  ) {
+    const { expandCronDeliveryPlans, fanOutAdditionalCronAnnounceTargets } =
+      await loadCronDeliveryRuntime();
+    const additionalDeliveryPlans = (
+      await expandCronDeliveryPlans(resolveCronDeliveryPlans(prepared.input.job), {
+        cfg: prepared.input.cfg,
+        agentId: prepared.agentId,
+      })
+    ).slice(1);
+    fanOut =
+      additionalDeliveryPlans.length === 0
+        ? undefined
+        : await fanOutAdditionalCronAnnounceTargets({
+            deps: prepared.input.deps,
+            cfg: prepared.input.cfg,
+            agentId: prepared.agentId,
+            jobId: prepared.input.job.id,
+            sessionKey: resolveCronDeliverySessionKey(prepared.input.job),
+            message: fanOutText,
+            additionalPlans: additionalDeliveryPlans,
+            abortSignal:
+              prepared.input.abortSignal ?? prepared.input.signal ?? new AbortController().signal,
+          });
+  }
+  const aggregateDelivered =
+    (deliveryResult.delivered ?? false) || (fanOut ? fanOut.delivered > 0 : false);
+  const aggregateDeliveryAttempted =
+    (deliveryResult.deliveryAttempted ?? false) || (fanOut?.attempted ?? false);
+  const fanOutDiagnostics =
+    fanOut && fanOut.failures.length > 0
+      ? createCronRunDiagnosticsFromError(
+          "delivery",
+          new Error(`fan-out delivery failed: ${fanOut.failures.join("; ")}`),
+        )
+      : undefined;
   const deliveryTrace = buildCronDeliveryTrace({
     deliveryPlan: prepared.deliveryPlan,
     resolvedDelivery: prepared.resolvedDelivery,
@@ -1296,13 +1359,12 @@ async function finalizeCronRun(params: {
       prepared.deliveryRequested &&
       deliveryResult.deliveryAttempted &&
       !sourceDeliveryOutcome.satisfiesSourceDelivery,
-    delivered: deliveryResult.delivered,
+    delivered: aggregateDelivered,
   });
   if (deliveryResult.result) {
     const resultWithDeliveryMeta: RunCronAgentTurnResult = {
       ...deliveryResult.result,
-      deliveryAttempted:
-        deliveryResult.result.deliveryAttempted ?? deliveryResult.deliveryAttempted,
+      deliveryAttempted: deliveryResult.result.deliveryAttempted ?? aggregateDeliveryAttempted,
       delivery: deliveryTrace,
       diagnostics: mergeCronRunDiagnostics(
         agentDiagnostics,
@@ -1310,26 +1372,27 @@ async function finalizeCronRun(params: {
         deliveryResult.result.status === "error" && deliveryResult.result.error
           ? createCronRunDiagnosticsFromError("delivery", deliveryResult.result.error)
           : undefined,
+        fanOutDiagnostics,
       ),
     };
     failPendingPresentationWarningUnlessDelivered(
-      resultWithDeliveryMeta.delivered ?? deliveryResult.delivered,
+      resultWithDeliveryMeta.delivered ?? aggregateDelivered,
     );
     if (!hasFatalErrorPayload || deliveryResult.result.status !== "ok") {
       return resultWithDeliveryMeta;
     }
     return resolveRunOutcome({
-      delivered: deliveryResult.result.delivered,
+      delivered: aggregateDelivered,
       deliveryAttempted: resultWithDeliveryMeta.deliveryAttempted,
       delivery: deliveryTrace,
     });
   }
   summary = deliveryResult.summary;
   outputText = deliveryResult.outputText;
-  failPendingPresentationWarningUnlessDelivered(deliveryResult.delivered);
+  failPendingPresentationWarningUnlessDelivered(aggregateDelivered);
   return resolveRunOutcome({
-    delivered: deliveryResult.delivered,
-    deliveryAttempted: deliveryResult.deliveryAttempted,
+    delivered: aggregateDelivered,
+    deliveryAttempted: aggregateDeliveryAttempted,
     delivery: deliveryTrace,
   });
 }

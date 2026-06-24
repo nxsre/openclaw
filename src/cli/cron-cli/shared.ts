@@ -71,6 +71,39 @@ export const getCronChannelOptions = () => {
   return pluginIds.length > 0 ? ["last", ...pluginIds].join("|") : "last|<channel-id>";
 };
 
+/** Collects a repeatable CLI option value into an array (commander reducer). */
+export const collectCronOption = (value: string, previous: string[] = []): string[] => [
+  ...previous,
+  value,
+];
+
+/**
+ * Parses repeatable `--target <channel>:<dest>` specs into delivery fan-out
+ * targets. Splits on the first colon so recipients that contain colons (e.g.
+ * "user:alice") are preserved.
+ */
+export function parseCronDeliveryTargets(
+  values: unknown,
+): Array<{ channel: string; to: string }> | undefined {
+  if (!Array.isArray(values) || values.length === 0) {
+    return undefined;
+  }
+  const targets: Array<{ channel: string; to: string }> = [];
+  for (const raw of values) {
+    if (typeof raw !== "string") {
+      continue;
+    }
+    const separator = raw.indexOf(":");
+    const channel = separator > 0 ? raw.slice(0, separator).trim() : "";
+    const to = separator > 0 ? raw.slice(separator + 1).trim() : "";
+    if (!channel || !to) {
+      throw new Error(`Invalid --target "${raw}"; expected <channel>:<dest>.`);
+    }
+    targets.push({ channel, to });
+  }
+  return targets.length > 0 ? targets : undefined;
+}
+
 function toLocalIsoTime(value: unknown): string | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? formatTimestamp(new Date(value), { style: "long" })

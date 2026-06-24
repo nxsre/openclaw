@@ -15,9 +15,11 @@ import {
   resolveCronEditScheduleRequest,
 } from "./schedule-options.js";
 import {
+  collectCronOption,
   getCronChannelOptions,
   parseCronCommandArgv,
   parseCronCommandEnv,
+  parseCronDeliveryTargets,
   parseCronToolsAllow,
   parseDurationMs,
   warnIfCronSchedulerDisabled,
@@ -135,10 +137,17 @@ export function registerCronEditCommand(cron: Command) {
       )
       .option("--thread-id <id>", "Telegram forum topic thread id")
       .option("--account <id>", "Channel account id for delivery (multi-account setups)")
+      .option(
+        "--target <channel:dest>",
+        "Replace announce fan-out targets; repeat for multiple <channel>:<dest>",
+        collectCronOption,
+        [] as string[],
+      )
       .option("--clear-channel", "Unset the delivery channel", false)
       .option("--clear-to", "Unset the delivery destination", false)
       .option("--clear-thread-id", "Unset the Telegram forum topic thread id", false)
       .option("--clear-account", "Unset the per-job delivery account override", false)
+      .option("--clear-targets", "Remove announce fan-out targets (single-target delivery)", false)
       .option(
         "--best-effort-deliver",
         "Do not fail job if delivery fails (also implies --announce when used alone)",
@@ -322,10 +331,18 @@ export function registerCronEditCommand(cron: Command) {
             opts.announce || typeof opts.deliver === "boolean" || hasWebhookDelivery;
           const threadId = parseCronThreadIdOption(opts.threadId);
           const hasDeliveryThreadId = typeof threadId === "number";
+          const fanOutTargets = parseCronDeliveryTargets(opts.target);
+          const hasTargets = fanOutTargets !== undefined;
+          const hasClearTargets = Boolean(opts.clearTargets);
+          if (hasTargets && hasClearTargets) {
+            throw new Error("Use --target or --clear-targets, not both");
+          }
           const hasDeliveryTarget =
             typeof opts.channel === "string" ||
             typeof opts.to === "string" ||
             hasDeliveryThreadId ||
+            hasTargets ||
+            hasClearTargets ||
             Boolean(opts.clearChannel) ||
             Boolean(opts.clearTo) ||
             Boolean(opts.clearThreadId);
@@ -487,6 +504,11 @@ export function registerCronEditCommand(cron: Command) {
             } else if (typeof opts.account === "string") {
               const account = opts.account.trim();
               delivery.accountId = account ? account : undefined;
+            }
+            if (hasClearTargets) {
+              delivery.targets = null;
+            } else if (fanOutTargets) {
+              delivery.targets = fanOutTargets;
             }
             if (typeof opts.bestEffortDeliver === "boolean") {
               delivery.bestEffort = opts.bestEffortDeliver;

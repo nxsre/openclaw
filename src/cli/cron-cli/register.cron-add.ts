@@ -18,10 +18,12 @@ import { resolveCronCreateScheduleFromArgs } from "./schedule-options.js";
 import {
   getCronChannelOptions,
   coerceCronDeliveryPreviews,
+  collectCronOption,
   enrichCronJsonWithStatus,
   handleCronCliError,
   parseCronCommandArgv,
   parseCronCommandEnv,
+  parseCronDeliveryTargets,
   parseCronToolsAllow,
   printCronJson,
   printCronList,
@@ -140,6 +142,12 @@ export function registerCronAddCommand(cron: Command) {
       )
       .option("--thread-id <id>", "Telegram forum topic thread id")
       .option("--account <id>", "Channel account id for delivery (multi-account setups)")
+      .option(
+        "--target <channel:dest>",
+        "Announce fan-out target as <channel>:<dest>; repeat to deliver to multiple channels",
+        collectCronOption,
+        [] as string[],
+      )
       .option("--best-effort-deliver", "Do not fail the job if delivery fails", false)
       .option("--json", "Output JSON", false)
       .action(
@@ -308,11 +316,13 @@ export function registerCronAddCommand(cron: Command) {
             const accountId = normalizeOptionalString(opts.account);
             const threadId = parseCronThreadIdOption(opts.threadId);
             const hasThreadId = typeof threadId === "number";
+            const fanOutTargets = parseCronDeliveryTargets(opts.target);
             const hasChatDeliveryTarget =
               optionSource("channel") === "cli" ||
               typeof opts.to === "string" ||
               Boolean(accountId) ||
-              hasThreadId;
+              hasThreadId ||
+              fanOutTargets !== undefined;
 
             if (
               (accountId || hasThreadId) &&
@@ -381,6 +391,7 @@ export function registerCronAddCommand(cron: Command) {
                     to: hasWebhook ? webhookUrl : normalizeOptionalString(opts.to),
                     threadId: hasWebhook ? undefined : threadId,
                     accountId: hasWebhook ? undefined : accountId,
+                    targets: hasWebhook ? undefined : fanOutTargets,
                     bestEffort: opts.bestEffortDeliver ? true : undefined,
                   }
                 : undefined,

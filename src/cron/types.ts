@@ -29,6 +29,18 @@ export type CronMessageChannel = ChannelId;
 /** Delivery mode for job completion output. */
 export type CronDeliveryMode = "none" | "announce" | "webhook";
 
+/**
+ * One announce fan-out destination. Mirrors the single-target announce fields
+ * (channel/to/threadId/accountId); job-level mode/bestEffort/failure routing
+ * stay on the parent CronDelivery. Used only for announce delivery.
+ */
+export type CronDeliveryTarget = {
+  channel?: CronMessageChannel;
+  to?: string;
+  threadId?: string | number;
+  accountId?: string;
+};
+
 /** Completion delivery configuration for cron job output. */
 export type CronDelivery = {
   mode: CronDeliveryMode;
@@ -38,6 +50,12 @@ export type CronDelivery = {
   threadId?: string | number;
   /** Explicit channel account id for multi-account setups (e.g. multiple Telegram bots). */
   accountId?: string;
+  /**
+   * Multiple announce destinations for one job. When present and non-empty with
+   * mode="announce", the job fans out the same payload to each target; the
+   * single channel/to/... fields above are ignored in favor of this list.
+   */
+  targets?: CronDeliveryTarget[];
   bestEffort?: boolean;
   /** Additional webhook destination used when a job must keep chat delivery. */
   completionDestination?: CronCompletionDestination;
@@ -73,6 +91,8 @@ export type CronDeliveryPatch = Partial<Pick<CronDelivery, "mode" | "bestEffort"
   to?: string | null;
   threadId?: string | number | null;
   accountId?: string | null;
+  /** Replaces the fan-out target list; null clears it back to single-target delivery. */
+  targets?: CronDeliveryTarget[] | null;
   completionDestination?: CronCompletionDestination | null;
   failureDestination?: CronFailureDestinationPatch | null;
 };

@@ -583,6 +583,26 @@ describe("cron store", () => {
     });
   });
 
+  it("round-trips announce delivery fan-out targets through the job_json sidecar", async () => {
+    const { storePath } = await makeStorePath();
+    const job = makeStore("sqlite-delivery-targets-job", true).jobs[0];
+    job.sessionTarget = "isolated";
+    job.delivery = {
+      mode: "announce",
+      targets: [
+        { channel: "telegram", to: "111", accountId: "bot-1" },
+        { channel: "slack", to: "C42" },
+      ],
+    };
+
+    await saveCronStore(storePath, { version: 1, jobs: [job] });
+
+    expect((await loadCronStore(storePath)).jobs[0]?.delivery?.targets).toEqual([
+      { channel: "telegram", to: "111", accountId: "bot-1" },
+      { channel: "slack", to: "C42" },
+    ]);
+  });
+
   it("round-trips explicit failure destination field clears through SQLite delivery columns", async () => {
     const { storePath } = await makeStorePath();
     const job = makeStore("sqlite-failure-destination-clear-job", true).jobs[0];
