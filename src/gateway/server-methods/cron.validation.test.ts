@@ -543,6 +543,20 @@ describe("cron method validation", () => {
     expectCronSuccess(respond);
   });
 
+  it("rejects an all-wildcard whose provider prefix conflicts with the channel", async () => {
+    setRuntimeConfig(telegramSlackConfig({ includeMainSession: true }));
+
+    const { context, respond } = await invokeCronAdd(
+      agentTurnCronParams({
+        name: "provider wildcard mismatch",
+        delivery: { mode: "announce", targets: [{ channel: "slack", to: "telegram:all" }] },
+      }),
+    );
+
+    expect(context.cron.add).not.toHaveBeenCalled();
+    expectResponseError(respond, { code: "INVALID_REQUEST" });
+  });
+
   it("rejects announce delivery.targets when a target names an unconfigured channel", async () => {
     setRuntimeConfig(telegramSlackConfig({ includeMainSession: true }));
 

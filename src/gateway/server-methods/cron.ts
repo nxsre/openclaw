@@ -14,7 +14,6 @@ import {
   validateWakeParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { parseAllTarget } from "../../cron/delivery-plan.js";
 import { resolveCronDeliveryPreviews } from "../../cron/delivery-preview.js";
 import { assertCronDeliveryInputNonBlankFields } from "../../cron/delivery-target-validation.js";
 import { normalizeCronJobCreate, normalizeCronJobPatch } from "../../cron/normalize.js";
@@ -138,23 +137,19 @@ function assertAnnounceTargetConfigured(params: {
   channel?: string;
   to?: string;
 }) {
-  // The `all`/`<prefix>:all` wildcard is not a concrete recipient, so skip the
-  // provider-prefix compatibility check; the channel itself must still be a
-  // configured announce channel for the broadcast to resolve recipients.
-  const isWildcard = parseAllTarget(params.to).isAll;
-  const channelForValidation = isWildcard
-    ? params.channel
-    : resolveAnnounceValidationChannel({ channel: params.channel, to: params.to });
-  if (!isWildcard) {
-    assertCompatibleAnnounceTarget({
-      channel: params.channel,
-      to: params.to,
-      field: "delivery.channel",
-    });
-  }
+  // Validate even for the `all`/`<prefix>:all` wildcard: bare `all` has no
+  // provider prefix so the compat check is a no-op, kind prefixes (user/c2c/...)
+  // pass, but a provider prefix that conflicts with the channel (e.g.
+  // `telegram:all` on a slack target) is still rejected instead of silently
+  // resolving zero recipients.
+  assertCompatibleAnnounceTarget({
+    channel: params.channel,
+    to: params.to,
+    field: "delivery.channel",
+  });
   assertConfiguredAnnounceChannel({
     cfg: params.cfg,
-    channel: channelForValidation,
+    channel: resolveAnnounceValidationChannel({ channel: params.channel, to: params.to }),
     field: "delivery.channel",
   });
 }
@@ -212,6 +207,21 @@ function assertValidCronCreateDelivery(cfg: OpenClawConfig, jobCreate: CronJobCr
     cfg,
     delivery: jobCreate.delivery,
   });
+  // When the job omits its own delivery, resolveInitialCronDelivery injects
+  // cron.defaultDelivery for isolated agentTurn/command jobs. Validate that
+  // configured default here so one naming an unconfigured channel fails fast at
+  // create time instead of silently persisting non-deliverable jobs. The
+  // implicit `{ mode: "announce" }` fallback (no configured default) is left
+  // unvalidated since its channel resolves at runtime from the session.
+  const configDefault = cfg.cron?.defaultDelivery;
+  const appliesDefault =
+    !jobCreate.delivery &&
+    configDefault !== undefined &&
+    jobCreate.sessionTarget === "isolated" &&
+    (jobCreate.payload.kind === "agentTurn" || jobCreate.payload.kind === "command");
+  if (appliesDefault) {
+    assertValidCronAnnounceDelivery({ cfg, delivery: configDefault });
+  }
 }
 
 function assertValidCronUpdatePatch(params: {

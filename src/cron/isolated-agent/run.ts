@@ -385,6 +385,10 @@ export async function resolveCronDeliveryContext(params: {
   // keep the single-plan path so callers/tests that depend on
   // resolveCronDeliveryPlan see no behavior change.
   let deliveryPlan: CronDeliveryPlan;
+  // Expand `all` wildcards / fan-out targets exactly once and carry the extra
+  // plans forward so finalizeCronRun reuses the same snapshot (no second
+  // directory/session enumeration, no cross-call dedup drift).
+  let additionalDeliveryPlans: CronDeliveryPlan[] = [];
   if (params.job.delivery?.targets?.length) {
     const { expandCronDeliveryPlans } = await loadCronDeliveryRuntime();
     const expanded = await expandCronDeliveryPlans(resolveCronDeliveryPlans(params.job), {
@@ -392,6 +396,7 @@ export async function resolveCronDeliveryContext(params: {
       agentId: params.agentId,
     });
     deliveryPlan = expanded[0] ?? resolveCronDeliveryPlan(params.job);
+    additionalDeliveryPlans = expanded.slice(1);
   } else {
     deliveryPlan = resolveCronDeliveryPlan(params.job);
   }
@@ -407,6 +412,7 @@ export async function resolveCronDeliveryContext(params: {
     };
     return {
       deliveryPlan,
+      additionalDeliveryPlans,
       deliveryRequested: deliveryPlan.requested,
       resolvedDelivery,
       sourceDelivery: resolveCronSourceDeliveryPlan({ deliveryPlan, resolvedDelivery }),
@@ -424,6 +430,7 @@ export async function resolveCronDeliveryContext(params: {
     };
     return {
       deliveryPlan,
+      additionalDeliveryPlans,
       deliveryRequested: false,
       resolvedDelivery,
       sourceDelivery: resolveCronSourceDeliveryPlan({ deliveryPlan, resolvedDelivery }),
@@ -445,6 +452,7 @@ export async function resolveCronDeliveryContext(params: {
   });
   return {
     deliveryPlan,
+    additionalDeliveryPlans,
     deliveryRequested: deliveryPlan.requested,
     resolvedDelivery,
     sourceDelivery: resolveCronSourceDeliveryPlan({ deliveryPlan, resolvedDelivery }),
@@ -526,6 +534,8 @@ type PreparedCronRunContext = {
   withRunSession: WithRunSession;
   agentPayload: Extract<CronJob["payload"], { kind: "agentTurn" }> | null;
   deliveryPlan: CronDeliveryPlan;
+  /** Fan-out plans beyond the primary (targets[1..], `all` already expanded). */
+  additionalDeliveryPlans: CronDeliveryPlan[];
   resolvedDelivery: ResolvedCronDeliveryTarget;
   deliveryRequested: boolean;
   sourceDelivery: SourceDeliveryPlan;
@@ -816,12 +826,17 @@ async function prepareCronRunContext(params: {
   // `timeoutSeconds` happens to numerically equal `agents.defaults.timeoutSeconds`.
   const runTimeoutOverrideMs = resolveCronRunTimeoutOverrideMs(explicitTimeoutSeconds);
   const agentPayload = input.job.payload.kind === "agentTurn" ? input.job.payload : null;
-  const { deliveryPlan, deliveryRequested, resolvedDelivery, sourceDelivery } =
-    await resolveCronDeliveryContext({
-      cfg: cfgWithAgentDefaults,
-      job: input.job,
-      agentId,
-    });
+  const {
+    deliveryPlan,
+    additionalDeliveryPlans,
+    deliveryRequested,
+    resolvedDelivery,
+    sourceDelivery,
+  } = await resolveCronDeliveryContext({
+    cfg: cfgWithAgentDefaults,
+    job: input.job,
+    agentId,
+  });
 
   const { formattedTime, timeLine } = resolveCronStyleNow(input.cfg, now);
   const message = resolveCronAgentTurnMessage(input);
@@ -957,6 +972,7 @@ async function prepareCronRunContext(params: {
       withRunSession,
       agentPayload,
       deliveryPlan,
+      additionalDeliveryPlans,
       resolvedDelivery,
       deliveryRequested,
       sourceDelivery,
@@ -1310,9 +1326,12 @@ async function finalizeCronRun(params: {
   // extra targets are best-effort announces whose failures are logged and
   // surfaced in diagnostics but do not flip the primary outcome.
   const fanOutText = deliveryResult.outputText ?? outputText;
+  // Reuse the additional plans expanded once in resolveCronDeliveryContext; no
+  // second directory/session enumeration here.
+  const additionalDeliveryPlans = prepared.additionalDeliveryPlans;
   let fanOut: { attempted: boolean; delivered: number; failures: string[] } | undefined;
   if (
-    prepared.input.job.delivery?.targets?.length &&
+    additionalDeliveryPlans.length > 0 &&
     prepared.deliveryRequested &&
     // Heartbeat-only responses are suppressed for the primary target; do not
     // broadcast that suppressed text to the additional targets either.
@@ -1320,28 +1339,18 @@ async function finalizeCronRun(params: {
     typeof fanOutText === "string" &&
     fanOutText.trim().length > 0
   ) {
-    const { expandCronDeliveryPlans, fanOutAdditionalCronAnnounceTargets } =
-      await loadCronDeliveryRuntime();
-    const additionalDeliveryPlans = (
-      await expandCronDeliveryPlans(resolveCronDeliveryPlans(prepared.input.job), {
-        cfg: prepared.input.cfg,
-        agentId: prepared.agentId,
-      })
-    ).slice(1);
-    fanOut =
-      additionalDeliveryPlans.length === 0
-        ? undefined
-        : await fanOutAdditionalCronAnnounceTargets({
-            deps: prepared.input.deps,
-            cfg: prepared.input.cfg,
-            agentId: prepared.agentId,
-            jobId: prepared.input.job.id,
-            sessionKey: resolveCronDeliverySessionKey(prepared.input.job),
-            message: fanOutText,
-            additionalPlans: additionalDeliveryPlans,
-            abortSignal:
-              prepared.input.abortSignal ?? prepared.input.signal ?? new AbortController().signal,
-          });
+    const { fanOutAdditionalCronAnnounceTargets } = await loadCronDeliveryRuntime();
+    fanOut = await fanOutAdditionalCronAnnounceTargets({
+      deps: prepared.input.deps,
+      cfg: prepared.input.cfg,
+      agentId: prepared.agentId,
+      jobId: prepared.input.job.id,
+      sessionKey: resolveCronDeliverySessionKey(prepared.input.job),
+      message: fanOutText,
+      additionalPlans: additionalDeliveryPlans,
+      abortSignal:
+        prepared.input.abortSignal ?? prepared.input.signal ?? new AbortController().signal,
+    });
   }
   // Run-level delivered/presentation reflect ONLY the primary target. Fan-out to
   // additional targets is best-effort: its failures surface via diagnostics and

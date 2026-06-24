@@ -1130,6 +1130,13 @@ function mergeCronDelivery(
     }
   }
 
+  // Fan-out targets are announce-only. Drop them for none/webhook so a patch that
+  // sets targets without an announce mode never persists as dead config that
+  // resolveCronDeliveryPlans silently ignores.
+  if (next.mode !== "announce") {
+    next.targets = undefined;
+  }
+
   if (
     existing === undefined &&
     !("mode" in patch) &&
