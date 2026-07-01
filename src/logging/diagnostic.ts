@@ -559,7 +559,6 @@ function isStalledModelCallRecoveryEligible(params: {
 function isActiveAbortRecoveryEligible(params: {
   classification: SessionAttentionClassification | undefined;
   activity?: DiagnosticSessionActivitySnapshot;
-  ageMs: number;
   stuckSessionAbortMs: number;
 }): boolean {
   return (
@@ -1029,7 +1028,6 @@ export function logSessionAttention(
     isActiveAbortRecoveryEligible({
       classification,
       activity,
-      ageMs: params.ageMs,
       stuckSessionAbortMs,
     });
   // The warning backoff throttles repeated log lines/events only. It must never
@@ -1333,7 +1331,6 @@ export function startDiagnosticHeartbeat(
           isActiveAbortRecoveryEligible({
             classification,
             activity,
-            ageMs: attentionAgeMs,
             stuckSessionAbortMs,
           })
         ) {
