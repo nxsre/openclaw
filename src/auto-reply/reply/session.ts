@@ -84,8 +84,39 @@ import {
 import { buildSessionEndHookPayload, buildSessionStartHookPayload } from "./session-hooks.js";
 import { prepareReplySessionParentFork } from "./session-parent-fork-prepare.js";
 import { clearSessionResetRuntimeState } from "./session-reset-cleanup.js";
+import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
+import { sleep } from "../../utils.js";
 
 const log = createSubsystemLogger("session-init");
+
+// (A) Serialize reply-session initialization per conversation key so two turns for the
+// same session never race the optimistic commit. Different conversations stay parallel.
+const replySessionInitQueue = new KeyedAsyncQueue();
+
+// (B) On a stale-snapshot commit conflict, retry with a short jittered backoff instead of
+// giving up after a single immediate retry. The previous turn's async tail (memory flush,
+// token accounting) settles within a few ms; without backoff the next inbound was dropped
+// with no reply ("reply session initialization conflicted").
+const REPLY_SESSION_INIT_MAX_ATTEMPTS = 6;
+const REPLY_SESSION_INIT_BACKOFF_BASE_MS = 8;
+const REPLY_SESSION_INIT_BACKOFF_MAX_MS = 120;
+
+function replySessionInitBackoffMs(attempt: number): number {
+  const exp = REPLY_SESSION_INIT_BACKOFF_BASE_MS * 2 ** Math.max(0, attempt - 1);
+  const capped = Math.min(exp, REPLY_SESSION_INIT_BACKOFF_MAX_MS);
+  // Jitter avoids lockstep retries from several inbounds colliding on the same key.
+  return capped + Math.floor(Math.random() * REPLY_SESSION_INIT_BACKOFF_BASE_MS);
+}
+
+function replySessionInitQueueKey(params: InitSessionStateParams): string {
+  const ctx = params.ctx;
+  const key =
+    normalizeOptionalString(ctx.SessionKey) ??
+    normalizeOptionalString(ctx.From) ??
+    normalizeOptionalString(ctx.To) ??
+    "";
+  return `${normalizeOptionalString(ctx.AgentId) ?? ""}::${key}`;
+}
 
 function stripThreadFromSessionRoute(route: SessionEntry["route"]): SessionEntry["route"] {
   const normalized = normalizeDeliveryChannelRoute(route);
@@ -246,12 +277,16 @@ function resolveBoundConversationSessionKey(params: {
 
 /** Initializes or reuses the reply session state for one inbound turn. */
 export async function initSessionState(params: InitSessionStateParams): Promise<SessionInitResult> {
-  return await initSessionStateAttempt(params, false);
+  // (A) Chain same-conversation inits so the optimistic commit is never contended
+  // by a sibling init; unrelated keys stay fully parallel.
+  return await replySessionInitQueue.enqueue(replySessionInitQueueKey(params), () =>
+    initSessionStateAttempt(params, 1),
+  );
 }
 
 async function initSessionStateAttempt(
   params: InitSessionStateParams,
-  staleSnapshotRetried: boolean,
+  attempt: number,
 ): Promise<SessionInitResult> {
   const { ctx, cfg, commandAuthorized } = params;
   // Heartbeat, cron-event, and exec-event runs should NEVER trigger session
@@ -857,10 +892,17 @@ async function initSessionStateAttempt(
     storePath,
   });
   if (!committed.ok) {
-    if (!staleSnapshotRetried) {
-      return await initSessionStateAttempt(params, true);
+    if (attempt < REPLY_SESSION_INIT_MAX_ATTEMPTS) {
+      const backoffMs = replySessionInitBackoffMs(attempt);
+      log.debug(
+        `reply session init stale-snapshot for ${sessionKey}; retry ${attempt + 1}/${REPLY_SESSION_INIT_MAX_ATTEMPTS} in ${backoffMs}ms`,
+      );
+      await sleep(backoffMs);
+      return await initSessionStateAttempt(params, attempt + 1);
     }
-    throw new Error(`reply session initialization conflicted for ${sessionKey}`);
+    throw new Error(
+      `reply session initialization conflicted for ${sessionKey} after ${attempt} attempts`,
+    );
   }
   sessionEntry = committed.sessionEntry;
   sessionId = sessionEntry.sessionId;

@@ -972,8 +972,25 @@ function cloneSessionEntries(store: Record<string, SessionEntry>): Record<string
   );
 }
 
+// Optimistic-lock fingerprint for reply-session initialization. Only identity /
+// continuity fields are included: a concurrent reset/rollover/fork must abort our
+// commit (those rotate sessionId / sessionFile / fork / compaction / lineage), but a
+// concurrent volatile write from the *previous* turn's async tail (token accounting,
+// updatedAt/status/runtime timestamps, lastMessageId, context counters …) must NOT —
+// hashing the whole entry made every such write a false "conflicted" and dropped the
+// next inbound with no reply. See auto-reply/reply/session.ts init retry.
 function createReplySessionInitializationRevision(entry: SessionEntry | undefined): string {
-  return JSON.stringify(entry ?? null);
+  if (!entry) {
+    return "none";
+  }
+  return JSON.stringify({
+    sessionId: entry.sessionId ?? null,
+    sessionFile: entry.sessionFile ?? null,
+    forkedFromParent: entry.forkedFromParent ?? null,
+    compactionCount: entry.compactionCount ?? null,
+    sessionStartedAt: entry.sessionStartedAt ?? null,
+    usageFamilyKey: entry.usageFamilyKey ?? null,
+  });
 }
 
 function resolveInitializedReplySessionEntry(params: {
