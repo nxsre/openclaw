@@ -1321,7 +1321,7 @@ export function createAgentEventHandler({
       if (shouldBroadcast) {
         broadcastToConnIds("agent", agentPayload, recipients, { dropIfSlow: true });
       }
-    } else if (isToolEvent) {
+    }
     if (evt.stream === "assistant") {
       updateRunToolErrorSummary?.({ runId: evt.runId, clientRunId, summary: undefined });
     }

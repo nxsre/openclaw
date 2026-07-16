@@ -65,15 +65,6 @@ import { buildBaseOptions } from "./simple-options.js";
 import { describeToolResultMediaPlaceholder, extractToolResultText } from "./tool-result-text.js";
 import { transformMessages } from "./transform-messages.js";
 
-// 首 chunk 超时:LLM 流式请求在 timeoutMs 内没拿到第一个 chunk(上游半开/卡住)→ 主动
-// abort 底层 fetch + 抛错,让 embedded run 立刻失败、释放 session 锁。否则一个挂死的请求会
-// 永久占着 session 锁(stuck-session 恢复也 abort 不掉无超时的 socket 读)→ 卡死整条会话。
-// 首 chunk 到达后即停止计时,不影响长流(长思考/长回答)。可经 env 调整,默认 90s。
-const LLM_FIRST_CHUNK_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.OPENCLAW_LLM_FIRST_CHUNK_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : 90_000;
-})();
-
 // 绝对墙钟上限:从「单次 LLM 流式调用」开始计时,无论期间是否在出字节,超过 timeoutMs 一律 abort
 // 底层 fetch + 抛错。这封死「慢速 hang」—— 上游每隔不到 idle 阈值挤一个字节,让首 chunk / idle
 // 超时永不触发,run 却被无限拖住。绝对上限不看活动,到点必停,把「无限等待」硬转成「超时异常退出」。
@@ -83,48 +74,6 @@ const LLM_ABSOLUTE_TIMEOUT_MS = (() => {
   const raw = Number(process.env.OPENCLAW_LLM_ABSOLUTE_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 600_000;
 })();
-
-function withFirstChunkTimeout<T>(
-  stream: AsyncIterable<T> & { controller?: { abort?: () => void } },
-  timeoutMs: number,
-  label: string,
-): AsyncIterable<T> {
-  if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) return stream;
-  return {
-    async *[Symbol.asyncIterator]() {
-      const it = stream[Symbol.asyncIterator]();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const first = await new Promise<IteratorResult<T>>((resolve, reject) => {
-          timer = setTimeout(() => {
-            try {
-              stream.controller?.abort?.();
-            } catch {
-              /* ignore abort errors */
-            }
-            reject(
-              new Error(`LLM stream stalled: no first chunk within ${timeoutMs}ms (${label})`),
-            );
-          }, timeoutMs);
-          it.next().then(resolve, reject);
-        });
-        if (timer) {
-          clearTimeout(timer);
-          timer = undefined;
-        }
-        if (first.done) return;
-        yield first.value;
-        for (;;) {
-          const next = await it.next();
-          if (next.done) return;
-          yield next.value;
-        }
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    },
-  };
-}
 
 // 见 LLM_ABSOLUTE_TIMEOUT_MS。从流开始计一个不可重置的 deadline:到点 abort 底层 fetch 并抛错,
 // 不管期间是否在出字节。返回对象透传 controller,使外层(首 chunk 超时)仍能 abort 同一底层请求。

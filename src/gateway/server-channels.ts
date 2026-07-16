@@ -870,6 +870,7 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
                   `[${id}] skipping auto-restart (account no longer listed for ${channelId})`,
                 );
                 return;
+              }
               // Only plugin task lifetime counts. Deferred handoff and cleanup must not
               // make a short crash look stable and erase crash-loop attempts.
               if (

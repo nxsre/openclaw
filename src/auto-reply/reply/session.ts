@@ -1,6 +1,6 @@
-import { setTimeout as sleep } from "node:timers/promises";
 // Manages reply session records, labels, ids, and route persistence.
 import crypto from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
@@ -53,8 +53,8 @@ import {
 } from "../../gateway/active-sessions-shutdown-tracker.js";
 import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
 import { deliverSessionMaintenanceWarning } from "../../infra/session-maintenance-warning.js";
-import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import type { PluginHookSessionEndReason } from "../../plugins/hook-types.js";
 import {
@@ -96,7 +96,6 @@ import { buildSessionEndHookPayload, buildSessionStartHookPayload } from "./sess
 import { prepareReplySessionParentFork } from "./session-parent-fork-prepare.js";
 import { clearSessionResetRuntimeState } from "./session-reset-cleanup.js";
 
-
 const log = createSubsystemLogger("session-init");
 
 // XCPH: serialize reply-session init per conversation so optimistic commits
@@ -104,7 +103,6 @@ const log = createSubsystemLogger("session-init");
 const replySessionInitQueue = new KeyedAsyncQueue();
 
 // XCPH: on stale-snapshot conflict, retry with jittered backoff instead of a single immediate retry.
-const REPLY_SESSION_INIT_MAX_ATTEMPTS = 6;
 const REPLY_SESSION_INIT_BACKOFF_BASE_MS = 8;
 const REPLY_SESSION_INIT_BACKOFF_MAX_MS = 120;
 
@@ -123,7 +121,6 @@ function replySessionInitQueueKey(params: InitSessionStateParams): string {
     "";
   return `${normalizeOptionalString(ctx.AgentId) ?? ""}::${key}`;
 }
-
 
 function stripThreadFromSessionRoute(route: SessionEntry["route"]): SessionEntry["route"] {
   const normalized = normalizeDeliveryChannelRoute(route);
@@ -1067,9 +1064,7 @@ async function initSessionStateAttemptLocked(
       await sleep(backoffMs);
       return await initSessionStateAttemptLocked(params, attemptContext, true, undefined);
     }
-    throw new Error(
-      `reply session initialization conflicted for ${sessionKey} after retries`,
-    );
+    throw new Error(`reply session initialization conflicted for ${sessionKey} after retries`);
   }
   sessionEntry = committed.sessionEntry;
   sessionId = sessionEntry.sessionId;
