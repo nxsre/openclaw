@@ -12,12 +12,11 @@ import type { MarkdownTableMode } from "openclaw/plugin-sdk/config-contracts";
 import { chunkMarkdownTextWithMode, type ChunkMode } from "openclaw/plugin-sdk/reply-chunking";
 import {
   escapeTelegramHtml,
-  limitTelegramRichHtmlNesting,
   markdownToTelegramRichHtml,
-  materializeTelegramRichHtmlLineBreaks,
-  sanitizeTelegramRichHtml,
+  normalizeTelegramOutboundRichHtml,
   splitTelegramHtmlChunks,
   telegramHtmlToPlainTextFallback,
+  type TelegramRichHtmlDegradationReason,
 } from "./format.js";
 
 type TelegramRichMessageReplyMarkup =
@@ -27,12 +26,8 @@ type TelegramRichMessageReplyMarkup =
   | ForceReply;
 
 export const TELEGRAM_RICH_TEXT_LIMIT = 32_768;
-export const TELEGRAM_RICH_BLOCK_LIMIT = 500;
-export const TELEGRAM_RICH_MEDIA_LIMIT = 50;
-// xcph merge(v2026.6.9):此常量在 xcph HEAD 被引用却从未定义(潜在 bug,本次 typecheck
-// 暴露)。给保守阈值=宽表(列数>3)走特殊处理;请 review 确认 xcph 原意值。
-export const TELEGRAM_RICH_TABLE_COLUMN_LIMIT = 3;
-export const TELEGRAM_RICH_NESTING_LIMIT = 16;
+const TELEGRAM_RICH_BLOCK_LIMIT = 500;
+const TELEGRAM_RICH_MEDIA_LIMIT = 50;
 
 export type TelegramInputRichMessage =
   | {
@@ -48,17 +43,26 @@ export type TelegramInputRichMessage =
       skip_entity_detection?: boolean;
     };
 
+type TelegramInputRichHtmlMessage = Extract<TelegramInputRichMessage, { html: string }>;
+
 type TelegramRichMessageOptions = {
   skipEntityDetection?: boolean;
   tableMode?: MarkdownTableMode;
 };
 
-export type TelegramRichTextMode = "markdown" | "html";
+type TelegramRichTextMode = "markdown" | "html";
 
 export type TelegramRichTextChunk = {
   text: string;
   textMode: "html";
   plainText: string;
+  skipEntityDetection: boolean;
+  degradationReasons: readonly TelegramRichHtmlDegradationReason[];
+};
+
+type TelegramRichMessagePlan = {
+  richMessage: TelegramInputRichHtmlMessage;
+  degradationReasons: readonly TelegramRichHtmlDegradationReason[];
 };
 
 export type TelegramSendRichMessageParams = {
@@ -98,6 +102,16 @@ type TelegramRichRawApi = {
 type TelegramApiWithRichRaw = Bot["api"] & {
   raw?: TelegramRichRawApi;
 };
+
+const TELEGRAM_RICH_EMAIL_TOKEN_RE =
+  /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/iu;
+
+function shouldSkipTelegramRichEntityDetection(
+  text: string,
+  options?: Pick<TelegramRichMessageOptions, "skipEntityDetection">,
+): boolean {
+  return options?.skipEntityDetection === true || TELEGRAM_RICH_EMAIL_TOKEN_RE.test(text);
+}
 
 export function getTelegramRichRawApi(api: Bot["api"]): TelegramRichRawApi {
   const raw = (api as TelegramApiWithRichRaw).raw;
@@ -163,42 +177,57 @@ export function removeTelegramRichNativeQuoteParam(
   };
 }
 
+export function buildTelegramRichMarkdownPlan(
+  markdown: string,
+  options?: TelegramRichMessageOptions,
+): TelegramRichMessagePlan {
+  const richOptions = {
+    ...options,
+    skipEntityDetection: shouldSkipTelegramRichEntityDetection(markdown, options),
+  };
+  return buildTelegramRichHtmlPlan(markdownToTelegramRichHtml(markdown, richOptions), richOptions);
+}
+
 export function buildTelegramRichMarkdown(
   markdown: string,
   options?: TelegramRichMessageOptions,
 ): TelegramInputRichMessage {
-  return buildTelegramRichHtml(markdownToTelegramRichHtml(markdown, options), options);
+  return buildTelegramRichMarkdownPlan(markdown, options).richMessage;
+}
+
+export function buildTelegramRichHtmlPlan(
+  html: string,
+  options?: TelegramRichMessageOptions,
+): TelegramRichMessagePlan {
+  const normalized = prepareTelegramRichHtml(html);
+  const richMessage = shouldSkipTelegramRichEntityDetection(normalized.html, options)
+    ? { html: normalized.html, skip_entity_detection: true }
+    : { html: normalized.html };
+  return {
+    richMessage,
+    degradationReasons: normalized.degradationReasons,
+  };
 }
 
 export function buildTelegramRichHtml(
   html: string,
   options?: TelegramRichMessageOptions,
 ): TelegramInputRichMessage {
-  const safeHtml = prepareTelegramRichHtml(html);
-  return options?.skipEntityDetection === true
-    ? { html: safeHtml, skip_entity_detection: true }
-    : { html: safeHtml };
+  return buildTelegramRichHtmlPlan(html, options).richMessage;
 }
 
-export function buildTelegramRichMessage(
+export function buildTelegramRichMessagePlan(
   text: string,
   textMode: TelegramRichTextMode,
   options?: TelegramRichMessageOptions,
-): TelegramInputRichMessage {
+): TelegramRichMessagePlan {
   return textMode === "html"
-    ? buildTelegramRichHtml(text, options)
-    : buildTelegramRichMarkdown(text, options);
+    ? buildTelegramRichHtmlPlan(text, options)
+    : buildTelegramRichMarkdownPlan(text, options);
 }
 
-function prepareTelegramRichHtml(html: string): string {
-  // Materialize logical line breaks as <br> after sanitizing (so tag support is
-  // settled) but before the nesting limit. Bot API 10.1 rich messages parse real
-  // HTML, so bare newlines collapse; every rich send/edit/draft funnels through
-  // here, covering both the Markdown and explicit-HTML text modes.
-  return limitTelegramRichHtmlNesting(
-    materializeTelegramRichHtmlLineBreaks(sanitizeTelegramRichHtml(html)),
-    TELEGRAM_RICH_NESTING_LIMIT,
-  );
+function prepareTelegramRichHtml(html: string) {
+  return normalizeTelegramOutboundRichHtml(html);
 }
 
 const TELEGRAM_RICH_HTML_CHUNK_LIMITS = {
@@ -235,7 +264,7 @@ export function isTelegramRichMessageWithinStructuralLimits(
     }
     return (
       splitTelegramHtmlChunks(
-        prepareTelegramRichHtml(markdownToTelegramRichHtml(message.markdown)),
+        prepareTelegramRichHtml(markdownToTelegramRichHtml(message.markdown)).html,
         TELEGRAM_RICH_TEXT_LIMIT,
         TELEGRAM_RICH_HTML_CHUNK_LIMITS,
       ).length <= 1
@@ -243,7 +272,7 @@ export function isTelegramRichMessageWithinStructuralLimits(
   }
   return (
     splitTelegramHtmlChunks(
-      prepareTelegramRichHtml(message.html),
+      prepareTelegramRichHtml(message.html).html,
       TELEGRAM_RICH_TEXT_LIMIT,
       TELEGRAM_RICH_HTML_CHUNK_LIMITS,
     ).length <= 1
@@ -293,174 +322,6 @@ function parseRichMarkdownFenceSpans(markdown: string): RichMarkdownFenceSpan[] 
 
 function isSafeRichMarkdownBlockBreak(spans: readonly RichMarkdownFenceSpan[], index: number) {
   return !spans.some((span) => index > span.start && index < span.end);
-}
-
-function isRichMarkdownFenceMarker(line: string): boolean {
-  return /^( {0,3})(`{3,}|~{3,})/.test(line);
-}
-
-function isRichMarkdownBlockLine(line: string, isTableLine: boolean): boolean {
-  const trimmed = line.trimStart();
-  return (
-    isTableLine ||
-    isRichMarkdownFenceMarker(line) ||
-    /^#{1,6}\s+\S/.test(trimmed) ||
-    trimmed.startsWith(">") ||
-    /^(?:[-+*]|\d+[.)])\s+\S/.test(trimmed) ||
-    /^[-*_][\s-*_-]{2,}$/.test(trimmed)
-  );
-}
-
-function splitMarkdownTableRow(row: string): string[] {
-  const trimmed = row.trim();
-  const body = trimmed.startsWith("|") && trimmed.endsWith("|") ? trimmed.slice(1, -1) : trimmed;
-  const cells: string[] = [];
-  let cell = "";
-  let escaped = false;
-  for (const char of body) {
-    if (escaped) {
-      cell += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      cell += char;
-      escaped = true;
-      continue;
-    }
-    if (char === "|") {
-      cells.push(cell.trim());
-      cell = "";
-      continue;
-    }
-    cell += char;
-  }
-  cells.push(cell.trim());
-  return cells;
-}
-
-function isMarkdownTableSeparator(row: string): boolean {
-  const cells = splitMarkdownTableRow(row);
-  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
-}
-
-function isMarkdownTableRow(row: string): boolean {
-  return splitMarkdownTableRow(row).length > 1;
-}
-
-function markdownTableColumnCount(row: string): number {
-  return splitMarkdownTableRow(row).length;
-}
-
-function findRichMarkdownTableLineIndexes(
-  lines: readonly string[],
-  fenceSpans: readonly RichMarkdownFenceSpan[],
-): Set<number> {
-  const tableLineIndexes = new Set<number>();
-  let offset = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    const nextLine = lines[index + 1];
-    if (
-      nextLine !== undefined &&
-      isSafeRichMarkdownBlockBreak(fenceSpans, offset) &&
-      isMarkdownTableRow(line) &&
-      isMarkdownTableSeparator(nextLine)
-    ) {
-      tableLineIndexes.add(index);
-      tableLineIndexes.add(index + 1);
-      offset += line.length + 1 + nextLine.length + 1;
-      index += 2;
-      while (index < lines.length && isMarkdownTableRow(lines[index] ?? "")) {
-        tableLineIndexes.add(index);
-        offset += (lines[index] ?? "").length + 1;
-        index += 1;
-      }
-      index -= 1;
-      continue;
-    }
-    offset += line.length + 1;
-  }
-  return tableLineIndexes;
-}
-
-function preserveTelegramRichMarkdownLineBreaks(markdown: string): string {
-  if (!markdown.includes("\n")) {
-    return markdown;
-  }
-
-  const fenceSpans = parseRichMarkdownFenceSpans(markdown);
-  const lines = markdown.split("\n");
-  const tableLineIndexes = findRichMarkdownTableLineIndexes(lines, fenceSpans);
-  const out: string[] = [];
-  let offset = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    const nextLine = lines[index + 1];
-    if (nextLine === undefined) {
-      out.push(line);
-      break;
-    }
-
-    const newlineIndex = offset + line.length;
-    const shouldPreserveBreak =
-      line.length > 0 &&
-      nextLine.length > 0 &&
-      !line.endsWith("  ") &&
-      !line.endsWith("\\") &&
-      !isRichMarkdownBlockLine(line, tableLineIndexes.has(index)) &&
-      !isRichMarkdownBlockLine(nextLine, tableLineIndexes.has(index + 1)) &&
-      isSafeRichMarkdownBlockBreak(fenceSpans, newlineIndex);
-    out.push(`${line}${shouldPreserveBreak ? "  " : ""}\n`);
-    offset = newlineIndex + 1;
-  }
-  return out.join("");
-}
-
-function normalizeTelegramRichMarkdownTables(markdown: string): string {
-  if (!markdown.includes("|")) {
-    return markdown;
-  }
-
-  const fenceSpans = parseRichMarkdownFenceSpans(markdown);
-  const lines = markdown.split("\n");
-  const out: string[] = [];
-  let offset = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    const nextLine = lines[index + 1];
-    if (
-      nextLine !== undefined &&
-      isSafeRichMarkdownBlockBreak(fenceSpans, offset) &&
-      isMarkdownTableRow(line) &&
-      isMarkdownTableSeparator(nextLine) &&
-      Math.max(markdownTableColumnCount(line), markdownTableColumnCount(nextLine)) >
-        TELEGRAM_RICH_TABLE_COLUMN_LIMIT
-    ) {
-      const tableLines = [line, nextLine];
-      let consumed = line.length + 1 + nextLine.length + 1;
-      index += 2;
-      while (index < lines.length && isMarkdownTableRow(lines[index] ?? "")) {
-        const tableLine = lines[index] ?? "";
-        tableLines.push(tableLine);
-        consumed += tableLine.length + 1;
-        index += 1;
-      }
-      index -= 1;
-      out.push("```", ...tableLines, "```");
-      offset += consumed;
-      continue;
-    }
-    out.push(line);
-    offset += line.length + 1;
-  }
-  return out.join("\n");
-}
-
-// xcph merge(v2026.6.9):此函数在 xcph HEAD 即为未调用的死代码(noUnusedLocals 暴露)。
-// export 以消除 unused 报错并避免级联;请 review 是否应接线或删除。
-export function normalizeTelegramRichMarkdown(markdown: string): string {
-  return preserveTelegramRichMarkdownLineBreaks(normalizeTelegramRichMarkdownTables(markdown));
 }
 
 type RichMarkdownBlockBreak = {
@@ -589,31 +450,48 @@ export function splitTelegramRichMessageTextChunks(params: {
   tableMode?: MarkdownTableMode;
   skipEntityDetection?: boolean;
 }): TelegramRichTextChunk[] {
-  const renderMarkdownChunk = (chunk: string) =>
-    prepareTelegramRichHtml(
-      markdownToTelegramRichHtml(chunk, {
-        tableMode: params.tableMode,
+  const renderRichChunk = (chunk: string, textMode: TelegramRichTextMode) => {
+    const skipEntityDetection = shouldSkipTelegramRichEntityDetection(chunk, {
+      skipEntityDetection: params.skipEntityDetection,
+    });
+    const normalized =
+      textMode === "html"
+        ? prepareTelegramRichHtml(chunk)
+        : prepareTelegramRichHtml(
+            markdownToTelegramRichHtml(chunk, {
+              tableMode: params.tableMode,
+              skipEntityDetection,
+            }),
+          );
+    return { normalized, skipEntityDetection };
+  };
+  const richChunks =
+    params.textMode === "html"
+      ? [
+          {
+            source: params.text,
+            rendered: renderRichChunk(params.text, "html"),
+          },
+        ]
+      : splitTelegramRichMarkdownChunks(params.text, params.textLimit, params.chunkMode).map(
+          (chunk) => ({
+            source: chunk,
+            rendered: renderRichChunk(chunk, "markdown"),
+          }),
+        );
+  return richChunks.flatMap(({ source, rendered }) =>
+    splitPreparedTelegramRichHtml({
+      html: rendered.normalized.html,
+      sourceFallback: source,
+      textLimit: params.textLimit,
+    }).map((chunk, index) => ({
+      text: chunk,
+      textMode: "html",
+      plainText: telegramHtmlToPlainTextFallback(chunk),
+      skipEntityDetection: shouldSkipTelegramRichEntityDetection(chunk, {
         skipEntityDetection: params.skipEntityDetection,
       }),
-    );
-  const htmlChunks =
-    params.textMode === "html"
-      ? splitPreparedTelegramRichHtml({
-          html: prepareTelegramRichHtml(params.text),
-          sourceFallback: params.text,
-          textLimit: params.textLimit,
-        })
-      : splitTelegramRichMarkdownChunks(params.text, params.textLimit, params.chunkMode).flatMap(
-          (chunk) =>
-            splitPreparedTelegramRichHtml({
-              html: renderMarkdownChunk(chunk),
-              sourceFallback: chunk,
-              textLimit: params.textLimit,
-            }),
-        );
-  return htmlChunks.map((chunk) => ({
-    text: chunk,
-    textMode: "html",
-    plainText: telegramHtmlToPlainTextFallback(chunk),
-  }));
+      degradationReasons: index === 0 ? rendered.normalized.degradationReasons : [],
+    })),
+  );
 }

@@ -1,4 +1,5 @@
 // Assistant error formatting helpers normalize assistant-visible error payloads.
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 // XCPH: 上游 LLM 任意异常时给客户端的统一兜底文案。
 // 设置 OPENCLAW_LLM_ERROR_FALLBACK_TEXT 即启用并使用该文本；为空则保留原有按类型分类的英文提示
 // （便于开发期排障）。所有通道（飞书 / 微信 / OpenIM / WebSocket / HTTP）拿到的 assistant
@@ -366,5 +367,5 @@ export function formatRawAssistantErrorForUi(raw?: string): string {
     return `${prefix}${type}: ${info.message}`;
   }
 
-  return trimmed.length > 600 ? `${trimmed.slice(0, 600)}…` : trimmed;
+  return trimmed.length > 600 ? `${truncateUtf16Safe(trimmed, 600)}…` : trimmed;
 }

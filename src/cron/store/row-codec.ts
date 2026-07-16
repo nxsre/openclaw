@@ -27,9 +27,10 @@ import {
 import type { CronJobInsert, CronJobRow } from "./schema.js";
 import { getCronStoreKysely } from "./schema.js";
 import { bindStateColumns, stateFromRow } from "./state-codec.js";
+import { bindTriggerColumns, triggerFromRow } from "./trigger-codec.js";
 import type { LoadedCronStore } from "./types.js";
 
-function bindScheduleColumns(
+export function bindScheduleColumns(
   schedule: CronSchedule,
 ): Pick<
   CronJobInsert,
@@ -54,6 +55,21 @@ function bindScheduleColumns(
       anchor_ms: schedule.anchorMs ?? null,
       schedule_expr: null,
       schedule_tz: null,
+      stagger_ms: null,
+    };
+  }
+  if (schedule.kind === "on-exit") {
+    // v1: reuse existing nullable TEXT columns to round-trip the watcher's
+    // command (schedule_expr) and cwd (schedule_tz) without a schema migration.
+    // schedule_kind disambiguates from cron. (Dedicated columns are a possible
+    // follow-up if reviewers prefer.)
+    return {
+      schedule_kind: "on-exit",
+      at: null,
+      every_ms: null,
+      anchor_ms: null,
+      schedule_expr: schedule.command,
+      schedule_tz: schedule.cwd ?? null,
       stagger_ms: null,
     };
   }
@@ -133,6 +149,10 @@ function bindCronJobRow(storeKey: string, job: CronJob, sortOrder: number): Cron
   return {
     store_key: storeKey,
     job_id: job.id,
+    declaration_key: job.declarationKey ?? null,
+    display_name: job.displayName ?? null,
+    owner_agent_id: job.owner?.agentId ?? null,
+    owner_session_key: job.owner?.sessionKey ?? null,
     name: job.name,
     description: job.description ?? null,
     enabled: job.enabled ? 1 : 0,
@@ -143,6 +163,7 @@ function bindCronJobRow(storeKey: string, job: CronJob, sortOrder: number): Cron
     session_key: job.sessionKey ?? null,
     session_target: job.sessionTarget,
     wake_mode: job.wakeMode,
+    ...bindTriggerColumns(job.trigger),
     ...bindScheduleColumns(job.schedule),
     ...bindPayloadColumns(job.payload),
     ...bindDeliveryColumns(job.delivery),
@@ -197,7 +218,7 @@ export function assertCronStoreCanPersist(store: CronStoreFile): void {
   }
 }
 
-function scheduleFromRow(row: CronJobRow): CronSchedule | null {
+export function scheduleFromRow(row: CronJobRow): CronSchedule | null {
   if (row.schedule_kind === "at" && row.at) {
     return { kind: "at", at: row.at };
   }
@@ -214,6 +235,13 @@ function scheduleFromRow(row: CronJobRow): CronSchedule | null {
       expr: row.schedule_expr,
       ...(row.schedule_tz ? { tz: row.schedule_tz } : {}),
       ...(row.stagger_ms != null ? { staggerMs: normalizeNumber(row.stagger_ms) } : {}),
+    };
+  }
+  if (row.schedule_kind === "on-exit" && row.schedule_expr) {
+    return {
+      kind: "on-exit",
+      command: row.schedule_expr,
+      ...(row.schedule_tz ? { cwd: row.schedule_tz } : {}),
     };
   }
   return null;
@@ -252,12 +280,23 @@ function rowToCronJob(row: CronJobRow): CronJob | null {
     ? applyDeliveryTargetsFromJobJson(columnDelivery, row.job_json)
     : columnDelivery;
   const failureAlert = failureAlertFromRow(row);
+  const trigger = triggerFromRow(row);
   if (!schedule || !payload) {
     return null;
   }
   const createdAtMs = normalizeNumber(row.created_at_ms) ?? Date.now();
   return {
     id: row.job_id,
+    ...(row.declaration_key ? { declarationKey: row.declaration_key } : {}),
+    ...(row.display_name ? { displayName: row.display_name } : {}),
+    ...(row.owner_agent_id || row.owner_session_key
+      ? {
+          owner: {
+            ...(row.owner_agent_id ? { agentId: row.owner_agent_id } : {}),
+            ...(row.owner_session_key ? { sessionKey: row.owner_session_key } : {}),
+          },
+        }
+      : {}),
     name: row.name,
     ...(row.description ? { description: row.description } : {}),
     enabled: row.enabled !== 0,
@@ -272,6 +311,7 @@ function rowToCronJob(row: CronJobRow): CronJob | null {
     schedule,
     sessionTarget: row.session_target as CronJob["sessionTarget"],
     wakeMode: row.wake_mode as CronJob["wakeMode"],
+    ...(trigger ? { trigger } : {}),
     payload,
     ...(delivery ? { delivery } : {}),
     ...(failureAlert !== undefined ? { failureAlert } : {}),
