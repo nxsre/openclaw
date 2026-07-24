@@ -80,6 +80,7 @@ import {
 import { getPluginToolMeta } from "../../../plugins/tools.js";
 import { isSubagentSessionKey } from "../../../routing/session-key.js";
 import { annotateInterSessionPromptText } from "../../../sessions/input-provenance.js";
+import { extractHttpStatusFromErrorText } from "../../../shared/assistant-error-format.js";
 import { isTranscriptOnlyOpenClawAssistantMessage } from "../../../shared/transcript-only-openclaw-assistant.js";
 import { resolveSkillsPromptForRun } from "../../../skills/loading/workspace.js";
 import { resolveEmbeddedRunSkillEntries } from "../../../skills/runtime/embedded-run-entries.js";
@@ -401,6 +402,7 @@ import {
 } from "./attempt.context-engine-helpers.js";
 import {
   assistantStopErrorIndicatesNonOkHttp,
+  formatHttpErrorForLog,
   revertEmbeddedSessionToPrePromptLeaf,
   resolveNonOkHttpStatusFromUnknown,
 } from "./attempt.http400-revert.js";
@@ -5430,6 +5432,14 @@ export async function runEmbeddedAttempt(
         const httpErrorFromAssistant =
           currentAttemptAssistant !== undefined &&
           assistantStopErrorIndicatesNonOkHttp(currentAttemptAssistant);
+        const httpErrorStatusFromAssistant =
+          httpErrorFromAssistant && currentAttemptAssistant
+            ? extractHttpStatusFromErrorText(
+                typeof currentAttemptAssistant.errorMessage === "string"
+                  ? currentAttemptAssistant.errorMessage
+                  : "",
+              )
+            : undefined;
         const shouldRevertHttpErrorTurn =
           !compactionOccurredThisAttempt &&
           !aborted &&
@@ -5439,6 +5449,15 @@ export async function runEmbeddedAttempt(
           const preservedHttpErrorForRunner = httpErrorFromPromptThrow
             ? formatErrorMessage(promptError)
             : currentAttemptAssistant?.errorMessage?.trim() || "LLM request failed.";
+          const revertHttpStatus = httpErrorStatusFromPromptThrow ?? httpErrorStatusFromAssistant;
+          const revertSource = httpErrorFromPromptThrow ? "prompt-throw" : "assistant-stop";
+          log.warn(
+            `[http-error-session-revert] discarding failed turn ` +
+              `runId=${params.runId} sessionId=${params.sessionId} ` +
+              `provider=${params.provider} model=${params.modelId} ` +
+              `httpStatus=${revertHttpStatus ?? "unknown"} source=${revertSource} ` +
+              `error=${formatHttpErrorForLog(preservedHttpErrorForRunner)}`,
+          );
           revertEmbeddedSessionToPrePromptLeaf({
             activeSession,
             sessionManager: activeSessionManager,
@@ -5446,6 +5465,11 @@ export async function runEmbeddedAttempt(
             prePromptLeafId: prePromptSessionLeafId,
             runId: params.runId,
             sessionId: params.sessionId,
+            httpStatus: revertHttpStatus,
+            errorMessage: preservedHttpErrorForRunner,
+            provider: params.provider,
+            modelId: params.modelId,
+            source: revertSource,
           });
           // Revert rewrites the transcript while the prompt fence is active (lock released
           // for model I/O). Refresh the fence so cleanup does not treat our own revert as
@@ -5511,6 +5535,23 @@ export async function runEmbeddedAttempt(
         }
 
         if (promptError && promptErrorSource === "prompt" && !compactionOccurredThisAttempt) {
+          const promptErrorText = formatErrorMessage(promptError);
+          const promptErrorStatus =
+            httpErrorStatusFromPromptThrow ??
+            resolveNonOkHttpStatusFromUnknown(promptError) ??
+            extractHttpStatusFromErrorText(promptErrorText);
+          if (!shouldRevertHttpErrorTurn) {
+            // Non-discard path still needs an operator-visible breadcrumb.
+            log.warn(
+              `[llm-request-error] prompt failed without session discard ` +
+                `runId=${params.runId} sessionId=${params.sessionId} ` +
+                `provider=${params.provider} model=${params.modelId} ` +
+                `httpStatus=${promptErrorStatus ?? "unknown"} ` +
+                `compaction=${compactionOccurredThisAttempt} aborted=${aborted} ` +
+                `yieldAborted=${yieldAborted} ` +
+                `error=${formatHttpErrorForLog(promptErrorText)}`,
+            );
+          }
           try {
             activeSessionManager.appendCustomEntry("openclaw:prompt-error", {
               timestamp: Date.now(),
@@ -5519,11 +5560,34 @@ export async function runEmbeddedAttempt(
               provider: params.provider,
               model: params.modelId,
               api: params.model.api,
-              error: formatErrorMessage(promptError),
+              error: promptErrorText,
             });
           } catch (entryErr) {
             log.warn(`failed to persist prompt error entry: ${String(entryErr)}`);
           }
+        } else if (
+          (httpErrorFromPromptThrow || httpErrorFromAssistant) &&
+          !shouldRevertHttpErrorTurn
+        ) {
+          const skippedError = httpErrorFromPromptThrow
+            ? formatErrorMessage(promptError)
+            : currentAttemptAssistant?.errorMessage?.trim() || "LLM request failed.";
+          const skippedStatus =
+            httpErrorStatusFromPromptThrow ?? httpErrorStatusFromAssistant ?? "unknown";
+          const skipReason = compactionOccurredThisAttempt
+            ? "compaction"
+            : aborted
+              ? "aborted"
+              : yieldAborted
+                ? "yield-aborted"
+                : "unknown";
+          log.warn(
+            `[http-error-session-revert] skip discard ` +
+              `runId=${params.runId} sessionId=${params.sessionId} ` +
+              `provider=${params.provider} model=${params.modelId} ` +
+              `httpStatus=${skippedStatus} reason=${skipReason} ` +
+              `error=${formatHttpErrorForLog(skippedError)}`,
+          );
         }
 
         // Let the active context engine run its post-turn lifecycle. These hooks

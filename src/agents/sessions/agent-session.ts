@@ -34,6 +34,8 @@ import type {
   TextContent,
 } from "../../llm/types.js";
 import { isRetryableAssistantError } from "../../llm/utils/retry.js";
+import { redactSensitiveText } from "../../logging/redact.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { attachRuntimeUserTurnTranscriptContext } from "../../sessions/user-turn-transcript-runtime-context.js";
 import type {
   PersistedUserTurnMessage,
@@ -102,6 +104,16 @@ import type { BashOperations } from "./tools/bash-operations.js";
 import { createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
+
+const sessionRetryLog = createSubsystemLogger("agents/session-retry");
+
+function formatSessionRetryErrorForLog(message: string, limit = 300): string {
+  const redacted = redactSensitiveText(message).replace(/\s+/g, " ").trim();
+  if (!redacted) {
+    return "<empty>";
+  }
+  return redacted.length <= limit ? redacted : `${redacted.slice(0, limit - 1)}…`;
+}
 
 function unwrapCoreResult<T>(result: { ok: true; value: T } | { ok: false; error: Error }): T {
   if (result.ok) {
@@ -1116,11 +1128,28 @@ export class AgentSession {
       return false;
     }
 
-    if (this.isRetryableError(msg) && (await this.prepareRetry(msg))) {
-      return true;
+    if (msg.stopReason === "error") {
+      const errorText = msg.errorMessage?.trim() || "Unknown error";
+      if (this.isRetryableError(msg)) {
+        if (await this.prepareRetry(msg)) {
+          return true;
+        }
+        // prepareRetry already logged disabled / max-reached / cancelled.
+      } else {
+        sessionRetryLog.warn(
+          `[session-auto-retry] not retrying non-retryable error ` +
+            `sessionId=${this.sessionId} ` +
+            `error=${formatSessionRetryErrorForLog(errorText)}`,
+        );
+      }
     }
 
     if (msg.stopReason === "error" && this.retryCount > 0) {
+      sessionRetryLog.warn(
+        `[session-auto-retry] exhausted ` +
+          `sessionId=${this.sessionId} attempt=${this.retryCount} ` +
+          `error=${formatSessionRetryErrorForLog(msg.errorMessage || "Unknown error")}`,
+      );
       this.emit({
         type: "auto_retry_end",
         success: false,
@@ -2661,6 +2690,11 @@ export class AgentSession {
   private async prepareRetry(message: AssistantMessage): Promise<boolean> {
     const settings = this.settingsManager.getRetrySettings();
     if (!settings.enabled) {
+      sessionRetryLog.warn(
+        `[session-auto-retry] disabled; skipping retry ` +
+          `sessionId=${this.sessionId} ` +
+          `error=${formatSessionRetryErrorForLog(message.errorMessage || "Unknown error")}`,
+      );
       return false;
     }
 
@@ -2669,17 +2703,29 @@ export class AgentSession {
     if (this.retryCount > settings.maxRetries) {
       // Preserve the completed attempt count so post-run handling can emit the final failure.
       this.retryCount--;
+      sessionRetryLog.warn(
+        `[session-auto-retry] max retries reached ` +
+          `sessionId=${this.sessionId} maxRetries=${settings.maxRetries} ` +
+          `error=${formatSessionRetryErrorForLog(message.errorMessage || "Unknown error")}`,
+      );
       return false;
     }
 
     const delayMs = settings.baseDelayMs * 2 ** (this.retryCount - 1);
+    const errorText = message.errorMessage || "Unknown error";
+
+    sessionRetryLog.info(
+      `[session-auto-retry] scheduling retry ` +
+        `sessionId=${this.sessionId} attempt=${this.retryCount}/${settings.maxRetries} ` +
+        `delayMs=${delayMs} error=${formatSessionRetryErrorForLog(errorText)}`,
+    );
 
     this.emit({
       type: "auto_retry_start",
       attempt: this.retryCount,
       maxAttempts: settings.maxRetries,
       delayMs,
-      errorMessage: message.errorMessage || "Unknown error",
+      errorMessage: errorText,
     });
 
     // Remove error message from agent state (keep in session for history)
@@ -2696,6 +2742,10 @@ export class AgentSession {
       // Aborted during sleep - emit end event so UI can clean up
       const attempt = this.retryCount;
       this.retryCount = 0;
+      sessionRetryLog.warn(
+        `[session-auto-retry] cancelled during backoff ` +
+          `sessionId=${this.sessionId} attempt=${attempt}`,
+      );
       this.emit({
         type: "auto_retry_end",
         success: false,

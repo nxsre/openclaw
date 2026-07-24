@@ -6,6 +6,8 @@
 import { normalizeUniqueStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { sleepWithAbort } from "../infra/backoff.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { redactSensitiveText } from "../logging/redact.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
   resolveTransientProviderAttempts,
   resolveTransientProviderDelayMs,
@@ -14,6 +16,16 @@ import {
   type TransientProviderRetryConfig,
 } from "../provider-runtime/operation-retry.js";
 import { collectProviderApiKeys, isApiKeyRateLimitError } from "./live-auth-keys.js";
+
+const log = createSubsystemLogger("agents/api-key-rotation");
+
+function formatRotationErrorForLog(message: string, limit = 300): string {
+  const redacted = redactSensitiveText(message).replace(/\s+/g, " ").trim();
+  if (!redacted) {
+    return "<empty>";
+  }
+  return redacted.length <= limit ? redacted : `${redacted.slice(0, limit - 1)}…`;
+}
 
 type ApiKeyRetryParams = {
   apiKey: string;
@@ -73,8 +85,19 @@ export async function executeWithApiKeyRotation<T>(
           // A rotation signal consumes the current key and moves to the next key
           // without running same-key transient retry logic.
           if (apiKeyIndex + 1 >= keys.length) {
+            log.warn(
+              `[api-key-rotation] rate-limit rotation exhausted ` +
+                `provider=${params.provider} apiKeyIndex=${apiKeyIndex} ` +
+                `keys=${keys.length} error=${formatRotationErrorForLog(message)}`,
+            );
             break;
           }
+          log.info(
+            `[api-key-rotation] rotating API key after rate-limit ` +
+              `provider=${params.provider} fromKeyIndex=${apiKeyIndex} ` +
+              `toKeyIndex=${apiKeyIndex + 1} keys=${keys.length} ` +
+              `error=${formatRotationErrorForLog(message)}`,
+          );
           params.onRetry?.({ apiKey, error, attempt: apiKeyIndex, message });
           break;
         }
@@ -91,12 +114,24 @@ export async function executeWithApiKeyRotation<T>(
             maxAttempts: maxOperationAttempts,
           })
         ) {
+          log.warn(
+            `[api-key-rotation] not retrying same-key operation ` +
+              `provider=${params.provider} apiKeyIndex=${apiKeyIndex} ` +
+              `attempt=${attemptNumber}/${maxOperationAttempts} ` +
+              `error=${formatRotationErrorForLog(message)}`,
+          );
           break keyLoop;
         }
 
         const delayMs = resolveTransientProviderDelayMs(transientRetry, attemptNumber);
         // Same-key transient retries are bounded by provider policy and keep the
         // current key stable so auth rotation only handles key-specific failures.
+        log.info(
+          `[api-key-rotation] retrying same-key operation ` +
+            `provider=${params.provider} apiKeyIndex=${apiKeyIndex} ` +
+            `attempt=${attemptNumber}/${maxOperationAttempts} delayMs=${delayMs} ` +
+            `error=${formatRotationErrorForLog(message)}`,
+        );
         const sleep = transientRetry.sleep ?? sleepWithAbort;
         await sleep(delayMs, transientRetry.signal);
       }

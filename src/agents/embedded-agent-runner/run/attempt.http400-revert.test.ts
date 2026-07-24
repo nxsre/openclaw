@@ -30,14 +30,14 @@ describe("attempt.http-error-revert helpers", () => {
     expect(assistantStopErrorIndicatesHttp400(assistant)).toBe(false);
   });
 
-  it("formats friendly user-facing HTTP error copy", () => {
+  it("keeps raw HTTP errors when no env fallback is configured", () => {
+    // xcph: formatRawAssistantErrorForUi only swaps copy when
+    // OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status> is set; otherwise keep the raw error.
     const formatted = formatRawAssistantErrorForUi("502 status code (no body)");
-    expect(formatted).toContain("temporarily unavailable (HTTP 502)");
-    expect(formatted).toContain("Your message was not saved");
-    expect(formatted).toContain("模型服务暂时不可用");
-    expect(formatted).toContain("本条消息未保存");
+    expect(formatted).toContain("502");
     expect(formatNonOkHttpStatusUserMessage(429)).toContain("rate-limiting");
     expect(formatNonOkHttpStatusUserMessage(429)).toContain("限流");
+    expect(formatNonOkHttpStatusUserMessage(400)).toContain("本条消息未保存");
   });
 
   it("strips the failed prompt turn AND task-generated tail, then rewrites the session file", () => {
@@ -76,6 +76,11 @@ describe("attempt.http-error-revert helpers", () => {
       prePromptLeafId: "u1",
       runId: "r",
       sessionId: "sess",
+      httpStatus: 400,
+      errorMessage: "HTTP 400: content filtered",
+      provider: "test-provider",
+      modelId: "test-model",
+      source: "prompt-throw",
     });
 
     expect(sm.fileEntries.map((e) => e.id)).toEqual(["s0", "u1"]); // u2 + t3 都被删

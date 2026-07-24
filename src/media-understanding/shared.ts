@@ -642,7 +642,8 @@ async function postGuardedRequest(params: {
 }
 
 function isTransientProviderHttpStatus(status: number): boolean {
-  return status === 500 || status === 502 || status === 503 || status === 504;
+  // Align with provider operation retry: only gateway-unavailable statuses.
+  return status === 503 || status === 504;
 }
 
 export async function postJsonRequest(params: GuardedPostRequestParams<unknown>) {

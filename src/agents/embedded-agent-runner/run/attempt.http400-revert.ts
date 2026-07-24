@@ -1,4 +1,5 @@
 import { collectErrorGraphCandidates, formatErrorMessage } from "../../../infra/errors.js";
+import { redactSensitiveText } from "../../../logging/redact.js";
 import {
   extractHttpStatusFromErrorText,
   extractLeadingHttpStatus,
@@ -90,6 +91,14 @@ export function assistantStopErrorIndicatesHttp400(assistant: AgentMessage): boo
   return extractLeadingHttpStatus(em.trim())?.code === 400;
 }
 
+export function formatHttpErrorForLog(text: string, limit = 300): string {
+  const redacted = redactSensitiveText(text).replace(/\s+/g, " ").trim();
+  if (!redacted) {
+    return "<empty>";
+  }
+  return redacted.length <= limit ? redacted : `${redacted.slice(0, limit - 1)}…`;
+}
+
 type MutableSessionManager = {
   fileEntries?: Array<{ type?: string; id?: string; parentId?: string | null }>;
   byId?: Map<string, unknown>;
@@ -112,21 +121,37 @@ export function revertEmbeddedSessionToPrePromptLeaf(params: {
   prePromptLeafId: string | null;
   runId: string;
   sessionId: string;
+  httpStatus?: number;
+  errorMessage?: string;
+  provider?: string;
+  modelId?: string;
+  source?: "prompt-throw" | "assistant-stop";
 }): void {
   const msgs = params.activeSession.agent.state.messages;
-  if (msgs.length > params.prePromptMessageCount) {
+  const removedMessageCount = Math.max(0, msgs.length - params.prePromptMessageCount);
+  if (removedMessageCount > 0) {
     params.activeSession.agent.state.messages = msgs.slice(0, params.prePromptMessageCount);
   }
+
+  const statusLabel = params.httpStatus !== undefined ? String(params.httpStatus) : "unknown";
+  const errorLabel = params.errorMessage ? formatHttpErrorForLog(params.errorMessage) : "<none>";
+  const providerLabel = params.provider?.trim() || "unknown";
+  const modelLabel = params.modelId?.trim() || "unknown";
+  const sourceLabel = params.source ?? "unknown";
 
   const sm = params.sessionManager as MutableSessionManager;
   if (!Array.isArray(sm.fileEntries) || typeof sm.rewriteFile !== "function") {
     log.warn(
-      `[http-error-session-revert] skip SessionManager rewrite (missing fileEntries/_rewriteFile) ` +
-        `runId=${params.runId} sessionId=${params.sessionId}`,
+      `[http-error-session-revert] skip SessionManager rewrite (missing fileEntries/rewriteFile) ` +
+        `runId=${params.runId} sessionId=${params.sessionId} ` +
+        `provider=${providerLabel} model=${modelLabel} ` +
+        `httpStatus=${statusLabel} source=${sourceLabel} ` +
+        `removedMessages=${removedMessageCount} error=${errorLabel}`,
     );
     return;
   }
 
+  let removedEntries = 0;
   let guard = 0;
   while (sm.leafId !== params.prePromptLeafId && sm.fileEntries.length > 1 && guard < 10_000) {
     guard += 1;
@@ -135,6 +160,7 @@ export function revertEmbeddedSessionToPrePromptLeaf(params: {
       break;
     }
     sm.fileEntries.pop();
+    removedEntries += 1;
     if (last.id) {
       sm.byId?.delete(last.id);
       sm.labelsById?.delete(last.id);
@@ -147,14 +173,24 @@ export function revertEmbeddedSessionToPrePromptLeaf(params: {
     log.warn(
       `[http-error-session-revert] leaf mismatch after strip (session may need manual repair) ` +
         `runId=${params.runId} sessionId=${params.sessionId} ` +
-        `expectedLeaf=${params.prePromptLeafId ?? "null"} actualLeaf=${sm.leafId ?? "null"}`,
+        `provider=${providerLabel} model=${modelLabel} ` +
+        `httpStatus=${statusLabel} source=${sourceLabel} ` +
+        `expectedLeaf=${params.prePromptLeafId ?? "null"} actualLeaf=${sm.leafId ?? "null"} ` +
+        `removedEntries=${removedEntries} removedMessages=${removedMessageCount} ` +
+        `error=${errorLabel}`,
     );
   }
 
   sm.rewriteFile();
+  // 400/敏感词等非 2xx 失败时丢弃本轮 tail,避免毒内容反复提交。
   log.info(
-    `[http-error-session-revert] removed failed prompt turn from session transcript ` +
+    `[http-error-session-revert] discarded failed prompt turn from session transcript ` +
       `runId=${params.runId} sessionId=${params.sessionId} ` +
-      `prePromptMessages=${params.prePromptMessageCount} prePromptLeaf=${params.prePromptLeafId ?? "null"}`,
+      `provider=${providerLabel} model=${modelLabel} ` +
+      `httpStatus=${statusLabel} source=${sourceLabel} ` +
+      `removedEntries=${removedEntries} removedMessages=${removedMessageCount} ` +
+      `prePromptMessages=${params.prePromptMessageCount} ` +
+      `prePromptLeaf=${params.prePromptLeafId ?? "null"} ` +
+      `error=${errorLabel}`,
   );
 }

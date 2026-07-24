@@ -33,11 +33,11 @@ describe("executeWithApiKeyRotation", () => {
     expect(execute).toHaveBeenCalledWith("key-1");
   });
 
-  it("retries the same key once for transient 500 when attempts is 2", async () => {
+  it("retries the same key once for transient 503 when attempts is 2", async () => {
     const sleep = vi.fn(async () => undefined);
     const execute = vi
       .fn<(apiKey: string) => Promise<string>>()
-      .mockRejectedValueOnce(new Error("Audio transcription failed (HTTP 500)"))
+      .mockRejectedValueOnce(new Error("Audio transcription failed (HTTP 503)"))
       .mockResolvedValueOnce("ok");
 
     await expect(
@@ -59,7 +59,7 @@ describe("executeWithApiKeyRotation", () => {
     vi.useFakeTimers();
     const execute = vi
       .fn<(apiKey: string) => Promise<string>>()
-      .mockRejectedValueOnce(new Error("Audio transcription failed (HTTP 500)"))
+      .mockRejectedValueOnce(new Error("Audio transcription failed (HTTP 503)"))
       .mockResolvedValueOnce("ok");
 
     try {
@@ -78,7 +78,7 @@ describe("executeWithApiKeyRotation", () => {
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
-  it.each([502, 503, 504])("retries the same key for transient HTTP %i", async (status) => {
+  it.each([503, 504])("retries the same key for transient HTTP %i", async (status) => {
     const sleep = vi.fn(async () => undefined);
     const execute = vi
       .fn<(apiKey: string) => Promise<string>>()
@@ -95,6 +95,25 @@ describe("executeWithApiKeyRotation", () => {
     ).resolves.toBe("ok");
 
     expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([500, 502])("does not retry same-key for HTTP %i", async (status) => {
+    const sleep = vi.fn(async () => undefined);
+    const execute = vi.fn(async () => {
+      throw new Error(`provider request failed (HTTP ${status})`);
+    });
+
+    await expect(
+      executeWithApiKeyRotation({
+        provider: "openai",
+        apiKeys: ["key-1"],
+        transientRetry: { attempts: 2, baseDelayMs: 0, maxDelayMs: 0, sleep },
+        execute,
+      }),
+    ).rejects.toThrow(`provider request failed (HTTP ${status})`);
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
   });
 
   it("retries selected transient network errors", async () => {
@@ -264,7 +283,7 @@ describe("executeWithApiKeyRotation", () => {
     expect(sleep).not.toHaveBeenCalled();
   });
 
-  it("does not rotate keys for transient 500 after same-key retry exhaustion", async () => {
+  it("does not rotate keys for non-transient 500 (fails closed on first key)", async () => {
     const sleep = vi.fn(async () => undefined);
     const execute = vi.fn(async () => {
       throw new Error("Audio transcription failed (HTTP 500)");
@@ -279,9 +298,9 @@ describe("executeWithApiKeyRotation", () => {
       }),
     ).rejects.toThrow("Audio transcription failed (HTTP 500)");
 
-    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(1);
     expect(execute).toHaveBeenNthCalledWith(1, "key-1");
-    expect(execute).toHaveBeenNthCalledWith(2, "key-1");
+    expect(sleep).not.toHaveBeenCalled();
   });
 
   it("does not expose apiKey to the transient retry classifier", async () => {
@@ -289,7 +308,7 @@ describe("executeWithApiKeyRotation", () => {
     const shouldRetry = vi.fn((_params: TransientProviderRetryParams) => true);
     const execute = vi
       .fn<(apiKey: string) => Promise<string>>()
-      .mockRejectedValueOnce(new Error("Audio transcription failed (HTTP 500)"))
+      .mockRejectedValueOnce(new Error("Audio transcription failed (HTTP 503)"))
       .mockResolvedValueOnce("ok");
 
     await expect(
