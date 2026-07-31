@@ -11,8 +11,10 @@ function emitStartupTrace(name: string, durationMs: number, totalMs: number): vo
   if (!process.env.OPENCLAW_GATEWAY_STARTUP_TRACE) {
     return;
   }
+  // Keep this entry light: avoid importing logging helpers before server.impl loads.
+  const ts = new Date().toISOString();
   process.stderr.write(
-    `[gateway] startup trace: ${name} ${durationMs.toFixed(1)}ms total=${totalMs.toFixed(1)}ms\n`,
+    `${ts} [gateway] startup trace: ${name} ${durationMs.toFixed(1)}ms total=${totalMs.toFixed(1)}ms\n`,
   );
 }
 

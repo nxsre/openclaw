@@ -172,7 +172,7 @@ describe("normalizeWebchatReplyMediaPathsForDisplay", () => {
 
     expect(payload?.mediaUrl).toBeUndefined();
     expect(payload?.mediaUrls).toBeUndefined();
-    expect(requireString(payload?.text, "suppressed media text")).toBe("⚠️ Media failed.");
+    expect(requireString(payload?.text, "suppressed media text")).toMatch(/^⚠️ Media failed/);
   });
 
   it("does not stage sensitive media before display suppression", async () => {
@@ -229,7 +229,7 @@ describe("normalizeWebchatReplyMediaPathsForDisplay", () => {
 
     expect(payload?.mediaUrl).toBeUndefined();
     expect(payload?.mediaUrls).toBeUndefined();
-    expect(requireString(payload?.text, "suppressed media text")).toBe("⚠️ Media failed.");
+    expect(requireString(payload?.text, "suppressed media text")).toMatch(/^⚠️ Media failed/);
     await expectOutboundMediaMissing(stateDir);
   });
 

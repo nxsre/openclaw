@@ -1159,6 +1159,15 @@ export type EmbeddedAttemptSessionLockController = {
   releaseForPrompt(): Promise<void>;
   releaseHeldLockForAbort(): Promise<void>;
   refreshAfterOwnedSessionWrite(): void;
+  /**
+   * Adopt the current session-file fingerprint as an owned write without
+   * requiring the pre-write fingerprint to already be trusted. Used after
+   * intentional truncating rewrites (HTTP-error turn discard) where a
+   * prompt-released assistant-error append may have raced ahead of fence
+   * publish — otherwise cleanup treats our own rewriteFile as takeover and
+   * the UI can lose prior history.
+   */
+  forcePublishOwnedSessionFileRewrite(): void;
   withOwnedSessionFileWrite<T>(
     run: () => T,
     validateAppend?: SessionFileWriteAppendValidator<T>,
@@ -1592,6 +1601,18 @@ export async function createEmbeddedAttemptSessionLockController(params: {
     }
   }
 
+  function forcePublishOwnedSessionFileRewrite(): void {
+    const fingerprint = readSessionFileFingerprintSync(params.lockOptions.sessionFile);
+    const generation = recordOwnedSessionFileWrite(sessionFileFenceKey, fingerprint);
+    if (fenceActive) {
+      fenceFingerprint = fingerprint;
+      fenceSnapshot = { fingerprint };
+      setFenceGeneration(generation);
+      return;
+    }
+    setFenceGeneration(recordTrustedSessionFileState(sessionFileFenceKey, fingerprint));
+  }
+
   // Synchronous append paths cannot await withSessionWriteLock. Only publish
   // their post-write fingerprint when the pre-write state was already trusted.
   function publishOwnedSessionFileFenceSync<T>(write: {
@@ -2007,6 +2028,9 @@ export async function createEmbeddedAttemptSessionLockController(params: {
       fenceFingerprint = fingerprint;
       fenceSnapshot = { fingerprint };
     },
+    forcePublishOwnedSessionFileRewrite(): void {
+      forcePublishOwnedSessionFileRewrite();
+    },
     withOwnedSessionFileWrite<T>(
       run: () => T,
       validateAppend?: SessionFileWriteAppendValidator<T>,
@@ -2016,11 +2040,21 @@ export async function createEmbeddedAttemptSessionLockController(params: {
         ? readFileSync(params.lockOptions.sessionFile, "utf8")
         : undefined;
       const result = run();
+      if (!validateAppend) {
+        // Truncating / full rewrites are not append-shaped. The pre-write
+        // fingerprint may also be untrusted after a prompt-released assistant
+        // error append, so always adopt the post-write fingerprint as owned.
+        const fingerprint = readSessionFileFingerprintSync(params.lockOptions.sessionFile);
+        if (!sameSessionFileFingerprint(beforeWrite, fingerprint)) {
+          forcePublishOwnedSessionFileRewrite();
+        }
+        return result;
+      }
       publishOwnedSessionFileFenceSync({
         beforeWrite,
         result,
         ...(beforeText !== undefined ? { beforeText } : {}),
-        ...(validateAppend ? { validateAppend } : {}),
+        validateAppend,
       });
       return result;
     },

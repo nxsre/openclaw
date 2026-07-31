@@ -1,6 +1,7 @@
 // Shared gateway startup tracing for the entry wrapper and CLI dispatcher.
 import process from "node:process";
 import { isTruthyEnvValue } from "../infra/env.js";
+import { formatTimestamp } from "../logging/timestamps.js";
 
 export type GatewayStartupTraceSource = "entry" | "cli.main";
 
@@ -20,8 +21,9 @@ export function createGatewayStartupTrace(
     if (!enabled) {
       return;
     }
+    const ts = formatTimestamp(new Date(), { style: "long" });
     process.stderr.write(
-      `[gateway] startup trace: ${source}.${name} ${durationMs.toFixed(1)}ms total=${totalMs.toFixed(1)}ms\n`,
+      `${ts} [gateway] startup trace: ${source}.${name} ${durationMs.toFixed(1)}ms total=${totalMs.toFixed(1)}ms\n`,
     );
   };
   return {

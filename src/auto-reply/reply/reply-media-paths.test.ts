@@ -202,7 +202,7 @@ describe("createReplyMediaPathNormalizer", () => {
       path.join("/tmp/sandboxes/session-1", "out", "photo.png"),
       5 * 1024 * 1024,
     );
-    expect(result.text).toBe("⚠️ Media failed.");
+    expect(result.text).toBe("⚠️ Media failed (photo.png): media too large");
   });
 
   it("drops host file URLs when no sandbox mapping applies", async () => {
@@ -461,7 +461,7 @@ describe("createReplyMediaPathNormalizer", () => {
       mediaUrls: ["./out/missing.png"],
     });
 
-    expect(result.text).toBe("WA_MEDIA_DM_07\n⚠️ Media failed.");
+    expect(result.text).toBe("WA_MEDIA_DM_07\n⚠️ Media failed (missing.png): file not found");
     expectNoMedia(result);
   });
 
@@ -478,7 +478,9 @@ describe("createReplyMediaPathNormalizer", () => {
       mediaUrls: ["./out/missing.png", "https://example.com/ok.png"],
     });
 
-    expect(result.text).toBe("Here is the surviving attachment\n⚠️ Media failed.");
+    expect(result.text).toBe(
+      "Here is the surviving attachment\n⚠️ Media failed (missing.png): file not found",
+    );
     expectMedia(result, "https://example.com/ok.png", ["https://example.com/ok.png"]);
   });
 
@@ -494,7 +496,7 @@ describe("createReplyMediaPathNormalizer", () => {
       mediaUrls: ["./out/missing.png"],
     });
 
-    expect(result.text).toBe("⚠️ Media failed.");
+    expect(result.text).toBe("⚠️ Media failed (missing.png): file not found");
     expectNoMedia(result);
   });
 

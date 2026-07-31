@@ -684,6 +684,13 @@ function buildRateLimitCooldownMessage(err: unknown): string {
   if (isBillingErrorMessage(message)) {
     return BILLING_ERROR_USER_MESSAGE;
   }
+  // XCPH: 优先投递 OPENCLAW_LLM_ERROR_FALLBACK_TEXT_429(env.vars)。
+  // 英文模板不含 "429",markAgentRunFailureReplyPayload 无法再按状态码回填配置文案。
+  const withStatus = /\b429\b/.test(message) ? message : `429 ${message}`;
+  const configured = userFacingFallbackText(withStatus);
+  if (configured !== null) {
+    return applyFallbackVars(configured, withStatus);
+  }
   if (!isFallbackSummaryError(err)) {
     return "⚠️ All models are temporarily rate-limited. Please try again in a few minutes.";
   }
@@ -962,6 +969,15 @@ function formatForwardedExternalRunFailureText(message: string): string {
       : sanitized;
   const suffix = /[.!?]$/u.test(detail) ? "" : ".";
   return `⚠️ Agent failed before reply: ${detail}${suffix} Please try again, or use /new to start a fresh session.`;
+}
+
+/** Control UI failure path: prefer per-status fallback before the English prefix wrapper. */
+function formatControlUiFailureText(message: string, trimmedMessage: string): string {
+  const configured = userFacingFallbackText(message);
+  if (configured !== null) {
+    return applyFallbackVars(configured, message);
+  }
+  return `⚠️ Agent failed before reply: ${trimmedMessage}.\nLogs: openclaw logs --follow`;
 }
 
 function supportsChannelCodexLogin(provider: string | null | undefined): boolean {
@@ -3493,7 +3509,7 @@ async function runAgentTurnWithFallbackInternal(
             : isContextOverflow
               ? "⚠️ Context overflow — prompt too large for this model. Try a shorter message or a larger-context model."
               : shouldSurfaceToControlUi
-                ? `⚠️ Agent failed before reply: ${trimmedMessage}.\nLogs: openclaw logs --follow`
+                ? formatControlUiFailureText(message, trimmedMessage)
                 : (externalRunFailureReply?.text ?? genericFallbackText);
       const userVisibleFallbackText = resolveExternalRunFailureTextForConversation({
         text: fallbackText,

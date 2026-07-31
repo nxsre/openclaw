@@ -52,6 +52,27 @@ describe("configured context size overflow", () => {
   });
 });
 
+describe("empty-body HTTP overflow heuristics", () => {
+  it("treats 413 status code (no body) as overflow for any provider", () => {
+    expect(isContextOverflow(errorMessage("413 status code (no body)"), 128_000)).toBe(true);
+  });
+
+  it("does not treat bare 400 status code (no body) as overflow for non-cerebras providers", () => {
+    // Regression: sensitive-word / business 400s often surface as
+    // "400 status code (no body)" after OpenAI SDK body parse loss. Matching
+    // that as overflow caused compact-and-retry loops on toxic turns.
+    const msg = errorMessage("400 status code (no body)");
+    msg.provider = "cloudphone_unicom_manual";
+    expect(isContextOverflow(msg, 128_000)).toBe(false);
+  });
+
+  it("keeps bare 400 status code (no body) as overflow for cerebras only", () => {
+    const msg = errorMessage("400 status code (no body)");
+    msg.provider = "cerebras";
+    expect(isContextOverflow(msg, 128_000)).toBe(true);
+  });
+});
+
 describe("usage-based overflow", () => {
   it("prefers an available context snapshot over aggregate billing usage", () => {
     expect(

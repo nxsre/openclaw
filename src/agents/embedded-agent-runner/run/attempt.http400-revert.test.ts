@@ -45,6 +45,7 @@ describe("attempt.http-error-revert helpers", () => {
     // rewriteFile 名字不符 → 一律 skip,失败回合(及任务中产生的工具/多模态数据)
     // 残留在 session 里污染下一次请求。这里用真实方法名,断言确实回滚 + 重写。
     let rewritten = 0;
+    let rewriteLeafAppendParentId: string | null | undefined;
     const fileEntries: Array<{ type?: string; id?: string; parentId?: string | null }> = [
       { type: "session", id: "s0", parentId: null },
       { type: "message", id: "u1", parentId: "s0" }, // pre-prompt leaf
@@ -59,10 +60,13 @@ describe("attempt.http-error-revert helpers", () => {
         ["t3", {}],
       ]),
       leafId: "t3",
+      // 模拟失败回合已推进 append 指针；若 revert 不复位，rewrite 会写出悬空 appendParentId。
+      appendParentId: "t3",
       labelsById: new Map<string, unknown>(),
       labelTimestampsById: new Map<string, unknown>(),
-      rewriteFile: () => {
+      rewriteFile: (options?: { leafAppendParentId?: string | null }) => {
         rewritten += 1;
+        rewriteLeafAppendParentId = options?.leafAppendParentId;
       },
     };
     const activeSession = {
@@ -85,6 +89,8 @@ describe("attempt.http-error-revert helpers", () => {
 
     expect(sm.fileEntries.map((e) => e.id)).toEqual(["s0", "u1"]); // u2 + t3 都被删
     expect(sm.leafId).toBe("u1");
+    expect(sm.appendParentId).toBe("u1");
+    expect(rewriteLeafAppendParentId).toBe("u1");
     expect(sm.byId.has("u2")).toBe(false);
     expect(sm.byId.has("t3")).toBe(false);
     expect(rewritten).toBe(1); // rewriteFile 真的被调用(修复前为 0)

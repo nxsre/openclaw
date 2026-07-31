@@ -217,12 +217,14 @@ export function createReplyMediaPathNormalizer(params: {
     const normalizedMedia: string[] = [];
     const seen = new Set<string>();
     let firstMediaDropError: unknown;
+    let firstDroppedMediaSource: string | undefined;
     for (const media of mediaList) {
       let normalized: string;
       try {
         normalized = await normalizeMediaSource(media);
       } catch (err) {
         firstMediaDropError ??= err;
+        firstDroppedMediaSource ??= media;
         logVerbose(`dropping blocked reply media ${media}: ${String(err)}`);
         continue;
       }
@@ -236,7 +238,10 @@ export function createReplyMediaPathNormalizer(params: {
     const text =
       firstMediaDropError === undefined
         ? payload.text
-        : appendReplyMediaFailureWarning(payload.text);
+        : appendReplyMediaFailureWarning(payload.text, {
+            reason: firstMediaDropError,
+            mediaSource: firstDroppedMediaSource,
+          });
 
     if (normalizedMedia.length === 0) {
       return copyReplyPayloadMetadata(payload, {

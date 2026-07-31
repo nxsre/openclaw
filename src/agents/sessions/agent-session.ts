@@ -2112,6 +2112,12 @@ export class AgentSession {
     // Case 1: Overflow - LLM returned context overflow error
     if (sameModel && isContextOverflow(assistantMessage, contextWindow)) {
       if (this.overflowRecoveryAttempted) {
+        sessionRetryLog.warn(
+          `[session-overflow-recovery] already attempted; not retrying ` +
+            `sessionId=${this.sessionId} provider=${assistantMessage.provider} ` +
+            `model=${assistantMessage.model} ` +
+            `error=${formatSessionRetryErrorForLog(assistantMessage.errorMessage || "Unknown error")}`,
+        );
         this.emit({
           type: "compaction_end",
           reason: "overflow",
@@ -2125,6 +2131,12 @@ export class AgentSession {
       }
 
       this.overflowRecoveryAttempted = true;
+      sessionRetryLog.info(
+        `[session-overflow-recovery] compact-and-retry ` +
+          `sessionId=${this.sessionId} provider=${assistantMessage.provider} ` +
+          `model=${assistantMessage.model} ` +
+          `error=${formatSessionRetryErrorForLog(assistantMessage.errorMessage || "Unknown error")}`,
+      );
       // Remove the error message from agent state (it IS saved to session for history,
       // but we don't want it in context for the retry)
       const messages = this.agent.state.messages;

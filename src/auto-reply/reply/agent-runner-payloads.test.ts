@@ -313,7 +313,7 @@ describe("buildReplyPayloads media filter integration", () => {
 
     expect(replyPayloads).toHaveLength(2);
     expectFields(replyPayloads[0], {
-      text: "keep text\n⚠️ Media failed.",
+      text: "keep text\n⚠️ Media failed (bad.png): Path escapes sandbox root",
       mediaUrl: undefined,
       mediaUrls: undefined,
       audioAsVoice: false,
@@ -1240,7 +1240,7 @@ describe("buildReplyPayloads media filter integration", () => {
 
     expect(replyPayloads).toHaveLength(1);
     expectFields(replyPayloads[0], {
-      text: "⚠️ Media failed.",
+      text: "⚠️ Media failed (missing.png): file not found",
       mediaUrl: undefined,
       mediaUrls: undefined,
       audioAsVoice: false,

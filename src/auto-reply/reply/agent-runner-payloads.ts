@@ -62,7 +62,10 @@ async function normalizeReplyPayloadMedia(params: {
       ...params.payload,
       text: params.suppressMediaFailureWarning
         ? params.payload.text
-        : appendReplyMediaFailureWarning(params.payload.text),
+        : appendReplyMediaFailureWarning(params.payload.text, {
+            reason: err,
+            mediaSource: params.payload.mediaUrl ?? params.payload.mediaUrls?.[0],
+          }),
       mediaUrl: undefined,
       mediaUrls: undefined,
       audioAsVoice: false,

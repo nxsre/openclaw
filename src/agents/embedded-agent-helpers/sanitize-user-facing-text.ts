@@ -134,6 +134,12 @@ export function formatRateLimitOrOverloadedErrorCopy(raw: string): string | unde
   }
   const isRateLimit = isRateLimitErrorMessage(raw);
   if (isRateLimit) {
+    // XCPH: OPENCLAW_LLM_ERROR_FALLBACK_TEXT_429 优先于英文模板 / provider 原文。
+    const withStatus = /\b429\b/.test(raw) ? raw : `429 ${raw}`;
+    const configured = userFacingFallbackText(withStatus);
+    if (configured !== null) {
+      return applyFallbackVars(configured, withStatus);
+    }
     const providerMessage = extractProviderRateLimitMessage(raw);
     if (providerMessage) {
       return providerMessage;

@@ -1,7 +1,11 @@
 // Covers user-facing formatting and sanitization of assistant/provider errors.
 import type { AssistantMessage } from "openclaw/plugin-sdk/llm";
 import { describe, expect, it } from "vitest";
-import { MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE } from "../shared/assistant-error-format.js";
+import {
+  extractHttpStatusFromErrorText,
+  MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE,
+  userFacingFallbackText,
+} from "../shared/assistant-error-format.js";
 import {
   BILLING_ERROR_USER_MESSAGE,
   classifyAssistantFailoverReason,
@@ -615,6 +619,41 @@ describe("formatAssistantErrorText", () => {
     expect(formatUserFacingAssistantErrorText(msg)).toBe(
       "The selected model was not found by the provider. Check the model id or choose a different model.",
     );
+  });
+});
+
+describe("extractHttpStatusFromErrorText / userFacingFallbackText", () => {
+  it("extracts OpenAI empty-body status codes even when Control UI prefixes the text", () => {
+    expect(extractHttpStatusFromErrorText("400 status code (no body)")).toBe(400);
+    expect(
+      extractHttpStatusFromErrorText(
+        "⚠️ Agent failed before reply: 400 status code (no body) | session file changed",
+      ),
+    ).toBe(400);
+    expect(
+      extractHttpStatusFromErrorText(
+        "400 status code (no body) | session file changed while embedded prompt lock was released",
+      ),
+    ).toBe(400);
+  });
+
+  it("resolves OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status> for prefixed Control UI errors", () => {
+    const key = "OPENCLAW_LLM_ERROR_FALLBACK_TEXT_400";
+    const previous = process.env[key];
+    process.env[key] = "刚出了点小状况,这条没处理成功";
+    try {
+      expect(
+        userFacingFallbackText(
+          "⚠️ Agent failed before reply: 400 status code (no body).\nLogs: openclaw logs --follow",
+        ),
+      ).toBe("刚出了点小状况,这条没处理成功");
+    } finally {
+      if (previous === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous;
+      }
+    }
   });
 });
 

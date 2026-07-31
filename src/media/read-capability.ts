@@ -9,6 +9,7 @@ import { resolveWorkspaceRoot } from "../agents/workspace-dir.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { readLocalFileSafely } from "../infra/fs-safe.js";
 import type { OutboundMediaAccess, OutboundMediaReadFile } from "./load-options.js";
+import { assertLocalMediaAllowed } from "./local-media-access.js";
 import {
   getAgentScopedMediaLocalRoots,
   getAgentScopedMediaLocalRootsForSources,
@@ -76,9 +77,16 @@ export function createAgentScopedHostMediaReadFile(
     params.workspaceDir ??
     (params.agentId ? resolveAgentWorkspaceDir(params.cfg, params.agentId) : undefined);
   const workspaceRoot = resolveWorkspaceRoot(inferredWorkspaceDir);
+  const localRoots = getAgentScopedMediaLocalRoots(params.cfg, params.agentId);
   return async (filePath: string) => {
-    const resolvedPath = resolvePathFromInput(filePath, workspaceRoot);
-    return (await readLocalFileSafely({ filePath: resolvedPath })).buffer;
+    try {
+      const resolvedPath = resolvePathFromInput(filePath, workspaceRoot);
+      return (await readLocalFileSafely({ filePath: resolvedPath })).buffer;
+    } catch {
+      // Allow skill scratch under media localRoots (e.g. /home/node/tmp screenshots).
+      await assertLocalMediaAllowed(filePath, localRoots);
+      return (await readLocalFileSafely({ filePath: path.resolve(filePath) })).buffer;
+    }
   };
 }
 

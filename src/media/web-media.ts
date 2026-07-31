@@ -444,9 +444,20 @@ function assertHostReadMediaAllowed(params: {
       `Host-local media sends require buffer-verified media/document types (got fallback ${normalizedMime}).`,
     );
   }
+  const claimed = sniffedMime ?? normalizedMime;
+  const claimedKind = kindFromMime(claimed) ?? params.kind;
+  if (
+    !sniffedMime &&
+    (claimedKind === "image" || claimedKind === "audio" || claimedKind === "video")
+  ) {
+    throw new LocalMediaAccessError(
+      "path-not-allowed",
+      `Host-local media send rejected: filename/type claims ${claimed}, but file bytes could not be verified as ${claimedKind} (corrupt or non-media content).`,
+    );
+  }
   throw new LocalMediaAccessError(
     "path-not-allowed",
-    `Host-local media sends only allow buffer-verified images, audio, video, PDF, Office documents, archives, and validated plain-text documents (got ${sniffedMime ?? normalizedMime ?? "unknown"}).`,
+    `Host-local media sends only allow buffer-verified images, audio, video, PDF, Office documents, archives, and validated plain-text documents (got ${claimed ?? "unknown"}).`,
   );
 }
 

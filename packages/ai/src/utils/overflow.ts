@@ -31,7 +31,9 @@ export function isConfiguredContextSizeOverflowError(errorMessage: string): bool
  * - GitHub Copilot: "prompt token count of X exceeds the limit of Y"
  * - MiniMax: "invalid params, context window exceeds limit"
  * - Kimi For Coding: "Your request exceeded model token limit: X (requested: Y)"
- * - Cerebras: "400/413 status code (no body)"
+ * - Cerebras: "413 status code (no body)"; bare "400 status code (no body)" is
+ *   only treated as overflow when provider === "cerebras" (other providers use
+ *   empty-body 400 for unrelated failures such as content filters).
  * - Mistral: "Prompt contains X tokens ... too large for model with Y maximum context length"
  * - z.ai: Does NOT error, accepts overflow silently - handled via usage.input > contextWindow
  * - Xiaomi MiMo: Truncates input to fill contextWindow exactly, then returns finish_reason "length"
@@ -62,8 +64,15 @@ const OVERFLOW_PATTERNS = [
   /context[_ ]length[_ ]exceeded/i, // Generic fallback
   /too many tokens/i, // Generic fallback
   /token limit exceeded/i, // Generic fallback
-  /^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i, // Cerebras: 400/413 with no body
+  // Content-too-large empty bodies. Do NOT include bare HTTP 400 here: many
+  // OpenAI-compatible gateways surface content-filter/business 400s as
+  // "400 status code (no body)" after body parse loss, and treating those as
+  // overflow triggers compact-and-retry loops on toxic turns.
+  /^413\s*(?:status code)?\s*\(no body\)/i,
 ];
+
+/** Cerebras-only empty-body 400 overflow signal (other providers must not match). */
+const CEREBRAS_EMPTY_BODY_400_OVERFLOW_RE = /^400\s*(?:status code)?\s*\(no body\)$/i;
 
 /**
  * Patterns that indicate non-overflow errors (e.g. rate limiting, server errors).
@@ -107,7 +116,7 @@ function resolveContextInputTokens(message: AssistantMessage): number | undefine
  * - Google Gemini: "input token count exceeds the maximum"
  * - xAI (Grok): "maximum prompt length is X but request contains Y"
  * - Groq: "reduce the length of the messages"
- * - Cerebras: 400/413 status code (no body)
+ * - Cerebras: 413 status code (no body); 400 status code (no body) only when provider is cerebras
  * - Mistral: "Prompt contains X tokens ... too large for model with Y maximum context length"
  * - OpenRouter (all backends): "maximum context length is X tokens"
  * - Together AI: "The input (X tokens) is longer than the model's context length (Y tokens)."
@@ -145,6 +154,16 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
     // Skip messages matching known non-overflow patterns (e.g. throttling / rate-limit)
     const isNonOverflow = NON_OVERFLOW_PATTERNS.some((p) => p.test(message.errorMessage!));
     if (!isNonOverflow && OVERFLOW_PATTERNS.some((p) => p.test(message.errorMessage!))) {
+      return true;
+    }
+    // Cerebras historically returns empty-body HTTP 400 for overflow. Gate that
+    // heuristic to the cerebras provider so other OpenAI-compatible 400s
+    // (sensitive-word filters, validation) do not enter compact-and-retry.
+    if (
+      !isNonOverflow &&
+      message.provider === "cerebras" &&
+      CEREBRAS_EMPTY_BODY_400_OVERFLOW_RE.test(message.errorMessage)
+    ) {
       return true;
     }
   }

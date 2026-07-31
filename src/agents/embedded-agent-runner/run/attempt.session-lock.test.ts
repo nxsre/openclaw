@@ -2287,6 +2287,42 @@ describe("embedded attempt session lock lifecycle", () => {
     expect(controller.hasSessionTakeover()).toBe(false);
   });
 
+  it("treats truncating HTTP-error turn discard rewrites as owned (keeps prior history)", async () => {
+    // Mirrors the 400 sensitive-content path: prompt lock released, a failed
+    // turn is appended, then revert truncates back to the pre-prompt leaf.
+    // Without force-publishing the truncate, cleanup misreads rewriteFile as
+    // external takeover and chat.history can come back empty.
+    const sessionFile = await createTempSessionFile();
+    const release = vi.fn(async () => {});
+    const controller = await createEmbeddedAttemptSessionLockController({
+      acquireSessionWriteLock: vi.fn(async () => ({ release })),
+      lockOptions: { ...lockOptions, sessionFile },
+    });
+    const priorHistory =
+      '{"type":"message","id":"u1","parentId":"session"}\n' +
+      '{"type":"message","id":"a1","parentId":"u1"}\n';
+    const failedTurn =
+      '{"type":"message","id":"u2","parentId":"a1"}\n' +
+      '{"type":"message","id":"a2","parentId":"u2"}\n';
+
+    await controller.releaseForPrompt();
+    await fs.writeFile(sessionFile, priorHistory, "utf8");
+    controller.refreshAfterOwnedSessionWrite();
+    // Prompt-released failed turn append may leave an untrusted mid-state.
+    await fs.writeFile(sessionFile, priorHistory + failedTurn, "utf8");
+
+    controller.withOwnedSessionFileWrite(() => {
+      // Truncate back to prior history only (drop the failed turn).
+      writeFileSync(sessionFile, priorHistory, "utf8");
+    });
+    controller.forcePublishOwnedSessionFileRewrite();
+
+    await expect(controller.withSessionWriteLock(() => "finalize")).resolves.toBe("finalize");
+    expect(controller.hasSessionTakeover()).toBe(false);
+    expect(await fs.readFile(sessionFile, "utf8")).toBe(priorHistory);
+    await controller.dispose();
+  });
+
   it("refreshes the prompt fence after an owned session manager compaction append", async () => {
     const sessionFile = await createTempSessionFile();
     const release = vi.fn(async () => {});

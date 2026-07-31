@@ -124,17 +124,66 @@ export type ReplyDeliveryContext = {
   replyToMode: ReplyToMode;
 };
 
-const REPLY_MEDIA_FAILURE_WARNING = "⚠️ Media failed.";
+const REPLY_MEDIA_FAILURE_PREFIX = "⚠️ Media failed";
 
-/** Appends the standard media failure warning without duplicating it. */
-export function appendReplyMediaFailureWarning(text: string | undefined): string {
-  if (!text?.trim()) {
-    return REPLY_MEDIA_FAILURE_WARNING;
+/** Optional detail so callers can surface the real drop/send failure reason. */
+export type ReplyMediaFailureDetail = {
+  reason?: unknown;
+  mediaSource?: string;
+};
+
+function formatReplyMediaFailureReason(reason: unknown): string {
+  let msg = "";
+  if (reason instanceof Error) {
+    msg = reason.message?.trim() || reason.name || String(reason);
+  } else if (reason != null) {
+    msg = String(reason).trim();
   }
-  if (text.includes(REPLY_MEDIA_FAILURE_WARNING)) {
+  return msg.replace(/\s+/g, " ").slice(0, 500);
+}
+
+function resolveReplyMediaFailureDisplayName(mediaSource: string | undefined): string {
+  const raw = mediaSource?.trim();
+  if (!raw || /^data:/i.test(raw)) {
+    return "";
+  }
+  const withoutScheme = raw.replace(/^file:\/\//i, "").split("?")[0] ?? raw;
+  const base =
+    withoutScheme.includes("/") || withoutScheme.includes("\\")
+      ? withoutScheme.replace(/^.*[/\\]/, "")
+      : withoutScheme;
+  if (!base || base.length > 120 || /^data:/i.test(base)) {
+    return "";
+  }
+  return base;
+}
+
+/** Builds the user-visible media failure warning, including the underlying reason when known. */
+export function formatReplyMediaFailureWarning(detail?: ReplyMediaFailureDetail): string {
+  const reason = formatReplyMediaFailureReason(detail?.reason);
+  const name = resolveReplyMediaFailureDisplayName(detail?.mediaSource);
+  if (name && reason) {
+    return `${REPLY_MEDIA_FAILURE_PREFIX} (${name}): ${reason}`;
+  }
+  if (reason) {
+    return `${REPLY_MEDIA_FAILURE_PREFIX}: ${reason}`;
+  }
+  return `${REPLY_MEDIA_FAILURE_PREFIX}.`;
+}
+
+/** Appends the media failure warning without duplicating it. */
+export function appendReplyMediaFailureWarning(
+  text: string | undefined,
+  detail?: ReplyMediaFailureDetail,
+): string {
+  const warning = formatReplyMediaFailureWarning(detail);
+  if (!text?.trim()) {
+    return warning;
+  }
+  if (text.includes(REPLY_MEDIA_FAILURE_PREFIX)) {
     return text;
   }
-  return `${text}\n${REPLY_MEDIA_FAILURE_WARNING}`;
+  return `${text}\n${warning}`;
 }
 
 function normalizeTtsSupplementSpokenText(value: unknown): string | undefined {

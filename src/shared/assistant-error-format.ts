@@ -285,6 +285,12 @@ export function extractHttpStatusFromErrorText(text: string): number | undefined
   if (leading) {
     return leading.code;
   }
+  // OpenAI SDK empty-body shape: "400 status code (no body)". Also match when
+  // wrapped by Control UI prefixes such as "⚠️ Agent failed before reply: 400...".
+  const statusCodeWordMatch = trimmed.match(/\b(\d{3})\s+status code\b/i);
+  if (statusCodeWordMatch?.[1]) {
+    return Number.parseInt(statusCodeWordMatch[1], 10);
+  }
   const statusCodeMatch = trimmed.match(/\bstatus code:\s*(\d{3})\b/i);
   if (statusCodeMatch?.[1]) {
     return Number.parseInt(statusCodeMatch[1], 10);

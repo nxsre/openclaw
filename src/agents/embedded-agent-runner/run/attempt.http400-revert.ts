@@ -17,6 +17,7 @@ function textIndicatesHttpStatus(text: string, status: number): boolean {
     return true;
   }
   return (
+    new RegExp(`\\b${status}\\s+status code\\b`, "i").test(trimmed) ||
     new RegExp(`\\bstatus code:\\s*${status}\\b`, "i").test(trimmed) ||
     new RegExp(`\\bhttp\\s*${status}\\b`, "i").test(trimmed)
   );
@@ -103,16 +104,22 @@ type MutableSessionManager = {
   fileEntries?: Array<{ type?: string; id?: string; parentId?: string | null }>;
   byId?: Map<string, unknown>;
   leafId?: string | null;
+  // Must stay in sync with leafId after strip. Leaving it on a popped node
+  // writes leaf.appendParentId → missing id; later turns hang off an orphan
+  // branch and prior short-term context disappears (sessionKey unchanged).
+  appendParentId?: string | null;
   labelsById?: Map<string, unknown>;
   labelTimestampsById?: Map<string, unknown>;
   // SessionManager 的方法名是 rewriteFile(私有,经类型转换访问;与 attempt.ts:691 一致)。
   // 之前误写成 _rewriteFile 导致下方一律走 skip 分支,失败回合从不回滚。
-  rewriteFile?: () => void;
+  rewriteFile?: (options?: { leafAppendParentId?: string | null }) => void;
 };
 
 /**
- * After a failed model request, drop in-memory transcript and SessionManager tail entries
- * so the user turn that triggered a non-2xx HTTP error is not kept in the session file.
+ * After a failed model request, drop only the failed turn's transcript tail
+ * (the user message just submitted to the LLM, plus any turn-local assistant /
+ * tool entries written for that attempt). Prior history is kept so the session
+ * stays visible and continuable — this is not a full session reset.
  */
 export function revertEmbeddedSessionToPrePromptLeaf(params: {
   activeSession: { agent: { state: { messages: AgentMessage[] } } };
@@ -179,9 +186,15 @@ export function revertEmbeddedSessionToPrePromptLeaf(params: {
         `removedEntries=${removedEntries} removedMessages=${removedMessageCount} ` +
         `error=${errorLabel}`,
     );
+    sm.rewriteFile();
+  } else {
+    // Align with SessionManager.removeTrailingEntries: leafId + appendParentId
+    // both point at the retained pre-prompt node before rewriteFile emits leaf.
+    // Without this, leaf.appendParentId keeps the popped turn id → orphan branch
+    // and the next user message loses prior short-term context.
+    sm.appendParentId = params.prePromptLeafId;
+    sm.rewriteFile({ leafAppendParentId: params.prePromptLeafId });
   }
-
-  sm.rewriteFile();
   // 400/敏感词等非 2xx 失败时丢弃本轮 tail,避免毒内容反复提交。
   log.info(
     `[http-error-session-revert] discarded failed prompt turn from session transcript ` +

@@ -5458,23 +5458,27 @@ export async function runEmbeddedAttempt(
               `httpStatus=${revertHttpStatus ?? "unknown"} source=${revertSource} ` +
               `error=${formatHttpErrorForLog(preservedHttpErrorForRunner)}`,
           );
-          revertEmbeddedSessionToPrePromptLeaf({
-            activeSession,
-            sessionManager: activeSessionManager,
-            prePromptMessageCount,
-            prePromptLeafId: prePromptSessionLeafId,
-            runId: params.runId,
-            sessionId: params.sessionId,
-            httpStatus: revertHttpStatus,
-            errorMessage: preservedHttpErrorForRunner,
-            provider: params.provider,
-            modelId: params.modelId,
-            source: revertSource,
+          // Drop only this failed turn (poisoned user prompt + turn tail). Prior
+          // history stays so the session remains continuable. Publish the
+          // truncating rewrite as an owned session-file write — otherwise
+          // cleanup treats our own rewriteFile as takeover and chat.history
+          // can come back empty.
+          sessionLockController.withOwnedSessionFileWrite(() => {
+            revertEmbeddedSessionToPrePromptLeaf({
+              activeSession,
+              sessionManager: activeSessionManager,
+              prePromptMessageCount,
+              prePromptLeafId: prePromptSessionLeafId,
+              runId: params.runId,
+              sessionId: params.sessionId,
+              httpStatus: revertHttpStatus,
+              errorMessage: preservedHttpErrorForRunner,
+              provider: params.provider,
+              modelId: params.modelId,
+              source: revertSource,
+            });
           });
-          // Revert rewrites the transcript while the prompt fence is active (lock released
-          // for model I/O). Refresh the fence so cleanup does not treat our own revert as
-          // an external session takeover.
-          sessionLockController.refreshAfterOwnedSessionWrite();
+          sessionLockController.forcePublishOwnedSessionFileRewrite();
           messagesSnapshot = projectToolSearchTargetTranscriptMessages(
             activeSession.messages.slice(),
             toolSearchTargetTranscriptProjections,
