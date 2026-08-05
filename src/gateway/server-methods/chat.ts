@@ -55,6 +55,7 @@ import {
   readPairingQrReplyChannelData,
   type ReplyPayload,
 } from "../../auto-reply/reply-payload.js";
+import { abortSessionRunTargetWithOutcome } from "../../auto-reply/reply/abort.js";
 import { isBtwRequestText } from "../../auto-reply/reply/btw-command.js";
 import { createReplyDispatcher } from "../../auto-reply/reply/reply-dispatcher.js";
 import { isReplyRunAbortableForSignal } from "../../auto-reply/reply/reply-run-registry.js";
@@ -2700,6 +2701,22 @@ async function abortChatRunsForSessionKeyWithPartials(params: {
     authorizedPendingChatRuns.length === 0 &&
     queuedAbort.runIds.length === 0
   ) {
+    // Channel inbound (e.g. XIM) registers in replyRunRegistry, not chatAbortControllers.
+    // Fall through so chat.abort can still stop those runs (same path as IM /stop).
+    let replyAborted = false;
+    for (const sk of sessionKeys) {
+      const outcome = abortSessionRunTargetWithOutcome({
+        key: sk,
+        sessionId: params.sessionId,
+        agentId: params.agentId,
+      });
+      if (outcome.aborted) {
+        replyAborted = true;
+      }
+    }
+    if (replyAborted) {
+      return { aborted: true, runIds: [], unauthorized: false };
+    }
     return {
       aborted: false,
       runIds: [],
@@ -3673,7 +3690,36 @@ export const chatHandlers: GatewayRequestHandlers = {
         });
         return;
       }
-      respond(true, { ok: true, aborted: false, runIds: [] });
+      // No chatAbortControllers / pending / queued entry for this runId —
+      // reuse the same session abort path as chat.abort without runId (①),
+      // so XIM/channel reply runs are stopped even though they never register
+      // chatAbortControllers for this UUID.
+      const sessionLoadOptions = abortAgentId ? { agentId: abortAgentId } : undefined;
+      const { entry } = loadSessionEntry(rawSessionKey, sessionLoadOptions);
+      const res = await abortChatRunsForSessionKeyWithPartials({
+        context,
+        ops,
+        sessionKey: canonicalAbortSessionKey,
+        sessionKeyAliases: canonicalAbortSessionKey === rawSessionKey ? undefined : [rawSessionKey],
+        agentId: abortAgentId,
+        sessionId: entry?.sessionId,
+        defaultAgentId,
+        abortOrigin: "rpc",
+        stopReason: "rpc",
+        requester,
+        preserveSideRuns,
+      });
+      if (res.unauthorized) {
+        respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unauthorized"));
+        return;
+      }
+      respond(true, {
+        ok: true,
+        aborted: res.aborted,
+        // Echo the requested runId when we stopped session work but had no
+        // controller-tracked ids (typical for XIM inbound).
+        runIds: res.aborted ? (res.runIds.length > 0 ? res.runIds : [runId]) : [],
+      });
       return;
     }
     const abortSessionKeysForRun = new Set([rawSessionKey, canonicalAbortSessionKey]);

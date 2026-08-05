@@ -51,7 +51,7 @@ import { resolveEffectiveResetTargetSessionKey } from "./acp-reset-target.js";
 import { resolveConversationBindingContextFromMessage } from "./conversation-binding-input.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import { clearSessionQueues } from "./queue.js";
-import { replyRunRegistry } from "./reply-run-registry.js";
+import { listActiveReplyRunSessionKeys, replyRunRegistry } from "./reply-run-registry.js";
 
 export { resolveAbortCutoffFromContext, shouldSkipMessageByAbortCutoff } from "./abort-cutoff.js";
 export {
@@ -112,7 +112,67 @@ export const testing = {
   },
 };
 
-export function abortSessionRunTargetWithOutcome(params: { key?: string; sessionId?: string }): {
+/**
+ * Abort active channel reply runs whose sessionKey agent segment matches.
+ * Used when chat.abort targets sessionKey "global" + agentId (Control UI / ③),
+ * because XIM/inbound runs register under agent:<id>:<channel>:... not "global".
+ */
+function isGlobalAbortSessionKey(key: string | undefined): boolean {
+  const normalized = normalizeOptionalLowercaseString(key);
+  return !normalized || normalized === "global" || normalized === "main";
+}
+
+/** Best-effort parse of "...:s:<sessionId>" from channel session keys (e.g. XIM). */
+function sessionIdFromSessionKey(key: string | undefined): string | undefined {
+  const normalized = normalizeOptionalString(key);
+  if (!normalized) {
+    return undefined;
+  }
+  const marker = ":s:";
+  const idx = normalized.lastIndexOf(marker);
+  if (idx < 0) {
+    return undefined;
+  }
+  return normalizeOptionalString(normalized.slice(idx + marker.length));
+}
+
+/**
+ * Abort active channel reply runs whose sessionKey agent segment matches.
+ * Used when chat.abort targets sessionKey "global" + agentId (Control UI / ③),
+ * because XIM/inbound runs register under agent:<id>:<channel>:... not "global".
+ */
+export function abortReplyRunsForAgentId(agentId?: string): {
+  aborted: boolean;
+  sessionKeys: string[];
+} {
+  const id = normalizeOptionalLowercaseString(agentId);
+  if (!id) {
+    return { aborted: false, sessionKeys: [] };
+  }
+  let aborted = false;
+  const sessionKeys: string[] = [];
+  for (const key of listActiveReplyRunSessionKeys()) {
+    const parsed = parseAgentSessionKey(key);
+    if (!parsed || normalizeOptionalLowercaseString(parsed.agentId) !== id) {
+      continue;
+    }
+    // Full session abort (registry + embedded), not registry.abort alone —
+    // freezeAbort / finalizing can make abort() return false while the run still lives.
+    const outcome = abortSessionRunTargetWithOutcome({ key });
+    if (outcome.aborted) {
+      aborted = true;
+      sessionKeys.push(key);
+    }
+  }
+  return { aborted, sessionKeys };
+}
+
+export function abortSessionRunTargetWithOutcome(params: {
+  key?: string;
+  sessionId?: string;
+  /** When key is global/main (or empty), also abort agent:<agentId>:* reply runs. */
+  agentId?: string;
+}): {
   active: boolean;
   aborted: boolean;
 } {
@@ -120,10 +180,20 @@ export function abortSessionRunTargetWithOutcome(params: { key?: string; session
   const key = normalizeOptionalString(params.key);
   let active = key ? replyRunRegistry.isActive(key) : false;
   if (key) {
+    // Channel inbound (XIM) tracks sessionId on replyRunRegistry, not only embedded maps.
+    const replySessionId = replyRunRegistry.resolveSessionId(key);
+    if (replySessionId) {
+      active = true;
+      sessionIds.add(replySessionId);
+    }
     const activeSessionId = abortDeps.resolveActiveEmbeddedRunSessionId(key);
     if (activeSessionId) {
       active = true;
       sessionIds.add(activeSessionId);
+    }
+    const fromKey = sessionIdFromSessionKey(key);
+    if (fromKey) {
+      sessionIds.add(fromKey);
     }
   }
   const explicitSessionId = normalizeOptionalString(params.sessionId);
@@ -134,6 +204,14 @@ export function abortSessionRunTargetWithOutcome(params: { key?: string; session
   let aborted = key ? replyRunRegistry.abort(key) : false;
   for (const sessionId of sessionIds) {
     aborted = abortDeps.abortEmbeddedAgentRun(sessionId) || aborted;
+  }
+  // sessionKey "global"/"main" never matches XIM inbound keys; fan out by agentId.
+  if (!aborted && params.agentId && isGlobalAbortSessionKey(key)) {
+    const agentAbort = abortReplyRunsForAgentId(params.agentId);
+    if (agentAbort.aborted) {
+      active = true;
+      aborted = true;
+    }
   }
   return { active, aborted };
 }
