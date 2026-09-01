@@ -1,17 +1,22 @@
 // Plugin npm manifest tests validate generated plugin package manifests.
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync, type SpawnSyncOptions } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  generatePluginNpmPackageLockWithRetry,
   resolveAugmentedPluginNpmPackageJson,
   resolveAugmentedPluginNpmManifest,
   resolvePluginNpmCommand,
+  runPluginNpmCiWithRetry,
   withAugmentedPluginNpmManifestForPackage,
-} from "../scripts/lib/plugin-npm-package-manifest.mjs";
-import { cleanupTempDirs, makeTempRepoRoot, writeJsonFile } from "./helpers/temp-repo.js";
+} from "../scripts/lib/plugin-npm-package-manifest.mts";
+import { cleanupTempDirs, makeTempDir as makeTempRepoRoot } from "./helpers/temp-dir.js";
+import { writeJsonFile } from "./helpers/temp-repo.js";
 
 const tempDirs: string[] = [];
+const tsxImport = import.meta.resolve("tsx");
 
 afterEach(() => {
   cleanupTempDirs(tempDirs);
@@ -52,6 +57,38 @@ function writeFileText(filePath: string, text: string): void {
   writeFileSync(filePath, text, "utf8");
 }
 
+type NpmPackResult = { filename: string; files: Array<{ path: string }> };
+
+function parseNpmPackResult(stdout: string): NpmPackResult {
+  const parsed = JSON.parse(stdout) as unknown;
+  const candidates = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === "object" && "files" in parsed
+      ? [parsed]
+      : parsed && typeof parsed === "object"
+        ? Object.values(parsed)
+        : [];
+  const [packResult] = candidates;
+  if (
+    !packResult ||
+    typeof packResult !== "object" ||
+    !("filename" in packResult) ||
+    typeof packResult.filename !== "string" ||
+    !("files" in packResult) ||
+    !Array.isArray(packResult.files) ||
+    !packResult.files.every(
+      (file: unknown) =>
+        file !== null &&
+        typeof file === "object" &&
+        "path" in file &&
+        typeof file.path === "string",
+    )
+  ) {
+    throw new Error("npm pack --json did not return a package result");
+  }
+  return packResult as NpmPackResult;
+}
+
 function listNpmPackDryRunFiles(packageDir: string): string[] {
   const invocation = resolvePluginNpmCommand(["pack", "--dry-run", "--json", "--ignore-scripts"]);
   const result = spawnSync(invocation.command, invocation.args, {
@@ -70,14 +107,7 @@ function listNpmPackDryRunFiles(packageDir: string): string[] {
   if (result.status !== 0) {
     throw new Error(result.stderr.trim() || `npm pack failed with exit ${result.status}`);
   }
-  const [packResult] = JSON.parse(result.stdout) as [
-    {
-      files?: { path?: string }[];
-    },
-  ];
-  return (packResult?.files ?? []).flatMap((entry) =>
-    typeof entry.path === "string" ? [entry.path] : [],
-  );
+  return parseNpmPackResult(result.stdout).files.map((entry) => entry.path);
 }
 
 function writePublishablePluginPackage(repoDir: string): string {
@@ -140,6 +170,14 @@ function writeOptionalPlatformDependencyPackage(packageDir: string): string {
 }
 
 describe("plugin npm package manifest staging", () => {
+  it("keeps msteams runtime dependencies registry-installed", () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(process.cwd(), "extensions", "msteams", "package.json"), "utf8"),
+    ) as { openclaw?: { release?: { bundleRuntimeDependencies?: boolean } } };
+
+    expect(packageJson.openclaw?.release?.bundleRuntimeDependencies).toBe(false);
+  });
+
   it("wraps Windows npm.cmd staging through cmd.exe without shell mode", () => {
     const nodeDir = "C:\\Program Files\\nodejs";
     const npmCmdPath = win32.resolve(nodeDir, "npm.cmd");
@@ -173,6 +211,146 @@ describe("plugin npm package manifest staging", () => {
         platform: "win32",
       }),
     ).toThrow("OpenClaw refuses to shell out to bare npm on Windows");
+  });
+
+  it("retries timed-out bundled dependency installs after cleaning partial output", () => {
+    const timeoutError = Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+    const spawnResults = [
+      { error: timeoutError, status: null },
+      { error: undefined, status: 0 },
+    ];
+    const spawnOptions: SpawnSyncOptions[] = [];
+    let cleanupCalls = 0;
+
+    const result = runPluginNpmCiWithRetry(
+      ["ci"],
+      { cwd: "/tmp/plugin" },
+      {
+        cleanupAttempt: () => {
+          cleanupCalls += 1;
+        },
+        pluginDir: "whatsapp",
+        spawn: (_args: string[], options: SpawnSyncOptions) => {
+          spawnOptions.push(options);
+          return spawnResults.shift();
+        },
+        timeoutMs: 1234,
+      },
+    ) as { status: number | null };
+
+    expect(result.status).toBe(0);
+    expect(cleanupCalls).toBe(1);
+    expect(spawnOptions).toEqual([
+      { cwd: "/tmp/plugin", timeout: 1234 },
+      { cwd: "/tmp/plugin", timeout: 1234 },
+    ]);
+  });
+
+  it("does not retry ordinary bundled dependency install failures", () => {
+    let spawnCalls = 0;
+    const result = runPluginNpmCiWithRetry(
+      ["ci"],
+      {},
+      {
+        cleanupAttempt: () => {
+          throw new Error("cleanup should not run");
+        },
+        spawn: () => {
+          spawnCalls += 1;
+          return { error: undefined, status: 1 };
+        },
+      },
+    ) as { status: number | null };
+
+    expect(result.status).toBe(1);
+    expect(spawnCalls).toBe(1);
+  });
+
+  it("cleans an exhausted timeout before reusing the same package directory", () => {
+    const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-timeout-");
+    const packageDir = join(repoDir, "extensions", "whatsapp");
+    const nodeModulesPath = join(packageDir, "node_modules");
+    const timeoutError = Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+    mkdirSync(packageDir, { recursive: true });
+
+    const firstResult = runPluginNpmCiWithRetry(
+      ["ci"],
+      { cwd: packageDir },
+      {
+        attempts: 3,
+        cleanupAttempt: () => rmSync(nodeModulesPath, { recursive: true, force: true }),
+        pluginDir: "whatsapp",
+        spawn: () => {
+          mkdirSync(nodeModulesPath, { recursive: true });
+          return { error: timeoutError, status: null };
+        },
+      },
+    ) as { error?: NodeJS.ErrnoException };
+
+    expect(firstResult.error?.code).toBe("ETIMEDOUT");
+    expect(existsSync(nodeModulesPath)).toBe(false);
+
+    const secondResult = runPluginNpmCiWithRetry(
+      ["ci"],
+      { cwd: packageDir },
+      {
+        cleanupAttempt: () => rmSync(nodeModulesPath, { recursive: true, force: true }),
+        pluginDir: "whatsapp",
+        spawn: () => {
+          expect(existsSync(nodeModulesPath)).toBe(false);
+          return { error: undefined, status: 0 };
+        },
+      },
+    ) as { status: number | null };
+
+    expect(secondResult.status).toBe(0);
+  });
+
+  it("retries timed-out package-lock generation with a bounded command timeout", () => {
+    const timeoutError = Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+    const generateOptions: Array<Record<string, unknown>> = [];
+    let generateCalls = 0;
+
+    const lock = generatePluginNpmPackageLockWithRetry(
+      "/tmp/plugin",
+      { installStrategy: "shallow" },
+      {
+        generate: (_packageDir: string, options: Record<string, unknown>) => {
+          generateCalls += 1;
+          generateOptions.push(options);
+          if (generateCalls === 1) {
+            throw timeoutError;
+          }
+          return '{"lockfileVersion":3}\n';
+        },
+        pluginDir: "whatsapp",
+      },
+    );
+
+    expect(lock).toBe('{"lockfileVersion":3}\n');
+    expect(generateOptions).toHaveLength(2);
+    expect(generateOptions[0]).toMatchObject({
+      env: { OPENCLAW_NPM_LOCK_COMMAND_TIMEOUT_MS: "180000" },
+      installStrategy: "shallow",
+    });
+    expect(generateOptions[1]).toEqual(generateOptions[0]);
+  });
+
+  it("does not retry ordinary package-lock generation failures", () => {
+    let generateCalls = 0;
+    expect(() =>
+      generatePluginNpmPackageLockWithRetry(
+        "/tmp/plugin",
+        { installStrategy: "shallow" },
+        {
+          generate: () => {
+            generateCalls += 1;
+            throw new Error("invalid dependency");
+          },
+        },
+      ),
+    ).toThrow("invalid dependency");
+    expect(generateCalls).toBe(1);
   });
 
   it("overlays generated channel configs while packing and restores source manifest", () => {
@@ -232,19 +410,25 @@ describe("plugin npm package manifest staging", () => {
   it("overlays package-local runtime metadata while packing and restores source package json", () => {
     const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-package-runtime-");
     const packageDir = writePublishablePluginPackage(repoDir);
+    const sourcePackageJson = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+    sourcePackageJson.openclaw.channel = {
+      id: "diffs",
+      configuredState: {
+        specifier: "./configured-state",
+        exportName: "hasConfiguredChannelState",
+      },
+    };
+    writeJsonFile(join(packageDir, "package.json"), sourcePackageJson);
+    writeFileText(
+      join(packageDir, "configured-state.ts"),
+      "export function hasConfiguredChannelState() {}\n",
+    );
     writeFileText(join(packageDir, "dist", "index.js"), "export {};\n");
     writeFileText(join(packageDir, "dist", "setup-entry.js"), "export {};\n");
-    writeJsonFile(join(packageDir, "npm-shrinkwrap.json"), {
-      name: "@openclaw/diffs",
-      version: "2026.5.3",
-      lockfileVersion: 3,
-      packages: {
-        "": {
-          name: "@openclaw/diffs",
-          version: "2026.5.3",
-        },
-      },
-    });
+    writeFileText(
+      join(packageDir, "dist", "configured-state.js"),
+      "export function hasConfiguredChannelState() { return true; }\n",
+    );
 
     const resolved = resolveAugmentedPluginNpmPackageJson({
       repoRoot: repoDir,
@@ -257,14 +441,7 @@ describe("plugin npm package manifest staging", () => {
       version: "2026.5.3",
       type: "module",
       bundledDependencies: [],
-      files: [
-        "dist/**",
-        "openclaw.plugin.json",
-        "npm-shrinkwrap.json",
-        "README.md",
-        "SKILL.md",
-        "skills/**",
-      ],
+      files: ["dist/**", "openclaw.plugin.json", "README.md", "SKILL.md", "skills/**"],
       peerDependencies: {
         openclaw: ">=2026.4.30",
       },
@@ -276,6 +453,13 @@ describe("plugin npm package manifest staging", () => {
       openclaw: {
         extensions: ["./index.ts"],
         setupEntry: "./dist/setup-entry.js",
+        channel: {
+          id: "diffs",
+          configuredState: {
+            specifier: "./dist/configured-state.js",
+            exportName: "hasConfiguredChannelState",
+          },
+        },
         compat: {
           pluginApi: ">=2026.4.30",
         },
@@ -298,10 +482,13 @@ describe("plugin npm package manifest staging", () => {
         expect(stagedPackageJson.openclaw.runtimeExtensions).toEqual(["./dist/index.js"]);
         expect(stagedPackageJson.openclaw.setupEntry).toBe("./dist/setup-entry.js");
         expect(stagedPackageJson.openclaw.runtimeSetupEntry).toBe("./dist/setup-entry.js");
+        expect(stagedPackageJson.openclaw.channel.configuredState.specifier).toBe(
+          "./dist/configured-state.js",
+        );
         expect(stagedPackageJson.bundledDependencies).toEqual([]);
         expect(stagedPackageJson.bundleDependencies).toBeUndefined();
         expect(stagedPackageJson.files).toContain("dist/**");
-        expect(stagedPackageJson.files).toContain("npm-shrinkwrap.json");
+        expect(stagedPackageJson.files).not.toContain("package-lock.json");
         expect(stagedPackageJson.files).toContain("skills/**");
         expect(stagedPackageJson.peerDependencies.openclaw).toBe(">=2026.4.30");
         expect(stagedPackageJson.peerDependenciesMeta.openclaw.optional).toBe(true);
@@ -310,154 +497,227 @@ describe("plugin npm package manifest staging", () => {
     expect(readFileSync(join(packageDir, "package.json"), "utf8")).toBe(originalText);
   });
 
-  it("installs and cleans package-local bundled dependencies while packing", () => {
-    const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-package-bundled-deps-");
+  it("packs and loads both mapped channel-state probes from one package artifact", () => {
+    const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-package-state-runtime-");
     const packageDir = writePublishablePluginPackage(repoDir);
-    writeFileText(join(packageDir, "dist", "index.js"), "export {};\n");
-    writeFileText(join(packageDir, "dist", "setup-entry.js"), "export {};\n");
-    writeLocalDependencyPackage(packageDir);
-    writeJsonFile(join(packageDir, "package.json"), {
-      name: "@openclaw/diffs",
-      version: "2026.5.3",
-      type: "module",
-      dependencies: {
-        "local-runtime-dep": "file:./deps/local-runtime-dep",
+    const sourcePackageJson = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+    sourcePackageJson.openclaw.build = { runtimeFormat: "cjs" };
+    sourcePackageJson.openclaw.channel = {
+      id: "diffs",
+      configuredState: {
+        specifier: "./configured-state",
+        exportName: "hasConfiguredChannelState",
       },
-      devDependencies: {
-        "@openclaw/plugin-sdk": "workspace:*",
+      persistedAuthState: {
+        specifier: "./dist/auth-presence.cjs",
+        exportName: "hasPersistedChannelAuth",
       },
-      openclaw: {
-        extensions: ["./index.ts"],
-        setupEntry: "./setup-entry.ts",
-        compat: {
-          pluginApi: ">=2026.4.30",
-        },
-        release: {
-          publishToNpm: true,
-        },
-      },
-    });
-    writeJsonFile(join(packageDir, "npm-shrinkwrap.json"), {
-      name: "@openclaw/diffs",
-      version: "2026.5.3",
-      lockfileVersion: 3,
-      requires: true,
-      packages: {
-        "": {
-          name: "@openclaw/diffs",
-          version: "2026.5.3",
-          dependencies: {
-            "local-runtime-dep": "file:./deps/local-runtime-dep",
-          },
-        },
-        "deps/local-runtime-dep": {
-          name: "local-runtime-dep",
-          version: "1.0.0",
-        },
-        "node_modules/local-runtime-dep": {
-          resolved: "deps/local-runtime-dep",
-          link: true,
-        },
-      },
-    });
-
-    const originalText = readFileSync(join(packageDir, "package.json"), "utf8");
-    const nodeModulesPath = join(packageDir, "node_modules");
-    expect(existsSync(nodeModulesPath)).toBe(false);
-
-    withAugmentedPluginNpmManifestForPackage(
-      { repoRoot: repoDir, packageDir, bundleDependencies: true },
-      () => {
-        const stagedPackageJson = JSON.parse(
-          readFileSync(join(packageDir, "package.json"), "utf8"),
-        );
-        expect(stagedPackageJson.bundledDependencies).toEqual(["local-runtime-dep"]);
-        expect(stagedPackageJson.bundleDependencies).toBeUndefined();
-        expect(stagedPackageJson.devDependencies).toBeUndefined();
-        expect(existsSync(join(nodeModulesPath, "local-runtime-dep", "package.json"))).toBe(true);
-      },
+    };
+    writeJsonFile(join(packageDir, "package.json"), sourcePackageJson);
+    writeFileText(
+      join(packageDir, "configured-state.ts"),
+      "export function hasConfiguredChannelState() {}\n",
+    );
+    writeFileText(
+      join(packageDir, "auth-presence.ts"),
+      "export function hasPersistedChannelAuth() {}\n",
+    );
+    writeFileText(join(packageDir, "dist", "index.cjs"), "module.exports = {};\n");
+    writeFileText(join(packageDir, "dist", "setup-entry.cjs"), "module.exports = {};\n");
+    writeFileText(
+      join(packageDir, "dist", "configured-state.cjs"),
+      "exports.hasConfiguredChannelState = () => true;\n",
+    );
+    writeFileText(
+      join(packageDir, "dist", "auth-presence.cjs"),
+      "exports.hasPersistedChannelAuth = () => true;\n",
     );
 
-    expect(existsSync(nodeModulesPath)).toBe(false);
+    const originalText = readFileSync(join(packageDir, "package.json"), "utf8");
+    withAugmentedPluginNpmManifestForPackage({ repoRoot: repoDir, packageDir }, () => {
+      const stagedPackageJson = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+      expect(stagedPackageJson.openclaw.channel.configuredState).toEqual({
+        specifier: "./dist/configured-state.cjs",
+        exportName: "hasConfiguredChannelState",
+      });
+      expect(stagedPackageJson.openclaw.channel.persistedAuthState).toEqual({
+        specifier: "./dist/auth-presence.cjs",
+        exportName: "hasPersistedChannelAuth",
+      });
+
+      const consumerDir = join(repoDir, "external-consumer");
+      mkdirSync(consumerDir, { recursive: true });
+      writeJsonFile(join(consumerDir, "package.json"), { private: true, type: "module" });
+
+      const packInvocation = resolvePluginNpmCommand([
+        "pack",
+        "--json",
+        "--ignore-scripts",
+        "--pack-destination",
+        consumerDir,
+      ]);
+      const pack = spawnSync(packInvocation.command, packInvocation.args, {
+        cwd: packageDir,
+        encoding: "utf8",
+        ...(packInvocation.env ? { env: packInvocation.env } : {}),
+        ...(packInvocation.shell !== undefined ? { shell: packInvocation.shell } : {}),
+        stdio: ["ignore", "pipe", "pipe"],
+        ...(packInvocation.windowsVerbatimArguments !== undefined
+          ? { windowsVerbatimArguments: packInvocation.windowsVerbatimArguments }
+          : {}),
+      });
+      expect(pack.status, pack.stderr).toBe(0);
+      const packedPackage = parseNpmPackResult(pack.stdout);
+      const packedFiles = packedPackage.files.map((file) => file.path);
+      expect(packedFiles).toContain("dist/configured-state.cjs");
+      expect(packedFiles).toContain("dist/auth-presence.cjs");
+      expect(packedFiles).not.toContain("configured-state.ts");
+      expect(packedFiles).not.toContain("auth-presence.ts");
+
+      const extract = spawnSync(
+        "tar",
+        ["-xzf", join(consumerDir, packedPackage.filename), "-C", consumerDir],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      expect(extract.status, extract.stderr).toBe(0);
+
+      const packageRoot = join(consumerDir, "package");
+      const load = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          `
+import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+const root = ${JSON.stringify(packageRoot)};
+const pkg = JSON.parse(fs.readFileSync(root + "/package.json", "utf8"));
+for (const key of ["configuredState", "persistedAuthState"]) {
+  const state = pkg.openclaw.channel[key];
+  const loaded = await import(new URL(state.specifier, pathToFileURL(root + "/")));
+  if (loaded[state.exportName]?.() !== true) throw new Error("packed state checker failed: " + key);
+}
+process.stdout.write("PACKED_PLUGIN_CHANNEL_STATE_OK\\n");
+`,
+        ],
+        {
+          cwd: packageRoot,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      expect(load.status, load.stderr).toBe(0);
+      expect(load.stdout).toBe("PACKED_PLUGIN_CHANNEL_STATE_OK\n");
+    });
     expect(readFileSync(join(packageDir, "package.json"), "utf8")).toBe(originalText);
   });
 
-  it("force-installs missing optional bundled dependencies for portable packs", () => {
-    const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-package-portable-optional-");
-    const packageDir = writePublishablePluginPackage(repoDir);
-    writeFileText(join(packageDir, "dist", "index.js"), "export {};\n");
-    writeFileText(join(packageDir, "dist", "setup-entry.js"), "export {};\n");
-    writeOptionalPlatformDependencyPackage(packageDir);
-    writeLocalDependencyPackage(packageDir, {
-      optionalDependencySpec: "file:../../deps/optional-platform-dep",
-    });
-    writeJsonFile(join(packageDir, "package.json"), {
-      name: "@openclaw/diffs",
-      version: "2026.5.3",
-      type: "module",
-      dependencies: {
-        "local-runtime-dep": "file:./deps/local-runtime-dep",
-      },
-      openclaw: {
-        extensions: ["./index.ts"],
-        setupEntry: "./setup-entry.ts",
-        compat: {
-          pluginApi: ">=2026.4.30",
+  it.each(["default destination", "relative destination", "split destination", "failed command"])(
+    "preserves source dependencies while staging npm bundles with %s",
+    (scenario) => {
+      const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-package-portable-optional-");
+      const packageDir = writePublishablePluginPackage(repoDir);
+      writeFileText(join(packageDir, "dist", "index.js"), "export {};\n");
+      writeFileText(join(packageDir, "dist", "setup-entry.js"), "export {};\n");
+      writeOptionalPlatformDependencyPackage(packageDir);
+      writeLocalDependencyPackage(packageDir, {
+        optionalDependencySpec: "file:../../deps/optional-platform-dep",
+      });
+      writeJsonFile(join(packageDir, "package.json"), {
+        name: "@openclaw/diffs",
+        version: "2026.5.3",
+        type: "module",
+        dependencies: { "local-runtime-dep": "file:./deps/local-runtime-dep" },
+        devDependencies: { "@openclaw/plugin-sdk": "workspace:*" },
+        openclaw: {
+          extensions: ["./index.ts"],
+          setupEntry: "./setup-entry.ts",
+          compat: { pluginApi: ">=2026.4.30" },
+          release: { publishToNpm: true },
         },
-        release: {
-          publishToNpm: true,
+      });
+      const sourceDependencyPath = join(
+        packageDir,
+        "node_modules",
+        "local-runtime-dep",
+        "package.json",
+      );
+      const sourceVersion = '{"name":"local-runtime-dep","version":"9.0.0"}\n';
+      writeFileText(sourceDependencyPath, sourceVersion);
+      const sourceOnlyPath = join(packageDir, "node_modules", "source-only", "marker");
+      writeFileText(sourceOnlyPath, "keep\n");
+      const originalText = readFileSync(join(packageDir, "package.json"), "utf8");
+      const outputDir =
+        scenario.includes("destination") && scenario !== "default destination"
+          ? join(packageDir, "artifacts")
+          : packageDir;
+      mkdirSync(outputDir, { recursive: true });
+      const command =
+        scenario === "failed command"
+          ? [process.execPath, "-e", "console.log(process.cwd()); process.exit(7);"]
+          : [
+              "npm",
+              "pack",
+              "--json",
+              "--ignore-scripts",
+              ...(scenario === "relative destination"
+                ? ["--pack-destination=artifacts"]
+                : scenario === "split destination"
+                  ? ["--pack-destination", "artifacts"]
+                  : []),
+            ];
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          tsxImport,
+          fileURLToPath(new URL("../scripts/lib/plugin-npm-package-manifest.mts", import.meta.url)),
+          "--run",
+          packageDir,
+          "--",
+          ...command,
+        ],
+        {
+          cwd: repoDir,
+          encoding: "utf8",
+          env: { ...process.env, OPENCLAW_PLUGIN_NPM_BUNDLE_DEPENDENCIES: "1" },
         },
-      },
-    });
-    writeJsonFile(join(packageDir, "npm-shrinkwrap.json"), {
-      name: "@openclaw/diffs",
-      version: "2026.5.3",
-      lockfileVersion: 3,
-      requires: true,
-      packages: {
-        "": {
-          name: "@openclaw/diffs",
-          version: "2026.5.3",
-          dependencies: {
-            "local-runtime-dep": "file:./deps/local-runtime-dep",
-          },
-        },
-        "deps/local-runtime-dep": {
-          name: "local-runtime-dep",
-          version: "1.0.0",
-          optionalDependencies: {
-            "optional-platform-dep": "file:../../deps/optional-platform-dep",
-          },
-        },
-        "deps/optional-platform-dep": {
-          version: "1.0.0",
-          optional: true,
-          os: [process.platform === "win32" ? "darwin" : "win32"],
-        },
-        "node_modules/local-runtime-dep": {
-          resolved: "deps/local-runtime-dep",
-          link: true,
-        },
-        "node_modules/optional-platform-dep": {
-          resolved: "deps/optional-platform-dep",
-          link: true,
-        },
-      },
-    });
-
-    const nodeModulesPath = join(packageDir, "node_modules");
-    withAugmentedPluginNpmManifestForPackage(
-      { repoRoot: repoDir, packageDir, bundleDependencies: true },
-      () => {
-        expect(existsSync(join(nodeModulesPath, "local-runtime-dep", "package.json"))).toBe(true);
-        expect(existsSync(join(nodeModulesPath, "optional-platform-dep", "package.json"))).toBe(
-          true,
-        );
-      },
-    );
-
-    expect(existsSync(nodeModulesPath)).toBe(false);
-  });
+      );
+      expect(result.status, result.stderr).toBe(scenario === "failed command" ? 7 : 0);
+      expect(readFileSync(sourceDependencyPath, "utf8")).toBe(sourceVersion);
+      expect(readFileSync(sourceOnlyPath, "utf8")).toBe("keep\n");
+      expect(existsSync(join(packageDir, "package-lock.json"))).toBe(false);
+      expect(readFileSync(join(packageDir, "package.json"), "utf8")).toBe(originalText);
+      if (scenario === "failed command") {
+        const stagingDir = result.stdout.trim();
+        expect(stagingDir).not.toBe("");
+        expect(stagingDir).not.toBe(packageDir);
+        expect(existsSync(stagingDir)).toBe(false);
+        return;
+      }
+      const packed = parseNpmPackResult(result.stdout);
+      const tarball = join(outputDir, packed.filename);
+      expect(existsSync(tarball)).toBe(true);
+      const files = packed.files.map((entry) => entry.path);
+      expect(files).toContain("node_modules/local-runtime-dep/package.json");
+      expect(files).toContain("node_modules/optional-platform-dep/package.json");
+      expect(files.some((file) => file.includes("source-only"))).toBe(false);
+      expect(files).not.toContain("package-lock.json");
+      expect(files).not.toContain("npm-shrinkwrap.json");
+      const extract = (file: string) => {
+        const result = spawnSync("tar", ["-xOf", tarball, `package/${file}`], { encoding: "utf8" });
+        expect(result.status, result.stderr).toBe(0);
+        return JSON.parse(result.stdout);
+      };
+      const manifest = extract("package.json");
+      expect(manifest.bundledDependencies).toEqual(["local-runtime-dep"]);
+      expect(manifest.devDependencies).toBeUndefined();
+      expect(extract("node_modules/local-runtime-dep/package.json").version).toBe("1.0.0");
+    },
+  );
 
   it("honors plugin package opt-out for bundled runtime dependencies", () => {
     const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-package-bundle-opt-out-");
@@ -481,21 +741,6 @@ describe("plugin npm package manifest staging", () => {
         release: {
           publishToNpm: true,
           bundleRuntimeDependencies: false,
-        },
-      },
-    });
-    writeJsonFile(join(packageDir, "npm-shrinkwrap.json"), {
-      name: "@openclaw/diffs",
-      version: "2026.5.3",
-      lockfileVersion: 3,
-      requires: true,
-      packages: {
-        "": {
-          name: "@openclaw/diffs",
-          version: "2026.5.3",
-          dependencies: {
-            "local-runtime-dep": "file:./deps/local-runtime-dep",
-          },
         },
       },
     });

@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 // Local media root helpers normalize and match allowed local media roots.
 import path from "node:path";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
@@ -8,7 +7,7 @@ import {
   resolveEffectiveToolFsRootExpansionAllowed,
   resolveEffectiveToolFsWorkspaceOnly,
 } from "../agents/tool-fs-policy.js";
-import { resolveStateDir } from "../config/paths.js";
+import { resolveDeliveryQueueMediaDir, resolveStateDir } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
 import { resolveConfigDir } from "../utils.js";
@@ -16,8 +15,6 @@ import { resolveLocalMediaPath } from "./local-media-path.js";
 
 type BuildMediaLocalRootsOptions = {
   preferredTmpDir?: string;
-  /** Extra roots (e.g. skill screenshot dirs) merged into the allowlist. */
-  extraRoots?: readonly string[];
 };
 
 let cachedPreferredTmpDir: string | undefined;
@@ -31,21 +28,8 @@ function resolveCachedPreferredTmpDir(): string {
   return cachedPreferredTmpDir;
 }
 
-/** User-scoped `$HOME/tmp` used by some skills (cloudphone screenshots). */
-function resolveHomeTmpDir(): string | undefined {
-  try {
-    const home = homedir();
-    if (!home) {
-      return undefined;
-    }
-    return path.join(home, "tmp");
-  } catch {
-    return undefined;
-  }
-}
-
 /** Builds the baseline local media root allowlist from state/config directories. */
-export function buildMediaLocalRoots(
+function buildMediaLocalRoots(
   stateDir: string,
   configDir: string,
   options: BuildMediaLocalRootsOptions = {},
@@ -53,21 +37,19 @@ export function buildMediaLocalRoots(
   const resolvedStateDir = path.resolve(stateDir);
   const resolvedConfigDir = path.resolve(configDir);
   const preferredTmpDir = options.preferredTmpDir ?? resolveCachedPreferredTmpDir();
-  const homeTmpDir = resolveHomeTmpDir();
   return Array.from(
-    new Set(
-      [
-        preferredTmpDir,
-        // Skill/tool scratch (e.g. /home/node/tmp/cloudphone-screenshot-*.png).
-        homeTmpDir,
-        path.join(resolvedConfigDir, "media"),
-        path.join(resolvedStateDir, "media"),
-        path.join(resolvedStateDir, "canvas"),
-        path.join(resolvedStateDir, "workspace"),
-        path.join(resolvedStateDir, "sandboxes"),
-        ...(options.extraRoots ?? []),
-      ].filter((root): root is string => Boolean(root)),
-    ),
+    new Set([
+      preferredTmpDir,
+      path.join(resolvedConfigDir, "media"),
+      path.join(resolvedStateDir, "media"),
+      // Queue-owned copies of undelivered attachments. Recovery replays in a
+      // process that never saw the original source, so it must be able to read
+      // this root; only the spool dir is granted, never the state dir at large.
+      resolveDeliveryQueueMediaDir(resolvedStateDir),
+      path.join(resolvedStateDir, "canvas"),
+      path.join(resolvedStateDir, "workspace"),
+      path.join(resolvedStateDir, "sandboxes"),
+    ]),
   );
 }
 

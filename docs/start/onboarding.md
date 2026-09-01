@@ -7,10 +7,16 @@ title: "Onboarding (macOS app)"
 sidebarTitle: "Onboarding: macOS App"
 ---
 
-The macOS app's first-run flow: pick where the Gateway runs, connect a
-verified AI backend, grant permissions, and hand off to the agent's own
-bootstrap ritual.
+The macOS app's first-run flow: pick where the Gateway runs, install any
+missing local runtime, and connect a verified AI backend. The app then opens
+guided onboarding in the dashboard for optional setup and the handoff to your
+agent.
 For CLI onboarding and a comparison of both paths, see [Onboarding Overview](/start/onboarding-overview).
+
+<Tip>
+Need the app first? [Download OpenClaw for macOS](/platforms/macos#download),
+then return here for first-run setup.
+</Tip>
 
 <Steps>
 <Step title="Approve macOS warning">
@@ -61,43 +67,76 @@ Where does the **Gateway** run?
 </Tip>
 </Step>
 <Step title="CLI">
-  Local setup installs the global `openclaw` CLI via npm, pnpm, or bun,
-  preferring npm first. Node remains the recommended runtime for the Gateway
-  itself. Existing compatible installations are reused.
+  Local setup reuses a compatible CLI installation or uses the bundled installer
+  to install `openclaw` and Node in a private managed runtime. It does not require
+  a global npm, pnpm, or bun install.
 </Step>
 <Step title="Connect your AI">
-  Once the Gateway is ready, onboarding looks for AI access you already have:
-  a Claude Code, Codex, or Gemini CLI login, or `OPENAI_API_KEY` /
-  `ANTHROPIC_API_KEY`. The best option is tested with a real completion and
-  only saved after it answers; when a test fails the app automatically tries
-  the next option and shows why the previous one failed. If several options
-  are found you can switch between them before continuing.
+  If the connected Gateway already has a configured agent model, the app
+  verifies it with a real completion before opening the normal dashboard.
+  A configured model name alone does not skip verification. Fresh or incomplete
+  Gateways continue through provider setup.
 
-If nothing is found (or nothing works), the manual key/token picker loads the
-Gateway's active text-inference provider plugins instead of using a fixed app
-list. The selected provider supplies its starter model and config; OpenClaw
-verifies the credential with the same live test before storing its auth profile. Next
-remains locked until one backend has passed, so the first agent chat cannot
-start without working inference. The Crestodian chat stays available from this
-page (and later under Settings → Crestodian) for help in plain language.
+Once the Gateway is ready, onboarding looks for AI access you already have:
+a Claude Code or Codex login, `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`, or a
+tool-capable model with at least 16K of measured effective context already
+loaded in a reachable LM Studio or Ollama server. Detection runs on the
+Gateway host, including when the macOS app connects to a Linux Gateway. The best
+option is tested with a real completion and only saved
+after it answers; when a test fails the app automatically tries the next option
+and shows why the previous one failed. If several options are found you can
+switch between them before continuing. Automatic local discovery never pulls
+or downloads a model. Ollama checks `/api/ps` for loaded models; an eligible
+model that is only installed on disk requires explicit setup through
+**Choose connection** → **Local only**. See [Ollama](/providers/ollama).
 
-Configure Later skips this step.
+To use a Claude subscription when the Gateway host has no Claude CLI login, run
+`claude setup-token` on any machine with Claude Code installed, then paste the
+printed token as **Anthropic setup-token** under **Connect with an API key or
+token**.
+
+Pi and OpenCode installs may be shown for context when they cannot be selected
+as the reusable guided-setup inference route. They are whole-agent harnesses,
+not setup inference routes; their session integrations require separate runtime
+and plugin setup. Gemini CLI and Antigravity are not offered as detected setup
+routes.
+
+You can also sign in through the provider's own OAuth or device-pairing flow.
+The built-in choices include OpenAI/ChatGPT, OpenRouter, GitHub Copilot, xAI,
+MiniMax Global and CN, and Chutes. Google is available through the supported AI
+Studio API-key route. The list comes from the
+Gateway's active text-inference provider plugins rather than a fixed app list,
+so another provider can opt in without adding provider-specific macOS code.
+
+The manual key/token picker uses the same provider registry. In every route,
+the provider supplies its starter model and configuration; OpenClaw verifies
+the credential with the same live test before storing its auth profile.
+Continuing remains locked until one backend has passed, so the first agent
+chat cannot start without working inference.
 </Step>
-<Step title="Permissions">
+<Step title="Continue in the dashboard">
+After a new model passes its live check, native setup closes and opens guided
+onboarding in the dashboard. OpenClaw helps configure the remaining workspace,
+Gateway, channels, and other optional features, then hands you off to normal
+agent chat. A verified pre-existing model opens the normal dashboard instead.
 
-<Frame caption="Choose what permissions do you want to give OpenClaw">
-<img src="/assets/macos-onboarding/05-permissions.png" alt="" />
-</Frame>
+Memory import is part of guided setup, not a separate native onboarding page.
+For a local Gateway, supported sources include Claude Code auto-memory, Codex
+consolidated memories, and Hermes memory files. Selected memories are copied
+into the agent workspace under `memory/imports/` for indexed recall;
+already-imported files are skipped. Import is optional and remains available
+later under **Settings → Import Memory**, with per-file control.
 
-Onboarding requests TCC permissions for: Automation (AppleScript), Notifications, Accessibility, Screen Recording, Microphone, Speech Recognition, Camera, and Location.
+There is no separate native permissions walkthrough before this handoff. Grant
+macOS access for the features you want to use from **Settings → Permissions**.
+Available permissions include Automation (AppleScript), Notifications,
+Accessibility, Screen Recording, Microphone, Speech Recognition, Camera, and
+Location. See [macOS permissions](/platforms/mac/permissions) for grant and
+recovery guidance.
 
-</Step>
-<Step title="Onboarding Chat (dedicated session)">
-  After setup, the app opens a separate agent onboarding chat so the agent can
-  introduce itself and guide next steps without mixing that exchange into the
-  normal conversation history. This follows the Crestodian setup conversation;
-  it does not replace it. See [Bootstrapping](/start/bootstrapping) for what
-  happens on the gateway host during the agent's first real turn.
+See [Bootstrapping](/start/bootstrapping) for what happens on the Gateway host
+during the agent's first real turn. OpenClaw remains available later under
+**Settings → OpenClaw**.
 </Step>
 </Steps>
 

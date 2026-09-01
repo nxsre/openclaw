@@ -1,12 +1,48 @@
 ---
 summary: "Troubleshoot node pairing, foreground requirements, permissions, and tool failures"
 read_when:
-  - Node is connected but camera/canvas/screen/exec tools fail
+  - Node is connected but camera/screen/exec tools fail
   - You need the node pairing versus approvals mental model
 title: "Node troubleshooting"
 ---
 
 Use this page when a node is visible in status but node tools fail.
+
+## Node goes offline after SSH logout (Linux)
+
+On Linux, `openclaw node install` creates a **user-level** systemd service. The
+`systemd --user` instance is torn down when your last login session ends, so the
+node service stops the moment you log out — even though it looked healthy
+(`enabled` + `running`) while you were connected.
+
+Check lingering:
+
+```bash
+loginctl show-user "$USER" -p Linger
+```
+
+If it reads `Linger=no`, enable it (may require sudo):
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+Then restart the node service and verify it survives logout:
+
+```bash
+openclaw node restart
+# log out, then from another machine:
+openclaw nodes status
+```
+
+`openclaw node install` prints a warning with this recovery command when it
+detects lingering is disabled. Don't mix a user-level service with a
+system-level one for the same node. The duplicate-scope guard that prevents
+two managers from running the same unit name is enforced for gateway units
+(two supervisors on the same port SIGTERM each other in a restart loop); for
+node services the installer does not raise this guard, so a leftover unit in
+the other scope can leave the node in an ambiguous state. Fully remove one
+before switching.
 
 ## Command ladder
 
@@ -34,13 +70,12 @@ Healthy signals:
 
 ## Foreground requirements
 
-`canvas.*`, `camera.*`, and `screen.*` are foreground-only on iOS/Android nodes.
+`camera.*` and `screen.*` are foreground-only on iOS/Android nodes.
 
 Quick check and fix:
 
 ```bash
 openclaw nodes describe --node <idOrNameOrIp>
-openclaw nodes canvas snapshot --node <idOrNameOrIp>
 openclaw logs --follow
 ```
 
@@ -48,19 +83,20 @@ If you see `NODE_BACKGROUND_UNAVAILABLE`, bring the node app to the foreground a
 
 ## Permissions matrix
 
-| Capability                   | iOS                                     | Android                                      | macOS node app                | Typical failure code           |
-| ---------------------------- | --------------------------------------- | -------------------------------------------- | ----------------------------- | ------------------------------ |
-| `camera.snap`, `camera.clip` | Camera (+ mic for clip audio)           | Camera (+ mic for clip audio)                | Camera (+ mic for clip audio) | `*_PERMISSION_REQUIRED`        |
-| `screen.record`              | Screen Recording (+ mic optional)       | Screen capture prompt (+ mic optional)       | Screen Recording              | `*_PERMISSION_REQUIRED`        |
-| `location.get`               | While Using or Always (depends on mode) | Foreground/Background location based on mode | Location permission           | `LOCATION_PERMISSION_REQUIRED` |
-| `system.run`                 | n/a (node host path)                    | n/a (node host path)                         | Exec approvals required       | `SYSTEM_RUN_DENIED`            |
+| Capability                   | iOS                                     | Android                                      | macOS node app                   | Typical failure code                          |
+| ---------------------------- | --------------------------------------- | -------------------------------------------- | -------------------------------- | --------------------------------------------- |
+| `camera.snap`, `camera.clip` | Camera (+ mic for clip audio)           | Camera (+ mic for clip audio)                | Camera (+ mic for clip audio)    | `*_PERMISSION_REQUIRED`                       |
+| `screen.record`              | Screen Recording (+ mic optional)       | Screen capture prompt (+ mic optional)       | Screen Recording                 | `*_PERMISSION_REQUIRED`                       |
+| `computer.act`               | n/a                                     | n/a                                          | Accessibility + Screen Recording | `COMPUTER_DISABLED`, `ACCESSIBILITY_REQUIRED` |
+| `location.get`               | While Using or Always (depends on mode) | Foreground/Background location based on mode | Location permission              | `LOCATION_PERMISSION_REQUIRED`                |
+| `system.run`                 | n/a (node host path)                    | n/a (node host path)                         | Exec approvals required          | `SYSTEM_RUN_DENIED`                           |
 
 ## Pairing versus approvals
 
 Three separate gates control whether a node command succeeds:
 
 1. **Device pairing**: can this node connect to the gateway?
-2. **Gateway node command policy**: is the RPC command ID allowed by `gateway.nodes.allowCommands` / `denyCommands` and platform defaults?
+2. **Gateway node command policy**: is the RPC command ID allowed by `gateway.nodes.commands.allow` / `gateway.nodes.commands.deny` and platform defaults?
 3. **Exec approvals**: can this node run a specific shell command locally?
 
 Node pairing is an identity/trust gate, not a per-command approval surface. For `system.run`, the per-node policy lives in that node's exec approvals file (`openclaw approvals get --node ...`), not in the gateway pairing record.
@@ -90,6 +126,8 @@ For approval-backed `host=node` runs, the gateway also binds execution to the pr
 | `LOCATION_DISABLED`                    | Location mode is off.                                                                                                                                                                   |
 | `LOCATION_PERMISSION_REQUIRED`         | Requested location mode not granted.                                                                                                                                                    |
 | `LOCATION_BACKGROUND_UNAVAILABLE`      | App is backgrounded but only While Using permission exists.                                                                                                                             |
+| `COMPUTER_DISABLED`                    | Enable **Allow Computer Control** in the macOS app, then approve the pairing update.                                                                                                    |
+| `ACCESSIBILITY_REQUIRED`               | Grant Accessibility to the current OpenClaw app bundle in macOS System Settings.                                                                                                        |
 | `SYSTEM_RUN_DENIED: approval required` | Exec request needs explicit approval.                                                                                                                                                   |
 | `SYSTEM_RUN_DENIED: allowlist miss`    | Command blocked by allowlist mode. On Windows node hosts, shell-wrapper forms like `cmd.exe /c ...` are treated as allowlist misses in allowlist mode unless approved via the ask flow. |
 
@@ -109,11 +147,14 @@ If still stuck:
 - Re-grant OS permissions.
 - Recreate/adjust the exec approval policy.
 
+For computer control, also verify that the node-local Computer Control toggle is enabled, its pairing update is approved, a vision-capable agent exposes the `computer` tool, and `screen.snapshot` succeeds with Screen Recording permission. A `gateway.nodes.commands.deny` entry always overrides a platform default or `gateway.nodes.commands.allow`.
+
 ## Related
 
 - [Nodes overview](/nodes)
 - [Camera nodes](/nodes/camera)
 - [Location command](/nodes/location-command)
+- [Computer use](/nodes/computer-use)
 - [Exec approvals](/tools/exec-approvals)
 - [Gateway pairing](/gateway/pairing)
 - [Gateway troubleshooting](/gateway/troubleshooting)

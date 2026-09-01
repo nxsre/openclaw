@@ -15,7 +15,8 @@ Once enabled, it serves all of these on the same port as the Gateway (WS + HTTP 
 | GET    | `/v1/models`           |
 | GET    | `/v1/models/{id}`      |
 | POST   | `/v1/embeddings`       |
-| POST   | `/v1/responses`        |
+
+`POST /v1/responses` is enabled separately with `gateway.http.endpoints.responses.enabled`. See [OpenResponses API](/gateway/openresponses-http-api).
 
 Requests run as a normal Gateway agent run (same codepath as `openclaw agent`), so routing, permissions, and config match your Gateway.
 
@@ -104,9 +105,12 @@ By default the endpoint is **stateless per request** (a new session key is gener
 
 If the request includes an OpenAI `user` string, the Gateway derives a stable session key from it so repeated calls can share an agent session. For custom apps, reuse the same `user` value per conversation thread; avoid account-level identifiers unless you want multiple conversations/devices to share one OpenClaw session. Use `x-openclaw-session-key` only when you need explicit routing control across multiple clients/threads, with application-owned keys that avoid the reserved namespaces above.
 
-## Request limits (config)
+## Request limits
 
-Defaults can be tuned under `gateway.http.endpoints.chatCompletions`:
+The endpoint uses built-in limits of 20 MB per request body, 8 `image_url`
+parts from the latest user message, and 20 MB of cumulative decoded image
+data. Image source policy remains configurable under
+`gateway.http.endpoints.chatCompletions.images`:
 
 ```json5
 {
@@ -115,9 +119,6 @@ Defaults can be tuned under `gateway.http.endpoints.chatCompletions`:
       endpoints: {
         chatCompletions: {
           enabled: true,
-          maxBodyBytes: 20000000,
-          maxImageParts: 8,
-          maxTotalImageBytes: 20000000,
           images: {
             allowUrl: false,
             urlAllowlist: ["cdn.example.com", "*.assets.example.com"],
@@ -140,17 +141,14 @@ Defaults can be tuned under `gateway.http.endpoints.chatCompletions`:
 }
 ```
 
-Defaults when omitted:
+Image settings default to:
 
-| Key                   | Default                                                                     |
-| --------------------- | --------------------------------------------------------------------------- |
-| `maxBodyBytes`        | 20MB                                                                        |
-| `maxImageParts`       | 8 (max `image_url` parts read from the latest user message)                 |
-| `maxTotalImageBytes`  | 20MB (cumulative decoded bytes across all `image_url` parts in one request) |
-| `images.allowUrl`     | `false` (URL-sourced `image_url` parts are rejected unless enabled)         |
-| `images.maxBytes`     | 10MB per image                                                              |
-| `images.maxRedirects` | 3                                                                           |
-| `images.timeoutMs`    | 10s                                                                         |
+| Key                   | Default                                                             |
+| --------------------- | ------------------------------------------------------------------- |
+| `images.allowUrl`     | `false` (URL-sourced `image_url` parts are rejected unless enabled) |
+| `images.maxBytes`     | 10MB per image                                                      |
+| `images.maxRedirects` | 3                                                                   |
+| `images.timeoutMs`    | 10s                                                                 |
 
 HEIC/HEIF `image_url` sources are accepted and normalized to JPEG before provider delivery through the shared OpenClaw image processor (Rastermill), which falls back to a system converter (`sips`, ImageMagick, GraphicsMagick, or ffmpeg) for formats needing external codec support.
 
@@ -162,20 +160,20 @@ Security note: allowlisting a hostname does not bypass private/internal IP block
 
 ### Supported request fields
 
-| Field                      | Notes                                                                                                                                         |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tools`                    | Array of `{ "type": "function", "function": { ... } }`                                                                                        |
-| `tool_choice`              | `"auto"`, `"none"`, `"required"`, or `{ "type": "function", "function": { "name": "..." } }`                                                  |
-| `messages[*].role: "tool"` | Follow-up turns                                                                                                                               |
-| `messages[*].tool_call_id` | Binds a tool result back to a prior tool call                                                                                                 |
-| `max_completion_tokens`    | Number; per-call cap on total completion tokens (reasoning tokens included). Current field name; used when both it and `max_tokens` are sent. |
-| `max_tokens`               | Number; legacy alias, ignored when `max_completion_tokens` is also present.                                                                   |
-| `temperature`              | Number 0-2; best-effort, forwarded to the upstream provider. `400 invalid_request_error` if out of range.                                     |
-| `top_p`                    | Number 0-1; best-effort. `400 invalid_request_error` if out of range.                                                                         |
-| `frequency_penalty`        | Number -2.0 to 2.0; best-effort. `400 invalid_request_error` if out of range.                                                                 |
-| `presence_penalty`         | Number -2.0 to 2.0; best-effort. `400 invalid_request_error` if out of range.                                                                 |
-| `seed`                     | Integer; best-effort. `400 invalid_request_error` for non-integer values.                                                                     |
-| `stop`                     | String or array of up to 4 strings; best-effort. `400 invalid_request_error` for more than 4 sequences or non-string/empty entries.           |
+| Field                      | Notes                                                                                                                                                                                |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tools`                    | Array of `{ "type": "function", "function": { ... } }`                                                                                                                               |
+| `tool_choice`              | `"auto"`, `"none"`, `"required"`, or `{ "type": "function", "function": { "name": "..." } }`                                                                                         |
+| `messages[*].role: "tool"` | Follow-up turns                                                                                                                                                                      |
+| `messages[*].tool_call_id` | Binds a tool result back to a prior tool call                                                                                                                                        |
+| `max_completion_tokens`    | Positive safe integer; per-call cap on total completion tokens (reasoning tokens included). Current field name; used when both fields are non-null. Null or omitted leaves it unset. |
+| `max_tokens`               | Positive safe integer; legacy alias. It is still validated when `max_completion_tokens` is non-null, then ignored for precedence. Null or omitted leaves it unset.                   |
+| `temperature`              | Number 0-2; best-effort, forwarded to the upstream provider. `400 invalid_request_error` if out of range.                                                                            |
+| `top_p`                    | Number 0-1; best-effort. `400 invalid_request_error` if out of range.                                                                                                                |
+| `frequency_penalty`        | Number -2.0 to 2.0; best-effort. `400 invalid_request_error` if out of range.                                                                                                        |
+| `presence_penalty`         | Number -2.0 to 2.0; best-effort. `400 invalid_request_error` if out of range.                                                                                                        |
+| `seed`                     | Integer; best-effort. `400 invalid_request_error` for non-integer values.                                                                                                            |
+| `stop`                     | String or array of up to 4 strings; best-effort. `400 invalid_request_error` for more than 4 sequences or non-string/empty entries.                                                  |
 
 All sampling and token-cap fields ride the same agent stream-param channel and are forwarded best-effort:
 
@@ -205,6 +203,8 @@ When the agent calls tools, the response uses:
 
 When `stream: true`, tool calls arrive as incremental SSE chunks: an initial assistant role delta, optional assistant commentary deltas, one or more `delta.tool_calls` chunks carrying tool identity and argument fragments, then a final chunk with `finish_reason: "tool_calls"` and `data: [DONE]`.
 
+For required or function-pinned tool choices, prose is held until the matching call is confirmed. When the run returns finalized prose, the stream uses that text instead of provisional deltas.
+
 If `stream_options.include_usage=true`, a trailing usage chunk is emitted before `[DONE]`.
 
 ### Tool follow-up loop
@@ -218,6 +218,8 @@ Set `stream: true` to receive Server-Sent Events:
 - `Content-Type: text/event-stream`
 - Each event line is `data: <json>`
 - Stream ends with `data: [DONE]`
+
+Failed agent runs, including whole-agent timeouts, return an error instead of a successful completion. A streaming failure emits an `error` object followed by `[DONE]`; partial content may already have reached the client. Timeout settings follow the [agent loop](/concepts/agent-loop#timeouts).
 
 ## Open WebUI quick setup
 
@@ -308,6 +310,8 @@ curl -sS http://127.0.0.1:18789/v1/embeddings \
 ```
 
 `/v1/embeddings` supports `input` as a string or array of strings.
+
+For models that support it, a positive integer `dimensions` requests the output vector size. It overrides the selected agent's active `memory.search.outputDimensionality` and also applies when memory search is disabled. Omitting it keeps the configured or provider default size.
 
 ## Related
 

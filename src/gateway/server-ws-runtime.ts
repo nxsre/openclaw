@@ -1,6 +1,5 @@
 // WebSocket runtime adapter wires a built GatewayRequestContext into the lower
 // level connection handler and shared gateway WebSocket plumbing.
-import { abortChatRunsByConnId } from "./server-methods/chat.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import {
   attachGatewayWsConnectionHandler,
@@ -22,12 +21,12 @@ export function attachGatewayWsHandlers(params: GatewayWsRuntimeParams) {
   attachGatewayWsConnectionHandler({
     wss: params.wss,
     clients: params.clients,
+    bootId: params.bootId,
     preauthConnectionBudget: params.preauthConnectionBudget,
     port: params.port,
     gatewayHost: params.gatewayHost,
     pluginSurfaceScheme: params.pluginSurfaceScheme,
     getPluginNodeCapabilities: params.getPluginNodeCapabilities,
-    resolvedAuth: params.resolvedAuth,
     getResolvedAuth: params.getResolvedAuth,
     getRequiredSharedGatewaySessionGeneration: params.getRequiredSharedGatewaySessionGeneration,
     rateLimiter: params.rateLimiter,
@@ -35,6 +34,7 @@ export function attachGatewayWsHandlers(params: GatewayWsRuntimeParams) {
     nodeReapprovalCoordinator: params.nodeReapprovalCoordinator,
     preauthHandshakeTimeoutMs: params.preauthHandshakeTimeoutMs,
     isStartupPending: params.isStartupPending,
+    isPendingWorkerNodeSetup: params.isPendingWorkerNodeSetup,
     gatewayMethods: params.gatewayMethods,
     events: params.events,
     refreshHealthSnapshot: params.context.refreshHealthSnapshot,
@@ -43,8 +43,10 @@ export function attachGatewayWsHandlers(params: GatewayWsRuntimeParams) {
     logWsControl: params.logWsControl,
     extraHandlers: params.extraHandlers,
     getMethodRegistry: params.getMethodRegistry,
+    ...(params.workerConnectionService
+      ? { workerConnectionService: params.workerConnectionService }
+      : {}),
     broadcast: params.broadcast,
     buildRequestContext: () => params.context,
-    abortRunsForConn: abortChatRunsByConnId,
   });
 }

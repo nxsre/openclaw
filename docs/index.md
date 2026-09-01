@@ -9,13 +9,13 @@ title: "OpenClaw"
 
 <p align="center">
     <img
-        src="/assets/openclaw-logo-text-dark.png"
+        src="/assets/openclaw-hero-light.png"
         alt="OpenClaw"
         width="500"
         class="dark:hidden"
     />
     <img
-        src="/assets/openclaw-logo-text.png"
+        src="/assets/openclaw-hero-dark.png"
         alt="OpenClaw"
         width="500"
         class="hidden dark:block"
@@ -26,18 +26,63 @@ title: "OpenClaw"
 
 <p align="center">
   <strong>Any OS gateway for AI agents across Discord, Google Chat, iMessage, Matrix, Microsoft Teams, Signal, Slack, Telegram, WhatsApp, Zalo, and more.</strong><br />
-  Send a message, get an agent response from your pocket. Run one Gateway across channel plugins, WebChat, and mobile nodes.
+  Send a message, get an agent response from your pocket. Run one Gateway across channel plugins, WebChat, and mobile nodes.<br />
+  Developed in the open by the <a href="https://openclaw.org">OpenClaw Foundation</a>, a non-profit.
 </p>
 
 <Columns>
   <Card title="Get Started" href="/start/getting-started" icon="rocket">
     Install OpenClaw and bring up the Gateway in minutes.
   </Card>
-  <Card title="Run Onboarding" href="/start/wizard" icon="sparkles">
+  <Card title="Run Onboarding" href="/start/wizard" icon="list-checks">
     Guided setup with `openclaw onboard` and pairing flows.
+  </Card>
+  <Card title="Connect a Channel" href="/channels" icon="message-circle">
+    Link Discord, Signal, Telegram, WhatsApp, and more to chat from anywhere.
   </Card>
   <Card title="Open the Control UI" href="/web/control-ui" icon="layout-dashboard">
     Launch the browser dashboard for chat, config, and sessions.
+  </Card>
+</Columns>
+
+## Browse docs
+
+Mobile browsers may show the section menu without the full desktop tab bar. Use
+these hub links to reach the same top-level docs areas from the page body.
+
+<Columns>
+  <Card title="Get started" href="/" icon="rocket">
+    Overview, showcase, first steps, and setup guides.
+  </Card>
+  <Card title="Install" href="/install" icon="download">
+    Install paths, updates, containers, hosting, and advanced setup.
+  </Card>
+  <Card title="Channels" href="/channels" icon="messages-square">
+    Messaging channels, pairing, routing, access groups, and channel QA.
+  </Card>
+  <Card title="Agents" href="/concepts/architecture" icon="bot">
+    Architecture, sessions, context, memory, and multi-agent routing.
+  </Card>
+  <Card title="Capabilities" href="/tools" icon="wand-sparkles">
+    Tools, skills, cron, webhooks, and automation capabilities.
+  </Card>
+  <Card title="ClawHub" href="/clawhub" icon="store">
+    Plugin marketplace, publishing, curation, and trust guidance.
+  </Card>
+  <Card title="Models" href="/providers" icon="brain">
+    Providers, model configuration, failover, and local model services.
+  </Card>
+  <Card title="Platforms" href="/platforms" icon="monitor-smartphone">
+    macOS, Windows, iOS, Android, nodes, and web surfaces.
+  </Card>
+  <Card title="Gateway & Ops" href="/gateway" icon="server">
+    Gateway configuration, security, diagnostics, and operations.
+  </Card>
+  <Card title="Reference" href="/cli" icon="terminal">
+    CLI reference, schemas, RPC, release notes, and templates.
+  </Card>
+  <Card title="Help" href="/help" icon="life-buoy">
+    Troubleshooting, FAQs, testing, diagnostics, and environment checks.
   </Card>
 </Columns>
 
@@ -45,7 +90,7 @@ title: "OpenClaw"
 
 OpenClaw is a **self-hosted gateway** that connects your favorite chat apps — Discord, Google Chat, iMessage, Matrix, Microsoft Teams, Signal, Slack, Telegram, WhatsApp, Zalo, and more via channel plugins — to AI coding agents. You run a single Gateway process on your own machine (or a server), and it becomes the bridge between your messaging apps and an always-available AI assistant.
 
-**Who is it for?** Developers and power users who want a personal AI assistant they can message from anywhere — without giving up control of their data or relying on a hosted service.
+**Who is it for?** Developers, power users, and teams who want an AI assistant they can message from anywhere — without giving up control of their data or relying on a hosted service. The same gateway runs as a personal assistant on one laptop or as a shared [team deployment](/start/teams); configuration is the only difference.
 
 **What makes it different?**
 
@@ -54,7 +99,9 @@ OpenClaw is a **self-hosted gateway** that connects your favorite chat apps — 
 - **Agent-native**: built for coding agents with tool use, sessions, memory, and multi-agent routing
 - **Open source**: MIT licensed, community-driven
 
-**What do you need?** Node 24.15+ (recommended), Node 22 LTS (`22.22.3+`) for compatibility, or Node 25.9+, an API key from your chosen provider, and 5 minutes. For best quality and security, use the strongest latest-generation model available.
+The full architecture case — a trusted gateway, untrusted execution, deterministic policy, and how one product spans personal and team use — is in [Why OpenClaw](/start/why-openclaw).
+
+**What do you need?** Node 26 (recommended), or another supported release: Node 22.22.3+, Node 24.15+, or Node 25.9+. You also need an API key from your chosen provider and 5 minutes. For best quality and security, use the strongest latest-generation model available.
 
 ## How it works
 
@@ -89,7 +136,7 @@ The Gateway is the single source of truth for sessions, routing, and channel con
     Browser dashboard for chat, config, sessions, and nodes.
   </Card>
   <Card title="Mobile nodes" icon="smartphone" href="/nodes">
-    Pair iOS and Android nodes for Canvas, camera, and voice-enabled workflows.
+    Pair iOS and Android nodes for camera, screen, and voice-enabled workflows.
   </Card>
 </Columns>
 
@@ -97,9 +144,14 @@ The Gateway is the single source of truth for sessions, routing, and channel con
 
 <Steps>
   <Step title="Install OpenClaw">
+    On npm 12 or npm 11.16+:
+
     ```bash
-    npm install -g openclaw@latest
+    npm install -g openclaw@latest --allow-scripts=openclaw
     ```
+
+    On npm 11.15 and earlier, omit `--allow-scripts=openclaw`.
+
   </Step>
   <Step title="Onboard and install the service">
     ```bash
@@ -168,7 +220,7 @@ Example:
     Channel-specific setup for Discord, Feishu, Microsoft Teams, Telegram, WhatsApp, and more.
   </Card>
   <Card title="Nodes" href="/nodes" icon="smartphone">
-    iOS and Android nodes with pairing, Canvas, camera, and device actions.
+    iOS and Android nodes with pairing, camera, screen, and device actions.
   </Card>
   <Card title="Help" href="/help" icon="life-buoy">
     Common fixes and troubleshooting entry point.

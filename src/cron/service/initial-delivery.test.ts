@@ -1,22 +1,71 @@
-// Initial cron delivery tests cover create-time default delivery resolution.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { CronService } from "../service.js";
+import {
+  createCronStoreHarness,
+  createNoopLogger,
+  installCronTestHooks,
+} from "../service.test-harness.js";
 import type { CronDelivery, CronJobCreate } from "../types.js";
 import { resolveInitialCronDelivery } from "./initial-delivery.js";
 
-const isolatedTurn = {
-  name: "reminder",
-  schedule: { kind: "at", at: "2026-06-25T22:16:00+08:00" },
-  sessionTarget: "isolated",
-  wakeMode: "now",
-  payload: { kind: "agentTurn", message: "remind me" },
-} as unknown as CronJobCreate;
+function createInput(params: {
+  sessionTarget: CronJobCreate["sessionTarget"];
+  payload: CronJobCreate["payload"];
+  delivery?: CronDelivery;
+}): CronJobCreate {
+  return {
+    name: "initial delivery",
+    enabled: true,
+    schedule: { kind: "every", everyMs: 60_000 },
+    sessionTarget: params.sessionTarget,
+    wakeMode: "now",
+    failureAlert: false,
+    payload: params.payload,
+    delivery: params.delivery,
+  };
+}
 
 describe("resolveInitialCronDelivery", () => {
-  it("returns the job's explicit delivery when set", () => {
-    const explicit: CronDelivery = { mode: "announce", channel: "telegram", to: "123" };
+  it("preserves explicit delivery", () => {
+    const delivery: CronDelivery = { mode: "none" };
     expect(
-      resolveInitialCronDelivery({ ...isolatedTurn, delivery: explicit }, { mode: "none" }),
-    ).toBe(explicit);
+      resolveInitialCronDelivery(
+        createInput({
+          sessionTarget: "current",
+          payload: { kind: "agentTurn", message: "hello" },
+          delivery,
+        }),
+      ),
+    ).toBe(delivery);
+  });
+
+  it.each(["isolated", "current", "session:project-alpha"] as const)(
+    "defaults %s output jobs to announce",
+    (sessionTarget) => {
+      const payloads: CronJobCreate["payload"][] = [
+        { kind: "agentTurn", message: "hello" },
+        { kind: "command", argv: ["echo", "hello"] },
+        { kind: "script", script: "return { notify: 'hello' }" },
+      ];
+      for (const payload of payloads) {
+        expect(resolveInitialCronDelivery(createInput({ sessionTarget, payload }))).toEqual({
+          mode: "announce",
+        });
+      }
+    },
+  );
+
+  it("does not default main-session output or system-event delivery", () => {
+    expect(
+      resolveInitialCronDelivery(
+        createInput({ sessionTarget: "main", payload: { kind: "agentTurn", message: "hello" } }),
+      ),
+    ).toBeUndefined();
+    expect(
+      resolveInitialCronDelivery(
+        createInput({ sessionTarget: "isolated", payload: { kind: "systemEvent", text: "tick" } }),
+      ),
+    ).toBeUndefined();
   });
 
   it("applies cron.defaultDelivery for isolated jobs without their own delivery", () => {
@@ -24,24 +73,97 @@ describe("resolveInitialCronDelivery", () => {
       mode: "announce",
       targets: [{ channel: "openclaw-weixin", to: "all" }],
     };
-    const resolved = resolveInitialCronDelivery(isolatedTurn, configDefault);
+    const resolved = resolveInitialCronDelivery(
+      createInput({
+        sessionTarget: "isolated",
+        payload: { kind: "agentTurn", message: "remind me" },
+      }),
+      configDefault,
+    );
     // Equal in value but a distinct object: the job must not alias the live config.
     expect(resolved).toEqual(configDefault);
     expect(resolved).not.toBe(configDefault);
   });
 
-  it("falls back to plain announce when no config default is set", () => {
-    expect(resolveInitialCronDelivery(isolatedTurn)).toEqual({ mode: "announce" });
-  });
-
   it("does not apply the config default to main-session jobs", () => {
-    const mainJob = {
-      name: "wake",
-      schedule: { kind: "at", at: "2026-06-25T22:16:00+08:00" },
-      sessionTarget: "main",
-      wakeMode: "now",
-      payload: { kind: "systemEvent", text: "ping" },
-    } as unknown as CronJobCreate;
-    expect(resolveInitialCronDelivery(mainJob, { mode: "announce" })).toBeUndefined();
+    expect(
+      resolveInitialCronDelivery(
+        createInput({ sessionTarget: "main", payload: { kind: "systemEvent", text: "ping" } }),
+        { mode: "announce" },
+      ),
+    ).toBeUndefined();
+  });
+});
+
+// Direct service callers do not pass through normalizeCronJobCreate, so keep
+// the public add and declarative convergence paths pinned to the same default.
+const logger = createNoopLogger();
+const { makeStorePath } = createCronStoreHarness({ prefix: "openclaw-cron-initial-delivery-" });
+installCronTestHooks({ logger });
+
+function createDirectCronService(storePath: string) {
+  return new CronService({
+    storePath,
+    cronEnabled: true,
+    log: logger,
+    enqueueSystemEvent: vi.fn(),
+    requestHeartbeat: vi.fn(),
+    runIsolatedAgentJob: vi.fn(async () => ({ status: "ok" as const })),
+  });
+}
+
+describe("CronService initial delivery", () => {
+  it.each(["current", "session:project-alpha"] as const)(
+    "persists announce delivery for direct %s jobs",
+    async (sessionTarget) => {
+      const { storePath } = await makeStorePath();
+      const cron = createDirectCronService(storePath);
+      await cron.start();
+
+      try {
+        const added = await cron.add(
+          createInput({ sessionTarget, payload: { kind: "agentTurn", message: "hello" } }),
+        );
+        expect(added.delivery).toEqual({ mode: "announce" });
+        await expect(cron.readJob(added.id)).resolves.toMatchObject({
+          delivery: { mode: "announce" },
+        });
+      } finally {
+        cron.stop();
+      }
+    },
+  );
+
+  it("keeps announce delivery when a declaration converges", async () => {
+    const { storePath } = await makeStorePath();
+    const cron = createDirectCronService(storePath);
+    await cron.start();
+    const declaration = {
+      ...createInput({
+        sessionTarget: "session:project-alpha",
+        payload: { kind: "agentTurn", message: "hello" },
+      }),
+      declarationKey: "agent:ops:initial-delivery",
+    };
+
+    try {
+      const created = await cron.add(declaration);
+      expect(created.delivery).toEqual({ mode: "announce" });
+
+      const converged = await cron.add(declaration, { enabledExplicit: true });
+      if (!("job" in converged)) {
+        throw new Error("expected declarative cron result");
+      }
+      expect(converged).toMatchObject({
+        created: false,
+        updated: false,
+        job: { delivery: { mode: "announce" } },
+      });
+      await expect(cron.readJob(converged.job.id)).resolves.toMatchObject({
+        delivery: { mode: "announce" },
+      });
+    } finally {
+      cron.stop();
+    }
   });
 });

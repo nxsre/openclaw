@@ -1,18 +1,7 @@
 // Defines cron scheduling configuration types.
 import type { CronDelivery } from "../cron/types.js";
 import type { SecretInput } from "./types.secrets.js";
-
-/** Error types that can trigger retries for one-shot jobs. */
-export type CronRetryOn = "rate_limit" | "overloaded" | "network" | "timeout" | "server_error";
-
-export type CronRetryConfig = {
-  /** Max retries for transient errors before permanent disable (default: 3). */
-  maxAttempts?: number;
-  /** Backoff delays in ms for each retry attempt (default: [30000, 60000, 300000]). */
-  backoffMs?: number[];
-  /** Error types to retry; omit to retry all transient types. */
-  retryOn?: CronRetryOn[];
-};
+import type { SsrFPolicyConfig } from "./types.ssrf.js";
 
 export type CronFailureAlertConfig = {
   enabled?: boolean;
@@ -21,6 +10,8 @@ export type CronFailureAlertConfig = {
   includeSkipped?: boolean;
   mode?: "announce" | "webhook";
   accountId?: string;
+  channel?: string;
+  to?: string;
 };
 
 export type CronFailureDestinationConfig = {
@@ -32,45 +23,25 @@ export type CronFailureDestinationConfig = {
 
 export type CronConfig = {
   enabled?: boolean;
-  store?: string;
-  maxConcurrentRuns?: number;
   triggers?: {
     enabled?: boolean;
-    minIntervalMs?: number;
   };
-  /** Override default retry policy for one-shot jobs on transient errors. */
-  retry?: CronRetryConfig;
-  /**
-   * @deprecated Legacy fallback webhook URL used by doctor to migrate stored
-   * jobs with notify=true. Runtime delivery uses per-job delivery.mode="webhook"
-   * with delivery.to, or delivery.completionDestination when preserving announce
-   * delivery.
-   */
-  webhook?: string;
   /** Bearer token for cron webhook POST delivery. */
   webhookToken?: SecretInput;
+  /** SSRF policy for all outbound cron webhook deliveries. */
+  webhookSsrfPolicy?: SsrFPolicyConfig;
   /**
    * How long to retain completed cron run sessions before automatic pruning.
    * Accepts a duration string (e.g. "24h", "7d", "1h30m") or `false` to disable pruning.
+   * A zero duration (e.g. "0h") also disables pruning; negative durations are invalid.
    * Default: "24h".
    */
   sessionRetention?: string | false;
-  /**
-   * Run-history pruning controls. History is stored in SQLite; maxBytes is
-   * retained for compatibility with older file-backed run logs.
-   * Defaults: `maxBytes=2_000_000`, `keepLines=2000`.
-   */
-  runLog?: {
-    maxBytes?: number | string;
-    keepLines?: number;
-  };
   failureAlert?: CronFailureAlertConfig;
-  /** Default destination for failure notifications across all cron jobs. */
-  failureDestination?: CronFailureDestinationConfig;
   /**
-   * Default delivery applied to new isolated agentTurn/command jobs that are
-   * created without their own `delivery` config. Lets operators broadcast all
-   * scheduled output to a fixed destination, e.g. every channel recipient via
+   * Default delivery applied to new isolated-like output jobs that are created
+   * without their own `delivery` config. Lets operators broadcast scheduled
+   * output to a fixed destination, e.g. every channel recipient via
    * `{ mode: "announce", targets: [{ channel: "openclaw-weixin", to: "all" }] }`.
    * Jobs that specify their own delivery always win. Limited to the primary
    * announce/none/webhook fields; per-job webhook completion/failure destinations

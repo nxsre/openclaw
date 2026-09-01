@@ -8,6 +8,7 @@ import {
 
 const targetSha = "b".repeat(40);
 const workflowSha = "a".repeat(40);
+const publisherWorkflowSha = "c".repeat(40);
 const pinnedBranch = `release-ci/${workflowSha.slice(0, 12)}-1783705000000`;
 
 function releaseRun(overrides: Record<string, unknown> = {}) {
@@ -60,7 +61,9 @@ function strictEvidenceReuse() {
     current: { runId: "123", targetSha },
     root: { runId: "122", targetSha },
     evidenceReuse: {
+      changedPaths: [],
       evidenceSha: targetSha,
+      policy: "exact-target-full-validation-v1",
       rootRunId: "122",
       selectedRunId: "122",
     },
@@ -121,6 +124,103 @@ describe("full release validation evidence", () => {
     expect(result.source).toBe("sha-pinned-main");
     expect(isTrustedMainAncestor).toHaveBeenCalledWith(workflowSha);
     expect(isShaPinnedReleaseValidationBranch(pinnedBranch)).toBe(true);
+  });
+
+  it("accepts canonical SHA-pinned evidence exactly bound to a protected tooling tag", () => {
+    const isTrustedMainAncestor = vi.fn(() => false);
+    const trustedWorkflowRef = `release-publish/${workflowSha.slice(0, 12)}-123`;
+    const result = validateFullReleaseValidationEvidence({
+      run: releaseRun(),
+      manifest: releaseManifest(),
+      expectedRepository: "openclaw/openclaw",
+      expectedRunId: "123",
+      expectedTargetSha: targetSha,
+      expectedTrustedWorkflowFullRef: `refs/tags/${trustedWorkflowRef}`,
+      expectedTrustedWorkflowSha: workflowSha,
+      isTrustedMainAncestor,
+    });
+
+    expect(result.source).toBe("sha-pinned-protected-tag");
+    expect(isTrustedMainAncestor).not.toHaveBeenCalled();
+  });
+
+  it("accepts historical SHA-pinned evidence from trusted main under a protected publisher", () => {
+    const isTrustedMainAncestor = vi.fn(() => true);
+    const validateEvidenceReuseStrictly = vi.fn(() => strictEvidenceReuse());
+    const trustedWorkflowRef = `release-publish/${publisherWorkflowSha.slice(0, 12)}-123`;
+    const result = validateFullReleaseValidationEvidence({
+      run: releaseRun(),
+      manifest: releaseManifest({ evidenceReuse: exactTargetEvidenceReuse() }),
+      expectedRepository: "openclaw/openclaw",
+      expectedRunId: "123",
+      expectedTargetSha: targetSha,
+      expectedTrustedWorkflowFullRef: `refs/tags/${trustedWorkflowRef}`,
+      expectedTrustedWorkflowSha: publisherWorkflowSha,
+      isTrustedMainAncestor,
+      validateEvidenceReuseStrictly,
+    });
+
+    expect(result.source).toBe("sha-pinned-protected-tag-main-ancestor");
+    expect(isTrustedMainAncestor).toHaveBeenCalledWith(workflowSha);
+    expect(validateEvidenceReuseStrictly).toHaveBeenCalledWith({
+      repository: "openclaw/openclaw",
+      runId: "123",
+      targetSha,
+    });
+  });
+
+  it("rejects protected-tag evidence from a same-name branch or untrusted ancestor", () => {
+    const trustedWorkflowRef = `release-publish/${workflowSha.slice(0, 12)}-123`;
+    expect(() =>
+      validateFullReleaseValidationEvidence({
+        run: releaseRun(),
+        manifest: releaseManifest(),
+        expectedRepository: "openclaw/openclaw",
+        expectedRunId: "123",
+        expectedTargetSha: targetSha,
+        expectedTrustedWorkflowFullRef: `refs/heads/${trustedWorkflowRef}`,
+        expectedTrustedWorkflowSha: workflowSha,
+        isTrustedMainAncestor: () => true,
+      }),
+    ).toThrow("must be an exact protected tag");
+
+    const olderWorkflowSha = "c".repeat(40);
+    const olderBranch = `release-ci/${olderWorkflowSha.slice(0, 12)}-1783705000000`;
+    expect(() =>
+      validateFullReleaseValidationEvidence({
+        run: releaseRun({
+          head_branch: olderBranch,
+          head_sha: olderWorkflowSha,
+        }),
+        manifest: releaseManifest({
+          workflowFullRef: `refs/heads/${olderBranch}`,
+          workflowRef: olderBranch,
+          workflowSha: olderWorkflowSha,
+        }),
+        expectedRepository: "openclaw/openclaw",
+        expectedRunId: "123",
+        expectedTargetSha: targetSha,
+        expectedTrustedWorkflowFullRef: `refs/tags/${trustedWorkflowRef}`,
+        expectedTrustedWorkflowSha: workflowSha,
+        isTrustedMainAncestor: () => false,
+      }),
+    ).toThrow("not reachable from current main");
+
+    expect(() =>
+      validateFullReleaseValidationEvidence({
+        run: releaseRun({ head_branch: trustedWorkflowRef }),
+        manifest: releaseManifest({
+          workflowFullRef: `refs/heads/${trustedWorkflowRef}`,
+          workflowRef: trustedWorkflowRef,
+        }),
+        expectedRepository: "openclaw/openclaw",
+        expectedRunId: "123",
+        expectedTargetSha: targetSha,
+        expectedTrustedWorkflowFullRef: `refs/tags/${trustedWorkflowRef}`,
+        expectedTrustedWorkflowSha: workflowSha,
+        isTrustedMainAncestor: () => true,
+      }),
+    ).toThrow("canonical release-ci producer branch");
   });
 
   it.each([pinnedBranch, `refs/heads/${pinnedBranch}`])(
@@ -208,6 +308,40 @@ describe("full release validation evidence", () => {
     );
   });
 
+  it("accepts changelog-only release evidence reuse on the SHA-pinned path", () => {
+    const codeSha = "c".repeat(40);
+    const reuse = {
+      changedPaths: ["CHANGELOG.md"],
+      evidenceSha: codeSha,
+      policy: "changelog-only-release-v1",
+      runId: "122",
+      selectedRunId: "122",
+    };
+    const result = validateFullReleaseValidationEvidence({
+      run: releaseRun(),
+      manifest: releaseManifest({ evidenceReuse: reuse }),
+      expectedRepository: "openclaw/openclaw",
+      expectedRunId: "123",
+      expectedTargetSha: targetSha,
+      expectedWorkflowBranch: "release/2026.7.1",
+      isTrustedMainAncestor: () => true,
+      validateEvidenceReuseStrictly: () => ({
+        ...strictEvidenceReuse(),
+        current: { runId: "123", targetSha },
+        root: { runId: "122", targetSha: codeSha },
+        evidenceReuse: {
+          changedPaths: ["CHANGELOG.md"],
+          evidenceSha: codeSha,
+          policy: "changelog-only-release-v1",
+          rootRunId: "122",
+          selectedRunId: "122",
+        },
+      }),
+    });
+
+    expect(result.source).toBe("sha-pinned-main");
+  });
+
   it("requires strict root and child validation for reused evidence", () => {
     expect(() =>
       validateFullReleaseValidationEvidence({
@@ -249,6 +383,19 @@ describe("full release validation evidence", () => {
       validate(
         {},
         { evidenceReuse: { ...exactTargetEvidenceReuse(), evidenceSha: "c".repeat(40) } },
+      ),
+    ).toThrow("evidence reuse is invalid");
+    expect(() =>
+      validate(
+        {},
+        {
+          evidenceReuse: {
+            ...exactTargetEvidenceReuse(),
+            changedPaths: ["src/a.ts"],
+            evidenceSha: "c".repeat(40),
+            policy: "changelog-only-release-v1",
+          },
+        },
       ),
     ).toThrow("evidence reuse is invalid");
   });

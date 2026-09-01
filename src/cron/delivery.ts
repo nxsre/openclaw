@@ -1,9 +1,18 @@
-import { sendDurableMessageBatch } from "../channels/message/runtime.js";
 /** Sends cron announce payloads and best-effort failure notifications. */
-import { getLoadedChannelPluginForRead } from "../channels/plugins/registry-loaded-read.js";
+
+import type { ReplyPayload } from "../auto-reply/reply-payload.js";
+import {
+  durableMessageBatchMayHaveReachedRecipient,
+  sendDurableMessageBatchCore,
+} from "../channels/message/runtime.js";
+import { getLoadedChannelPluginForRead } from "../channels/plugins/registry-loaded.js";
 import type { CliDeps } from "../cli/deps.types.js";
 import { createOutboundSendDeps } from "../cli/outbound-send-deps.js";
-import { listSessionEntries } from "../config/sessions/store.js";
+import { listSessionEntriesCore } from "../config/sessions/session-accessor.js";
+import {
+  deliveryContextFromSession,
+  sessionDeliveryChannel,
+} from "../utils/delivery-context.shared.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { resolveAgentOutboundIdentity } from "../infra/outbound/identity.js";
@@ -12,12 +21,9 @@ import { getChildLogger } from "../logging.js";
 import { defaultRuntime } from "../runtime.js";
 import {
   parseAllTarget,
-  resolveFailureDestination,
-  type CronFailureDeliveryPlan,
-  type CronFailureDestinationInput,
-  type CronDeliveryPlan,
   resolveCronDeliveryPlan,
   resolveCronDeliveryPlans,
+  type CronDeliveryPlan,
 } from "./delivery-plan.js";
 import {
   resolveDeliveryTarget,
@@ -26,28 +32,26 @@ import {
 import { resolveCronNotificationSessionKey } from "./session-target.js";
 import type { CronMessageChannel } from "./types.js";
 
-export {
-  resolveCronDeliveryPlan,
-  resolveCronDeliveryPlans,
-  resolveFailureDestination,
-  type CronDeliveryPlan,
-  type CronFailureDeliveryPlan,
-  type CronFailureDestinationInput,
-};
+export { resolveCronDeliveryPlan, resolveCronDeliveryPlans };
+export type { CronDeliveryPlan };
 
-const FAILURE_NOTIFICATION_TIMEOUT_MS = 30_000;
 const cronDeliveryLogger = getChildLogger({ subsystem: "cron-delivery" });
 
 /** Channel target metadata used for cron announcements and failure notifications. */
-export type CronAnnounceTarget = {
+type CronAnnounceTarget = {
   channel?: string;
   to?: string;
+  threadId?: string | number;
   accountId?: string;
   sessionKey?: string;
   inheritSessionThread?: boolean;
 };
 
 type SuccessfulDeliveryTarget = Extract<DeliveryTargetResolution, { ok: true }>;
+type CronAnnounceDeliveryOutcome = Extract<
+  Awaited<ReturnType<typeof sendDurableMessageBatchCore>>,
+  { status: "sent" | "suppressed" }
+>;
 
 async function resolveCronAnnounceDelivery(params: {
   cfg: OpenClawConfig;
@@ -65,16 +69,19 @@ async function resolveCronAnnounceDelivery(params: {
 > {
   // Resolve the target before building outbound identity/session so send errors
   // report the configured route, not only the cron job id.
+  const targetResolutionOptions =
+    params.target.inheritSessionThread === false ? { inheritSessionThread: false } : undefined;
   const resolvedTarget = await resolveDeliveryTarget(
     params.cfg,
     params.agentId,
     {
       channel: params.target.channel as CronMessageChannel | undefined,
       to: params.target.to,
+      threadId: params.target.threadId,
       accountId: params.target.accountId,
       sessionKey: params.target.sessionKey,
     },
-    params.target.inheritSessionThread === false ? { inheritSessionThread: false } : undefined,
+    targetResolutionOptions,
   );
 
   if (!resolvedTarget.ok) {
@@ -99,37 +106,6 @@ async function resolveCronAnnounceDelivery(params: {
   };
 }
 
-async function deliverCronAnnouncePayload(params: {
-  deps: CliDeps;
-  cfg: OpenClawConfig;
-  delivery: {
-    resolvedTarget: SuccessfulDeliveryTarget;
-    session: ReturnType<typeof buildOutboundSessionContext>;
-    identity: ReturnType<typeof resolveAgentOutboundIdentity>;
-  };
-  message: string;
-  abortSignal: AbortSignal;
-}): Promise<void> {
-  // Cron delivery is durable and non-best-effort for primary announces; partial
-  // channel failure must surface as a cron run failure.
-  const send = await sendDurableMessageBatch({
-    cfg: params.cfg,
-    channel: params.delivery.resolvedTarget.channel,
-    to: params.delivery.resolvedTarget.to,
-    accountId: params.delivery.resolvedTarget.accountId,
-    threadId: params.delivery.resolvedTarget.threadId,
-    payloads: [{ text: params.message }],
-    session: params.delivery.session,
-    identity: params.delivery.identity,
-    bestEffort: false,
-    deps: createOutboundSendDeps(params.deps),
-    signal: params.abortSignal,
-  });
-  if (send.status === "failed" || send.status === "partial_failed") {
-    throw send.error;
-  }
-}
-
 /** Sends a cron announce payload and throws if target resolution or delivery fails. */
 export async function sendCronAnnouncePayloadStrict(params: {
   deps: CliDeps;
@@ -137,20 +113,47 @@ export async function sendCronAnnouncePayloadStrict(params: {
   agentId: string;
   jobId: string;
   target: CronAnnounceTarget;
-  message: string;
+  payload: ReplyPayload;
   abortSignal: AbortSignal;
-}): Promise<void> {
+  onDeliveryAttempt?: (reachedRecipient: boolean) => void;
+}): Promise<CronAnnounceDeliveryOutcome> {
   const delivery = await resolveCronAnnounceDelivery(params);
   if (!delivery.ok) {
     throw delivery.error;
   }
-  await deliverCronAnnouncePayload({
-    deps: params.deps,
+  // Resolution can settle after its caller's deadline; never start plugin
+  // delivery once the Gateway has released ownership of the timed-out work.
+  params.abortSignal.throwIfAborted();
+
+  // Cron delivery is durable and non-best-effort for primary announces; partial
+  // channel failure must surface as a cron run failure.
+  let recipientReached = false;
+  const send = await sendDurableMessageBatchCore({
     cfg: params.cfg,
-    delivery,
-    message: params.message,
-    abortSignal: params.abortSignal,
+    channel: delivery.resolvedTarget.channel,
+    to: delivery.resolvedTarget.to,
+    accountId: delivery.resolvedTarget.accountId,
+    threadId: delivery.resolvedTarget.threadId,
+    payloads: [params.payload],
+    session: delivery.session,
+    identity: delivery.identity,
+    bestEffort: false,
+    deps: createOutboundSendDeps(params.deps),
+    signal: params.abortSignal,
+    onDeliveryResult: () => {
+      if (!recipientReached) {
+        recipientReached = true;
+        params.onDeliveryAttempt?.(true);
+      }
+    },
   });
+  if (!recipientReached) {
+    params.onDeliveryAttempt?.(durableMessageBatchMayHaveReachedRecipient(send));
+  }
+  if (send.status === "failed" || send.status === "partial_failed") {
+    throw send.error;
+  }
+  return send;
 }
 
 /** Collects distinct recipient ids for a channel from this agent's session history. */
@@ -160,17 +163,17 @@ function collectSessionPeers(params: {
   accountId?: string;
 }): string[] {
   const seen = new Set<string>();
-  for (const { entry } of listSessionEntries({ agentId: params.agentId })) {
-    const channel = entry.lastChannel ?? entry.deliveryContext?.channel ?? entry.channel;
+  for (const { entry } of listSessionEntriesCore({ agentId: params.agentId })) {
+    const delivery = deliveryContextFromSession(entry);
+    const channel = sessionDeliveryChannel(entry) ?? delivery?.channel;
     if (channel !== params.channel) {
       continue;
     }
-    const accountId =
-      entry.lastAccountId ?? entry.deliveryContext?.accountId ?? entry.origin?.accountId;
+    const accountId = delivery?.accountId;
     if (params.accountId && accountId && accountId !== params.accountId) {
       continue;
     }
-    const to = entry.deliveryContext?.to ?? entry.lastTo ?? entry.origin?.to;
+    const to = delivery?.to;
     if (typeof to === "string" && to.trim()) {
       seen.add(to.trim());
     }
@@ -237,7 +240,7 @@ export async function expandCronDeliveryPlans(
   const expanded: CronDeliveryPlan[] = [];
   const seen = new Set<string>();
   const pushUnique = (plan: CronDeliveryPlan) => {
-    const key = `${plan.channel ?? ""} ${plan.accountId ?? ""} ${(plan.to ?? "").toLowerCase()}`;
+    const key = `${plan.channel ?? ""}${plan.accountId ?? ""}${(plan.to ?? "").toLowerCase()}`;
     if (seen.has(key)) {
       return;
     }
@@ -321,7 +324,7 @@ export async function fanOutAdditionalCronAnnounceTargets(params: {
           accountId: plan.accountId,
           sessionKey: params.sessionKey,
         },
-        message: params.message,
+        payload: { text: params.message },
         abortSignal: params.abortSignal,
       });
       delivered += 1;
@@ -335,53 +338,4 @@ export async function fanOutAdditionalCronAnnounceTargets(params: {
     }
   }
   return { attempted, delivered, failures };
-}
-
-/** Sends a best-effort cron failure notification, logging resolution/send failures. */
-export async function sendFailureNotificationAnnounce(
-  deps: CliDeps,
-  cfg: OpenClawConfig,
-  agentId: string,
-  jobId: string,
-  target: CronAnnounceTarget,
-  message: string,
-): Promise<void> {
-  const delivery = await resolveCronAnnounceDelivery({ cfg, agentId, jobId, target });
-
-  if (!delivery.ok) {
-    // Failure alerts must not mask the original cron run failure.
-    cronDeliveryLogger.warn(
-      { error: delivery.error.message },
-      "cron: failed to resolve failure destination target",
-    );
-    return;
-  }
-
-  const abortController = new AbortController();
-  const timeout = setTimeout(() => {
-    // Failure notifications are secondary; timeout prevents a stuck channel send
-    // from extending an already-failed cron run.
-    abortController.abort();
-  }, FAILURE_NOTIFICATION_TIMEOUT_MS);
-
-  try {
-    await deliverCronAnnouncePayload({
-      deps,
-      cfg,
-      delivery,
-      message,
-      abortSignal: abortController.signal,
-    });
-  } catch (err) {
-    cronDeliveryLogger.warn(
-      {
-        err: formatErrorMessage(err),
-        channel: delivery.resolvedTarget.channel,
-        to: delivery.resolvedTarget.to,
-      },
-      "cron: failure destination announce failed",
-    );
-  } finally {
-    clearTimeout(timeout);
-  }
 }

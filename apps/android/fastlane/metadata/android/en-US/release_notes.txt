@@ -1,9 +1,7 @@
-Adds multi-gateway switching with isolated credentials, history, queues, and notification routing.
+Adds inline audio/video playback and uploads, session dashboards, run telemetry, chat rewind/fork, a Settings repair assistant, and Wear instant Talk.
 
-Upgrades chat with offline recovery, session search and groups, model and agent pickers, voice notes, actions, link previews, code and math rendering.
+Improves the working claw, collapsible details, Skill Workshop flows, and generated images.
 
-Adds workspace files, Cron details, terminal access, and Listen playback.
+Fixes reconnect/session state, Talk transcripts, manual gateway ports, large-text onboarding, reduced motion, and Wear pairing/reply reliability.
 
-Improves onboarding, reconnects, keyboards, notification filtering, location, canvas safety, and voice reliability.
-
-Thanks @IWhatsskill, @ioridev, and @narcissus0702.
+Thanks @IWhatsskill, @NianJiuZst, @masatohoshino, @cygnostik, @licheer-zte, and @metaforismo.

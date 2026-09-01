@@ -3,9 +3,12 @@
  *
  * Applies request timeouts, proxy/TLS overrides, SSRF policy, local-service leases, retry hints, and SSE normalization.
  */
+import { parseRetryAfterHttpDateMs } from "@openclaw/ai/internal/retry-after";
+import { emitModelTransportDebug, formatModelTransportDebugUrl } from "@openclaw/ai/transports";
 import {
   isCloudMetadataIpAddress,
   isLinkLocalIpAddress,
+  isRfc8215LocalUseNat64Ipv6Address,
   parseCanonicalIpAddress,
 } from "@openclaw/net-policy/ip";
 import {
@@ -24,18 +27,18 @@ import {
   mergeSsrFPolicies,
   ssrfPolicyFromHttpBaseUrlFakeIpHostnameAllowlist,
   ssrfPolicyFromHttpBaseUrlAllowedOrigin,
+  SsrFBlockedError,
   type SsrFPolicy,
 } from "../infra/net/ssrf.js";
 import type { Model } from "../llm/types.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveDebugProxySettings } from "../proxy-capture/env.js";
 import {
+  containsSecretSentinel,
   resolveSecretSentinel,
   SECRET_SENTINEL_PATTERN,
   swapSecretSentinelsInText,
 } from "../secrets/sentinel.js";
-import { emitModelTransportDebug } from "./model-transport-debug.js";
-import { formatModelTransportDebugUrl } from "./model-transport-url.js";
 import {
   maybeLogProviderHttpErrorResponse,
   ProviderHttpError,
@@ -47,10 +50,12 @@ import {
 } from "./provider-local-service.js";
 import {
   buildProviderRequestDispatcherPolicy,
+  getModelProviderRequestRouteFacts,
   getModelProviderRequestTransport,
   mergeModelProviderRequestOverrides,
   resolveProviderRequestPolicyConfig,
 } from "./provider-request-config.js";
+import { getProviderTransportDispatcherPool } from "./provider-transport-dispatcher-pool.js";
 
 const DEFAULT_MAX_SDK_RETRY_WAIT_SECONDS = 60;
 const OPENAI_SDK_STREAM_CONTENT_SNIFF_BYTES = 2 * 1024;
@@ -69,15 +74,6 @@ const SSE_SANITIZE_BUFFER_MAX_CHARS = 16 * 1024 * 1024;
 
 const BLOCKED_EXACT_ORIGIN_TRUST_HOSTNAME_LABELS = new Set(["instance-data"]);
 const PLAIN_DECIMAL_NUMBER_RE = /^\d+(?:\.\d+)?$/;
-const RETRY_AFTER_HTTP_DATE_RE =
-  /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2} \d{2}:\d{2}:\d{2} GMT|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [ \d]\d \d{2}:\d{2}:\d{2} \d{4})$/;
-const HTTP_DATE_MONTH_INDEX = new Map(
-  ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].map(
-    (month, index) => [month, index],
-  ),
-);
-const OBSOLETE_ASCTIME_HTTP_DATE_RE =
-  /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([ \d]\d) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/;
 
 function hasReadableSseData(block: string): boolean {
   const dataLines = block
@@ -107,6 +103,15 @@ function findSseEventBoundary(buffer: string): { index: number; length: number }
   return best;
 }
 
+async function cancelReaderBestEffort(
+  reader: ReadableStreamDefaultReader<Uint8Array> | undefined,
+  reason?: unknown,
+): Promise<void> {
+  // Reader cancellation is cleanup. An upstream cancel failure must not replace
+  // the wrapper's authoritative stream error or downstream cancellation.
+  await reader?.cancel(reason).catch(() => undefined);
+}
+
 function capNonOkResponseBodyLazily(response: Response, maxBytes: number): Response {
   const source = response.body;
   if (!source) {
@@ -134,18 +139,18 @@ function capNonOkResponseBodyLazily(response: Response, maxBytes: number): Respo
           }
           total = maxBytes;
           controller.close();
-          void reader?.cancel().catch(() => undefined);
+          void cancelReaderBestEffort(reader);
           return;
         }
         total += chunk.value.byteLength;
         controller.enqueue(chunk.value);
       } catch (error) {
         controller.error(error);
-        void reader?.cancel(error).catch(() => undefined);
+        void cancelReaderBestEffort(reader, error);
       }
     },
     async cancel(reason) {
-      await reader?.cancel(reason).catch(() => undefined);
+      await cancelReaderBestEffort(reader, reason);
     },
   });
   return new Response(capped, response);
@@ -200,12 +205,12 @@ function sanitizeOpenAISdkSseResponse(
             buffer += decoder.decode(chunk.value, { stream: true });
           }
         } catch (error) {
-          await reader?.cancel(error).catch(() => {});
+          await cancelReaderBestEffort(reader, error);
           controller.error(error);
         }
       },
       async cancel(reason) {
-        await reader?.cancel(reason);
+        await cancelReaderBestEffort(reader, reason);
       },
     });
     const headers = new Headers(response.headers);
@@ -288,12 +293,12 @@ function sanitizeOpenAISdkSseResponse(
           }
         }
       } catch (error) {
-        await reader?.cancel(error).catch(() => {});
+        await cancelReaderBestEffort(reader, error);
         controller.error(error);
       }
     },
     async cancel(reason) {
-      await reader?.cancel(reason);
+      await cancelReaderBestEffort(reader, reason);
     },
   });
 
@@ -372,7 +377,7 @@ async function classifyOpenAISdkStreamBody(response: Response): Promise<OpenAISd
     text += decoder.decode();
     return classifyOpenAISdkStreamBodyPrefix(text);
   } finally {
-    void reader.cancel().catch(() => undefined);
+    void cancelReaderBestEffort(reader);
   }
 }
 
@@ -435,10 +440,10 @@ async function normalizeOpenAISdkStreamContentType(params: {
   });
 }
 
-async function requestBodyHasStreamTrue(
+function requestBodyHasStreamTrue(
   request: Request | undefined,
   init: RequestInit | undefined,
-): Promise<boolean> {
+): boolean {
   const method = request?.method ?? init?.method;
   if (method && method.toUpperCase() !== "POST") {
     return false;
@@ -486,58 +491,12 @@ function parseRetryAfterSeconds(headers: Headers): number | undefined {
     return parseStrictNonNegativeInteger(trimmedRetryAfterSeconds) ?? Number.POSITIVE_INFINITY;
   }
 
-  const trimmedRetryAfter = trimmedRetryAfterSeconds;
-  if (!RETRY_AFTER_HTTP_DATE_RE.test(trimmedRetryAfter)) {
-    return undefined;
-  }
-
-  const retryAt = parseRetryAfterHttpDateMs(trimmedRetryAfter);
-  if (Number.isNaN(retryAt)) {
+  const retryAt = parseRetryAfterHttpDateMs(trimmedRetryAfterSeconds);
+  if (retryAt === undefined) {
     return undefined;
   }
 
   return Math.max(0, (retryAt - Date.now()) / 1000);
-}
-
-function parseRetryAfterHttpDateMs(value: string): number {
-  const match = OBSOLETE_ASCTIME_HTTP_DATE_RE.exec(value);
-  if (match) {
-    const month = HTTP_DATE_MONTH_INDEX.get(match[1] ?? "");
-    if (month === undefined) {
-      return Number.NaN;
-    }
-    const year = Number.parseInt(match[6] ?? "", 10);
-    const day = Number.parseInt((match[2] ?? "").trim(), 10);
-    const hours = Number.parseInt(match[3] ?? "", 10);
-    const minutes = Number.parseInt(match[4] ?? "", 10);
-    const seconds = Number.parseInt(match[5] ?? "", 10);
-    if (
-      day < 1 ||
-      day > 31 ||
-      hours > 23 ||
-      minutes > 59 ||
-      seconds > 59 ||
-      [year, day, hours, minutes, seconds].some((component) => !Number.isFinite(component))
-    ) {
-      return Number.NaN;
-    }
-    const timestamp = Date.UTC(year, month, day, hours, minutes, seconds);
-    const parsedDate = new Date(timestamp);
-    return parsedDate.getUTCFullYear() === year &&
-      parsedDate.getUTCMonth() === month &&
-      parsedDate.getUTCDate() === day &&
-      parsedDate.getUTCHours() === hours &&
-      parsedDate.getUTCMinutes() === minutes &&
-      parsedDate.getUTCSeconds() === seconds
-      ? timestamp
-      : Number.NaN;
-  }
-
-  const parsed = Date.parse(value);
-  if (!Number.isNaN(parsed)) {
-    return parsed;
-  }
-  return Number.NaN;
 }
 
 function resolveMaxSdkRetryWaitSeconds(): number | undefined {
@@ -638,10 +597,12 @@ function resolveModelRequestPolicy(model: Model) {
         }
       : undefined,
   });
+  const routeFacts = getModelProviderRequestRouteFacts(model);
   return resolveProviderRequestPolicyConfig({
     provider: model.provider,
     api: model.api,
     baseUrl: model.baseUrl,
+    ...(routeFacts ? { routeFacts } : {}),
     capability: "llm",
     transport: "stream",
     request,
@@ -721,7 +682,8 @@ function canImplicitlyTrustConfiguredBaseUrlOrigin(value: unknown): value is str
         label.includes("metadata") || BLOCKED_EXACT_ORIGIN_TRUST_HOSTNAME_LABELS.has(label),
     ) &&
     !isLinkLocalIpAddress(hostname) &&
-    !isCloudMetadataIpAddress(hostname)
+    !isCloudMetadataIpAddress(hostname) &&
+    !isRfc8215LocalUseNat64Ipv6Address(hostname)
   );
 }
 
@@ -769,12 +731,41 @@ export function resolveProviderTransportSsrFPolicy(params: {
   );
 }
 
+function withModelProviderNetworkRemediation(
+  error: unknown,
+  params: {
+    baseUrl?: string;
+    providerId: string;
+    url: string;
+  },
+): unknown {
+  const baseOrigin = resolveHttpOrigin(params.baseUrl);
+  const requestOrigin = resolveHttpOrigin(params.url);
+  const hostname = normalizeProviderOriginHostname(params.baseUrl);
+  if (
+    !(error instanceof SsrFBlockedError) ||
+    !baseOrigin ||
+    requestOrigin !== baseOrigin ||
+    !hostname ||
+    !isRfc8215LocalUseNat64Ipv6Address(hostname)
+  ) {
+    return error;
+  }
+  return new SsrFBlockedError(
+    `Configured model provider ${params.providerId} uses local-use NAT64 origin ` +
+      `${baseOrigin}, which OpenClaw blocks by default. Move the provider to a ` +
+      `loopback, LAN, or tailnet address, or set ` +
+      `models.providers.${params.providerId}.request.allowPrivateNetwork=true only for an ` +
+      `operator-controlled endpoint. Original block: ${error.message}`,
+  );
+}
+
 function headersContainSecretSentinel(headers: HeadersInit | undefined): boolean {
   if (!headers) {
     return false;
   }
   for (const value of new Headers(headers).values()) {
-    if (value.includes("oc-sent-v1-")) {
+    if (containsSecretSentinel(value)) {
       return true;
     }
   }
@@ -782,7 +773,7 @@ function headersContainSecretSentinel(headers: HeadersInit | undefined): boolean
 }
 
 function swapSecretSentinelsInUrl(url: string): { text: string; unknown: string[] } {
-  if (!url.includes("oc-sent-v1-")) {
+  if (!containsSecretSentinel(url)) {
     return { text: url, unknown: [] };
   }
   const unknown = new Set<string>();
@@ -802,7 +793,7 @@ function swapSecretSentinelsForEgress(params: { url: string; headers?: HeadersIn
   url: string;
   headers?: Headers;
 } {
-  if (!params.url.includes("oc-sent-v1-") && !headersContainSecretSentinel(params.headers)) {
+  if (!containsSecretSentinel(params.url) && !headersContainSecretSentinel(params.headers)) {
     return { url: params.url };
   }
   const urlSwap = swapSecretSentinelsInUrl(params.url);
@@ -876,10 +867,7 @@ export function buildGuardedModelFetch(
       allowPrivateNetwork: requestConfig.allowPrivateNetwork,
       // Only operator-configured custom/local endpoints get exact-origin trust;
       // known public/native providers keep the default rebinding checks.
-      trustConfiguredBaseUrlOrigin:
-        !requestConfig.privateNetworkExplicitlyDenied &&
-        (requestConfig.policy?.endpointClass === "custom" ||
-          requestConfig.policy?.endpointClass === "local"),
+      trustConfiguredBaseUrlOrigin: requestConfig.trustConfiguredBaseUrlOrigin,
     });
     const requestInit =
       request &&
@@ -894,7 +882,6 @@ export function buildGuardedModelFetch(
     const baseInit =
       requestInit ??
       (swappedEgress.headers && init ? { ...init, headers: swappedEgress.headers } : init);
-    const synthesizeJsonAsSse = await requestBodyHasStreamTrue(request, baseInit);
     const baseSignal = baseInit?.signal ?? undefined;
     const localServiceSignal = buildModelRequestSignal(baseSignal, requestTimeoutMs);
     const guardedFetchOptions = {
@@ -908,6 +895,7 @@ export function buildGuardedModelFetch(
         },
       },
       dispatcherPolicy,
+      dispatcherPool: getProviderTransportDispatcherPool(),
       timeoutMs: requestTimeoutMs,
       ...(baseSignal ? { signal: baseSignal } : {}),
       // Provider transport intentionally keeps the secure default and never
@@ -938,12 +926,17 @@ export function buildGuardedModelFetch(
           : guardedFetchOptions,
       );
     } catch (error) {
+      const remediatedError = withModelProviderNetworkRemediation(error, {
+        baseUrl: model.baseUrl,
+        providerId: model.provider,
+        url,
+      });
       log.warn(
         `[model-fetch] error provider=${model.provider} api=${model.api} model=${model.id} ` +
-          `elapsedMs=${Date.now() - fetchStartedAt} ${summarizeError(error)}`,
+          `elapsedMs=${Date.now() - fetchStartedAt} ${summarizeError(remediatedError)}`,
       );
       localServiceLease?.release();
-      throw error;
+      throw remediatedError;
     }
     let response = result.response;
     if (!response.ok) {
@@ -956,6 +949,7 @@ export function buildGuardedModelFetch(
       log,
       `[model-fetch] response provider=${model.provider} api=${model.api} model=${model.id} ` +
         `status=${response.status} elapsedMs=${Date.now() - fetchStartedAt} ` +
+        `dispatcher=${result.dispatcherReused ? "reused" : "new"} ` +
         `contentType=${response.headers.get("content-type") ?? ""}`,
     );
     if (shouldBypassLongSdkRetry(response)) {
@@ -967,7 +961,11 @@ export function buildGuardedModelFetch(
         headers,
       });
     }
-    if (synthesizeJsonAsSse && options?.sanitizeSse !== false) {
+    const synthesizeJsonAsSse =
+      options?.sanitizeSse !== false &&
+      !/\btext\/event-stream\b/i.test(response.headers.get("content-type") ?? "") &&
+      requestBodyHasStreamTrue(request, baseInit);
+    if (synthesizeJsonAsSse) {
       response = await normalizeOpenAISdkStreamContentType({
         response,
         model,
@@ -986,3 +984,4 @@ export function buildGuardedModelFetch(
       : sanitizeOpenAISdkSseResponse(response, { synthesizeJsonAsSse });
   };
 }
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

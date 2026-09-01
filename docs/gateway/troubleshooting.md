@@ -348,7 +348,7 @@ Use `error.details.code` from the failed `connect` response to pick the next act
 
 | Detail code                  | Meaning                                                                                                                                                                                      | Recommended action                                                                                                                                                                                                                                                                       |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AUTH_TOKEN_MISSING`         | Client did not send a required shared token.                                                                                                                                                 | Paste/set token in the client and retry. For dashboard paths: `openclaw config get gateway.auth.token` then paste into Control UI settings.                                                                                                                                              |
+| `AUTH_TOKEN_MISSING`         | Client did not send a required shared token.                                                                                                                                                 | On the Gateway host, run `openclaw gateway auth-token --show` in an interactive terminal, paste the output into the client, and retry.                                                                                                                                                   |
 | `AUTH_TOKEN_MISMATCH`        | Shared token did not match gateway auth token.                                                                                                                                               | If `canRetryWithDeviceToken=true`, allow one trusted retry. Cached-token retries reuse stored approved scopes; explicit `deviceToken` / `scopes` callers keep requested scopes. If still failing, run the [token drift recovery checklist](/cli/devices#token-drift-recovery-checklist). |
 | `AUTH_DEVICE_TOKEN_MISMATCH` | Cached per-device token is stale or revoked.                                                                                                                                                 | Rotate/re-approve device token using [devices CLI](/cli/devices), then reconnect.                                                                                                                                                                                                        |
 | `AUTH_SCOPE_MISMATCH`        | Device token is valid, but its approved role/scopes do not cover this connect request.                                                                                                       | Re-pair the device or approve the requested scope contract; do not treat this as shared-token drift.                                                                                                                                                                                     |
@@ -483,6 +483,102 @@ Related:
 - [Logging](/logging)
 - [Doctor](/gateway/doctor)
 
+## macOS launchd supervisor loop with duplicate gateway/node LaunchAgents
+
+Use this when a macOS install keeps restarting every few seconds, `openclaw`
+health checks flap between healthy and unavailable, and channel dispatch stalls
+even though the service appears to be running.
+
+This was observed on older installs where both `ai.openclaw.gateway` and
+`ai.openclaw.node` LaunchAgents were active and each injected
+`OPENCLAW_LAUNCHD_LABEL`. In that state OpenClaw can detect launchd
+supervision, try to hand restart back to launchd, and fall into a fast
+`EADDRINUSE`/respawn loop instead of one stable gateway process.
+
+```bash
+for i in 1 2 3 4; do
+  ps aux | grep 'openclaw.*index.js' | grep -v grep | awk '{print $2}'
+  sleep 10
+done
+
+openclaw gateway status --deep
+openclaw node status
+launchctl print gui/$UID/ai.openclaw.gateway | grep -E 'state|last exit|runs'
+tail -n 80 ~/Library/Logs/openclaw/gateway.log
+```
+
+Look for:
+
+- More than one gateway PID across the 30-second sample instead of one stable
+  process.
+- `EADDRINUSE`, `another gateway instance is already listening`, or repeated
+  restart/handoff lines in `gateway.log`.
+- Both `~/Library/LaunchAgents/ai.openclaw.gateway.plist` and
+  `~/Library/LaunchAgents/ai.openclaw.node.plist` loaded at the same time on a
+  host that should only run one managed gateway service.
+
+What to do:
+
+1. If this host should only run the Gateway service, remove the managed node
+   service through OpenClaw. **Skip this step** if you actively rely on the node
+   service for remote node features; uninstalling it stops those features on
+   this host:
+
+   ```bash
+   openclaw node uninstall
+   ```
+
+2. Install a persistent Gateway wrapper that clears the inherited launchd
+   markers before starting OpenClaw. Use the supported `--wrapper` option; do
+   not edit the generated file under `~/.openclaw/service-env/`, because service
+   reinstall, update, and doctor repair regenerate that file:
+
+   ```bash
+   mkdir -p ~/.local/bin
+   cat >~/.local/bin/openclaw-launchd-workaround <<'EOF'
+   #!/bin/sh
+   set -eu
+   unset OPENCLAW_LAUNCHD_LABEL LAUNCH_JOB_LABEL LAUNCH_JOB_NAME XPC_SERVICE_NAME || true
+   exec openclaw "$@"
+   EOF
+   chmod 700 ~/.local/bin/openclaw-launchd-workaround
+
+   openclaw gateway install \
+     --wrapper ~/.local/bin/openclaw-launchd-workaround \
+     --force
+   ```
+
+   `gateway install` persists the wrapper path across forced reinstalls,
+   updates, and doctor repairs.
+
+3. Verify that the Gateway is stable and serving RPC, not merely listening:
+
+   ```bash
+   openclaw gateway status --deep --require-rpc
+
+   for i in 1 2 3 4; do
+     ps aux | grep 'openclaw.*index.js' | grep -v grep | awk '{print $2}'
+     sleep 10
+   done
+   ```
+
+   The PID sample should show one stable process instead of a rotating set of
+   PIDs, and inbound channel dispatch should resume.
+
+4. After upgrading to a release where the underlying dual-LaunchAgent loop is
+   fixed, remove the workaround and reinstall the normal managed service:
+
+   ```bash
+   OPENCLAW_WRAPPER= openclaw gateway install --force
+   rm ~/.local/bin/openclaw-launchd-workaround
+   ```
+
+Related:
+
+- [macOS platform notes](/platforms/mac/bundled-gateway)
+- [Doctor](/gateway/doctor)
+- [Gateway CLI](/cli/gateway)
+
 ## Gateway exits during high memory use
 
 Use when the Gateway disappears under load, the supervisor reports an OOM-style restart, or logs mention `critical memory pressure bundle written`.
@@ -505,13 +601,25 @@ Look for:
 Common signatures:
 
 - `critical memory pressure bundle written` appears shortly before restart → OpenClaw captured a pre-OOM stability bundle. Inspect it with `openclaw gateway stability --bundle latest`.
-- `memory pressure: level=critical ... memoryPressureSnapshot=disabled` appears in gateway logs → OpenClaw detected critical memory pressure, but the pre-OOM stability snapshot is off.
+- `memory pressure: level=critical` appears in gateway logs → OpenClaw detected critical memory pressure and recorded the available in-process memory facts.
 - `Largest session files:` points at a very large redacted transcript path → reduce retained session history, inspect session growth, or move old transcripts out of the active store before restarting.
-- `V8 heap:` used bytes are close to the heap limit → lower prompt/session pressure, reduce concurrent work, or raise the Node heap limit only after confirming the workload is expected.
+- `V8 heap:` used bytes are close to the heap limit → lower prompt/session pressure or reduce concurrent work first. For a managed service, compare the configured controls and install-time recommendation in `Gateway heap:` from `openclaw gateway status` with the runtime measurement. Reinstalling preserves existing stored heap settings; it does not automatically replace an older value with the current recommendation.
 - `Memory pressure: critical/rss_growth` → memory grew quickly inside one sampling window. Check the latest logs for a large import, runaway tool output, repeated retries, or a batch of queued agent work.
-- Critical memory pressure appears in logs but no bundle exists → this is the default. Set `diagnostics.memoryPressureSnapshot: true` to capture the pre-OOM stability bundle on future critical memory pressure events.
+- Critical memory pressure appears in logs but no bundle exists → capture `openclaw gateway diagnostics export` after the event for the available operational evidence.
 
 The stability bundle is payload-free. It includes operational memory evidence and redacted relative file paths, not message text, webhook bodies, credentials, tokens, cookies, or raw session ids. Attach the diagnostics export to bug reports instead of copying raw logs.
+
+Node's automatic heap ceiling can be roughly 4 GiB on a large host. That is a default sizing decision, not a general 64-bit address-space ceiling. `--max-old-space-size` controls V8 old space; the measured total V8 heap ceiling also includes other heap spaces. RSS additionally includes native allocations, buffers, and other process memory. A higher heap ceiling does not preallocate the ceiling, but it still needs enough real capacity and headroom under sustained load.
+
+For a foreground Node Gateway, set a native heap flag before Node starts, for example on a host with sufficient capacity:
+
+```bash
+NODE_OPTIONS="--max-old-space-size=16384" openclaw gateway run
+```
+
+For a custom supervisor or Docker runtime command, place `--max-old-space-size=16384` immediately after `node`, before the OpenClaw entry script, or set `NODE_OPTIONS` in that process or container's launch environment. Docker image build-time heap options do not configure the runtime Gateway. An OpenClaw config or dotenv value loaded after Node starts cannot resize its heap. `NODE_OPTIONS` can also reach spawned Node children, so prefer a direct Node argument when only the Gateway should receive the budget.
+
+For managed Node services, use the [managed Gateway heap policy](/cli/gateway#manage-the-gateway-service) and inspect both managed launch arguments and operator-owned environment overrides before changing them. Native argv overrides the same option in `NODE_OPTIONS`; percentage old-space sizing takes precedence over absolute old-space sizing. Regeneration preserves stored argv but does not add an automatic heap flag when an operator override owns `NODE_OPTIONS`. Installer-shell `NODE_OPTIONS` does not become a service override. Runtime pressure diagnostics use the effective V8 heap ceiling and physical/reported constraint headroom; an oversized explicit heap setting does not raise the RSS alert threshold above physical capacity. Pressure warnings are diagnostic evidence, not heap limits or automatic restart triggers.
 
 Related:
 
@@ -522,6 +630,12 @@ Related:
 ## Gateway rejected invalid config
 
 Use when Gateway startup fails with `Invalid config` or hot reload logs say it skipped an invalid edit.
+
+Startup automatically migrates deterministic legacy keys in eligible single-file
+configs and continues only if the entire result validates, including plugins. It
+keeps the previous config in the `.bak` ring. Configs using `$include`, Nix-managed
+configs, configs written by a newer version, and configs that still fail validation
+require operator repair. See [Legacy config key migrations](/gateway/doctor#detailed-behavior-and-rationale).
 
 ```bash
 openclaw logs --follow
@@ -542,10 +656,10 @@ Look for:
 <AccordionGroup>
   <Accordion title="What happened">
     - The config did not validate during startup, hot reload, or an OpenClaw-owned write.
-    - Gateway startup fails closed instead of rewriting `openclaw.json`.
+    - Gateway startup leaves `openclaw.json` unchanged and fails closed when safe legacy-key migration cannot produce a fully valid config.
     - Hot reload skips invalid external edits and keeps the current runtime config active.
     - OpenClaw-owned writes reject invalid/destructive payloads before commit and save `.rejected.*`.
-    - `openclaw doctor --fix` owns repair. It can remove non-JSON prefixes or restore the last-known-good copy while preserving the rejected payload as `.clobbered.*`.
+    - `openclaw doctor --fix` owns repairs beyond automatic legacy-key migration. It can remove non-JSON prefixes or restore the last-known-good copy while preserving the rejected payload as `.clobbered.*`.
     - When many repairs happen for one config path, OpenClaw rotates older `.clobbered.*` files so the newest repaired payload is still available.
 
   </Accordion>
@@ -569,10 +683,13 @@ Look for:
 
   </Accordion>
   <Accordion title="Fix options">
+    An interactive startup can offer to run `openclaw doctor --fix` and retry once when automatic legacy-key migration is not enough. Non-interactive startup prints the repair command instead.
+
     1. Run `openclaw doctor --fix` to let doctor repair prefixed/clobbered config or restore last-known-good.
     2. Copy only the intended keys from `.clobbered.*` or `.rejected.*`, then apply them with `openclaw config set` or `config.patch`.
     3. Run `openclaw config validate` before restarting.
     4. If you edit by hand, keep the full JSON5 config, not just the partial object you wanted to change.
+
   </Accordion>
 </AccordionGroup>
 
@@ -660,15 +777,15 @@ Look for:
 
 - Cron enabled and next wake present.
 - Job run history status (`ok`, `skipped`, `error`).
-- Heartbeat skip reasons (`quiet-hours`, `requests-in-flight`, `cron-in-progress`, `lanes-busy`, `alerts-disabled`, `empty-heartbeat-file`, `no-tasks-due`).
+- Heartbeat skip reasons (`quiet-hours`, `requests-in-flight`, `cron-in-progress`, `alerts-disabled`, `empty-heartbeat-file`).
 
 <AccordionGroup>
   <Accordion title="Common signatures">
     - `cron: scheduler disabled; jobs will not run automatically` → cron disabled.
     - `cron: timer tick failed` → scheduler tick failed; check file/log/runtime errors.
     - `heartbeat skipped` with `reason=quiet-hours` → outside active hours window.
-    - `heartbeat skipped` with `reason=empty-heartbeat-file` → `HEARTBEAT.md` exists but only contains blank, comment, header, fence, or empty-checklist scaffolding, so OpenClaw skips the model call.
-    - `heartbeat skipped` with `reason=no-tasks-due` → `HEARTBEAT.md` contains a `tasks:` block, but none of the tasks are due on this tick.
+    - `heartbeat skipped` with `reason=empty-heartbeat-file` → heartbeat monitor scratch only contains blank, comment, header, fence, or empty-checklist scaffolding, so OpenClaw skips the model call.
+    - `heartbeat skipped` with `reason=no-route` → the default `owner` target has no concrete owner in `commands.ownerAllowFrom` or channel `allowFrom`, the owner cannot resolve to a DM, or no channel is configured. Explicit `last` also needs a session conversation route.
     - `heartbeat: unknown accountId` → invalid account id for heartbeat delivery target.
     - `heartbeat skipped` with `reason=dm-blocked` → heartbeat target resolved to a DM-style destination while `agents.defaults.heartbeat.directPolicy` (or per-agent override) is set to `block`.
 
@@ -756,7 +873,6 @@ Look for:
     - `existing-session file uploads currently support one file at a time.` → send one upload per call on Chrome MCP profiles.
     - `existing-session dialog handling does not support timeoutMs.` → dialog hooks on Chrome MCP profiles do not support timeout overrides.
     - `existing-session type does not support timeoutMs overrides.` → omit `timeoutMs` for `act:type` on `profile="user"` / Chrome MCP existing-session profiles, or use a managed/CDP browser profile when a custom timeout is required.
-    - `existing-session evaluate does not support timeoutMs overrides.` → omit `timeoutMs` for `act:evaluate` on `profile="user"` / Chrome MCP existing-session profiles, or use a managed/CDP browser profile when a custom timeout is required.
     - `response body is not supported for existing-session profiles yet.` → `responsebody` still requires a managed browser or raw CDP profile.
     - Stale viewport / dark-mode / locale / offline overrides on attach-only or remote CDP profiles → run `openclaw browser stop --browser-profile <name>` to close the active control session and release Playwright/CDP emulation state without restarting the whole gateway.
 
@@ -844,7 +960,7 @@ Related:
 
 - [Authentication](/gateway/authentication)
 - [Background exec and process tool](/gateway/background-process)
-- [Gateway-owned pairing](/gateway/pairing)
+- [Node pairing](/gateway/pairing)
 
 ## Related
 

@@ -19,7 +19,7 @@ describe("scripts/test-live-cli-backend-docker.sh", () => {
     const script = fs.readFileSync(SCRIPT_PATH, "utf8");
 
     expect(script).toContain(
-      "node scripts/test-live.mjs -- src/gateway/gateway-cli-backend.live.test.ts",
+      "node --import tsx scripts/test-live.mts -- src/gateway/gateway-cli-backend.live.test.ts",
     );
     expect(script).not.toContain("pnpm test:live src/gateway/gateway-cli-backend.live.test.ts");
   });
@@ -30,6 +30,19 @@ describe("scripts/test-live-cli-backend-docker.sh", () => {
     expect(forwardedVars).toContain("OPENCLAW_LIVE_CLI_BACKEND_ARGS");
     expect(forwardedVars).toContain("OPENCLAW_LIVE_CLI_BACKEND_RESUME_ARGS");
     expect(forwardedVars).toContain("OPENCLAW_TEST_CONSOLE");
+  });
+
+  it("forwards the Claude prompt-cache probe into the Docker container", () => {
+    const forwardedVars = readForwardedDockerEnvVars();
+
+    expect(forwardedVars).toContain("OPENCLAW_LIVE_CLI_BACKEND_CACHE_PROBE");
+  });
+
+  it("keeps the Anthropic runtime in Claude CLI live-test images", () => {
+    const script = fs.readFileSync(SCRIPT_PATH, "utf8");
+
+    expect(script).toContain('if [[ "$CLI_PROVIDER" == "claude-cli" ]]');
+    expect(script).toContain("ensure_live_build_extension anthropic");
   });
 
   it("forwards advisory provider-skip controls into the Docker container", () => {
@@ -61,6 +74,10 @@ describe("scripts/test-live-cli-backend-docker.sh", () => {
 
     expect(script).toContain('direct_probe_log="$(mktemp)"');
     expect(script).toContain("This is a local CLI smoke test.");
+    expect(script).toContain("What is two plus two?");
+    expect(script).toContain("(4|four)");
+    expect(script).not.toContain("direct_token=");
+    expect(script).not.toContain("expected token");
     expect(script).not.toContain("OPENCLAW-CLAUDE-SUBSCRIPTION-DIRECT");
     expect(script).toContain("direct Claude subscription probe exited with status");
     expect(script).toContain("<redacted-email>");

@@ -1,11 +1,17 @@
 /** Resolves create-time default delivery for new cron jobs. */
+import { shouldDefaultCronDeliveryToAnnounce } from "../delivery-defaults.js";
 import type { CronDelivery, CronJobCreate } from "../types.js";
 
 /**
- * Resolves default cron delivery for new jobs when callers omit explicit
- * delivery config. An explicit per-job delivery always wins. For isolated
- * agentTurn/command jobs the operator-configured `cron.defaultDelivery` applies
- * when set, otherwise delivery falls back to plain announce.
+ * Resolves default cron delivery for new jobs when callers omit explicit delivery config.
+ * This is the direct-service contract: supported creation paths (gateway `cron.add`,
+ * agent cron tool) already fill delivery in `normalizeCronJobCreate`, so this default
+ * only governs callers that reach `CronService.add`/declarative convergence directly.
+ * The shared predicate keeps this contract consistent across write-time,
+ * read-time, and service-bypass paths.
+ * An explicit per-job delivery always wins. For isolated-like output jobs the
+ * operator-configured `cron.defaultDelivery` applies when set, otherwise delivery
+ * falls back to plain announce.
  */
 export function resolveInitialCronDelivery(
   input: CronJobCreate,
@@ -15,8 +21,10 @@ export function resolveInitialCronDelivery(
     return input.delivery;
   }
   if (
-    input.sessionTarget === "isolated" &&
-    (input.payload.kind === "agentTurn" || input.payload.kind === "command")
+    shouldDefaultCronDeliveryToAnnounce({
+      payloadKind: input.payload.kind,
+      sessionTarget: input.sessionTarget,
+    })
   ) {
     // Clone so the persisted job owns its delivery and never aliases the shared
     // live runtime config object (cfg.cron.defaultDelivery).

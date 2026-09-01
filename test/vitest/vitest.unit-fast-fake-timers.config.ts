@@ -1,6 +1,10 @@
 // Vitest unit fast fake timers config wires the unit fast fake timers test shard.
 import { defineConfig } from "vitest/config";
-import { loadPatternListFromEnv, narrowIncludePatternsForCli } from "./vitest.pattern-file.ts";
+import {
+  intersectIncludePatterns,
+  loadPatternListFromEnv,
+  narrowIncludePatternsForCli,
+} from "./vitest.pattern-file.ts";
 import {
   nonIsolatedRunnerPath,
   resolveRepoRootPath,
@@ -13,8 +17,12 @@ export function createUnitFastFakeTimersVitestConfig(
   options: { argv?: string[] } = {},
 ) {
   const sharedTest = sharedVitestConfig.test ?? {};
-  const includeFromEnv = loadPatternListFromEnv("OPENCLAW_VITEST_INCLUDE_FILE", env);
+  const sharedSequence = (sharedTest as { sequence?: { groupOrder?: number } }).sequence;
   const unitFastTimerTestFiles = getUnitFastTimerTestFiles();
+  const includeFromEnv = intersectIncludePatterns(
+    unitFastTimerTestFiles,
+    loadPatternListFromEnv("OPENCLAW_VITEST_INCLUDE_FILE", env),
+  );
   const cliInclude = narrowIncludePatternsForCli(unitFastTimerTestFiles, options.argv);
 
   return defineConfig({
@@ -31,7 +39,7 @@ export function createUnitFastFakeTimersVitestConfig(
       maxWorkers: 1,
       fileParallelism: false,
       sequence: {
-        ...sharedTest.sequence,
+        ...sharedSequence,
         groupOrder: 1,
       },
       passWithNoTests: true,

@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it } from "vitest";
 import {
   DEPENDENCY_EVIDENCE_REPORTS,
@@ -13,7 +14,7 @@ import {
   renderDependencyEvidenceSummary,
   resolvePreviousReleaseTag,
   resolveReleaseTag,
-} from "../../scripts/generate-dependency-release-evidence.mjs";
+} from "../../scripts/generate-dependency-release-evidence.mts";
 
 async function writeJson(dir: string, fileName: string, value: unknown) {
   await writeFile(path.join(dir, fileName), `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -22,7 +23,7 @@ async function writeJson(dir: string, fileName: string, value: unknown) {
 function runCli(...args: string[]) {
   return spawnSync(
     process.execPath,
-    ["scripts/generate-dependency-release-evidence.mjs", ...args],
+    ["--import", "tsx", "scripts/generate-dependency-release-evidence.mts", ...args],
     {
       cwd: path.resolve("."),
       encoding: "utf8",
@@ -144,20 +145,50 @@ describe("generate-dependency-release-evidence", () => {
     const artifactArgs = ["--output-dir", "evidence", ...requiredArgs];
     const duplicateCases = [
       ["--root", ["--root", "repo-a", "--root", "repo-b", ...artifactArgs]],
-      ["--output-dir", ["--output-dir", "evidence-a", "--output-dir", "evidence-b", ...requiredArgs]],
+      [
+        "--output-dir",
+        ["--output-dir", "evidence-a", "--output-dir", "evidence-b", ...requiredArgs],
+      ],
       [
         "--release-ref",
-        ["--output-dir", "evidence", "--release-ref", "v2026.5.13", "--release-ref", "v2026.5.14", "--npm-dist-tag", "latest"],
+        [
+          "--output-dir",
+          "evidence",
+          "--release-ref",
+          "v2026.5.13",
+          "--release-ref",
+          "v2026.5.14",
+          "--npm-dist-tag",
+          "latest",
+        ],
       ],
       [
         "--npm-dist-tag",
-        ["--output-dir", "evidence", "--release-ref", "v2026.5.13", "--npm-dist-tag", "latest", "--npm-dist-tag", "beta"],
+        [
+          "--output-dir",
+          "evidence",
+          "--release-ref",
+          "v2026.5.13",
+          "--npm-dist-tag",
+          "latest",
+          "--npm-dist-tag",
+          "beta",
+        ],
       ],
       ["--base-ref", [...artifactArgs, "--base-ref", "origin/main", "--base-ref", "HEAD~1"]],
-      ["--github-output", [...artifactArgs, "--github-output", "first.out", "--github-output", "second.out"]],
+      [
+        "--github-output",
+        [...artifactArgs, "--github-output", "first.out", "--github-output", "second.out"],
+      ],
       [
         "--github-step-summary",
-        [...artifactArgs, "--github-step-summary", "first.md", "--github-step-summary", "second.md"],
+        [
+          ...artifactArgs,
+          "--github-step-summary",
+          "first.md",
+          "--github-step-summary",
+          "second.md",
+        ],
       ],
     ] satisfies Array<[string, string[]]>;
 
@@ -170,17 +201,21 @@ describe("generate-dependency-release-evidence", () => {
     const result = runCli("--help");
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("Usage: node scripts/generate-dependency-release-evidence.mjs");
+    expect(result.stdout).toContain(
+      "Usage: node --import tsx scripts/generate-dependency-release-evidence.mts",
+    );
     expect(result.stderr).toBe("");
   });
 
   it("reports CLI argument errors without a Node stack trace", () => {
-    const result = runCli("--wat");
+    for (const args of [["--wat"], ["wat", "--help"]]) {
+      const result = runCli(...args);
 
-    expect(result.status).toBe(1);
-    expect(result.stdout).toBe("");
-    expect(result.stderr.trim()).toBe("Unsupported argument: --wat");
-    expectNoNodeStack(result.stderr);
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr.trim()).toBe(`Unsupported argument: ${args[0]}`);
+      expectNoNodeStack(result.stderr);
+    }
   });
 
   it("falls back to fetching tags when local previous-release resolution misses", () => {
@@ -211,15 +246,27 @@ describe("generate-dependency-release-evidence", () => {
       }),
     ).toBe("v2026.5.1");
     expect(calls.map(({ args }) => args[0])).toEqual(["describe", "fetch", "describe"]);
-    expect(calls[1].args).toEqual(["fetch", "--tags", "--force", "origin"]);
+    expect(expectDefined(calls[1], "release tag fetch call").args).toEqual([
+      "fetch",
+      "--tags",
+      "--force",
+      "origin",
+    ]);
   });
 
   it("collects report counts and renders human summaries", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "openclaw-release-dependency-evidence-test-"));
     try {
       await writeJson(dir, "dependency-vulnerability-gate.json", {
-        blockers: [{ id: "GHSA-blocker" }],
-        findings: [{ id: "GHSA-blocker" }, { id: "GHSA-report" }],
+        blockers: [
+          { id: "GHSA-blocker", lockfile: "pnpm-lock.yaml" },
+          { id: "GHSA-blocker", lockfile: ".github/release/vercel-cli/package-lock.json" },
+        ],
+        findings: [
+          { id: "GHSA-blocker", lockfile: "pnpm-lock.yaml" },
+          { id: "GHSA-blocker", lockfile: ".github/release/vercel-cli/package-lock.json" },
+          { id: "GHSA-report", lockfile: ".github/release/clawhub-cli/package-lock.json" },
+        ],
       });
       await writeJson(dir, "transitive-manifest-risk-report.json", {
         findingCount: 17,
@@ -243,8 +290,8 @@ describe("generate-dependency-release-evidence", () => {
 
       const counts = await collectDependencyEvidenceSummaryCounts(dir);
       expect(counts).toEqual({
-        vulnerabilityBlockers: 1,
-        vulnerabilityFindings: 2,
+        vulnerabilityBlockers: 2,
+        vulnerabilityFindings: 3,
         transitiveRiskSignals: 17,
         workspaceExcludedTransitiveSignals: 3,
         transitiveMetadataFailures: 1,
@@ -262,7 +309,7 @@ describe("generate-dependency-release-evidence", () => {
         baseRef: "v2026.5.1",
         counts,
       });
-      expect(summary).toContain("- npm advisory vulnerability hard blockers: 1");
+      expect(summary).toContain("- npm advisory vulnerability hard blockers: 2");
       expect(summary).toContain("- Transitive manifest reported risk signals: 17");
       expect(summary).toContain("- Dependency change baseline: `v2026.5.1`");
       expect(summary).toContain("- Resolved package changes: +5 -6 changed 7");
@@ -275,7 +322,7 @@ describe("generate-dependency-release-evidence", () => {
       expect(stepSummary).toContain(
         "- Evidence artifact: `openclaw-release-dependency-evidence-v2026.5.13`",
       );
-      expect(stepSummary).toContain("- npm advisory vulnerability hard blockers: `1`");
+      expect(stepSummary).toContain("- npm advisory vulnerability hard blockers: `2`");
 
       await expect(
         readFile(path.join(dir, "dependency-vulnerability-gate.json"), "utf8"),

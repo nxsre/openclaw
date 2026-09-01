@@ -1,15 +1,11 @@
 // Assistant error formatting helpers normalize assistant-visible error payloads.
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
-// XCPH: 上游 LLM 任意异常时给客户端的统一兜底文案。
-// 设置 OPENCLAW_LLM_ERROR_FALLBACK_TEXT 即启用并使用该文本；为空则保留原有按类型分类的英文提示
-// （便于开发期排障）。所有通道（飞书 / 微信 / OpenIM / WebSocket / HTTP）拿到的 assistant
-// message.content 都经过 formatRawAssistantErrorForUi() 这一层，故仅在此处 short-circuit。
-// 详细日志（provider-http-error 等）仍按原样写到服务端，便于运维查问题。
-const USER_FACING_FALLBACK_ENV = "OPENCLAW_LLM_ERROR_FALLBACK_TEXT";
+import { extractHttpResponseBody } from "./http-error-response.js";
 // XCPH: 按 HTTP 状态码读 env 配置的面向用户兜底文案。
 // 变量名 = OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status>(如 _402 _429 _500;放在 openclaw.json 的
 // env.vars 里)。配了该状态码 → 返回对应文案(支持 %{http_code}/%{error_message} 等变量替换);
-// 没配该状态码 / 取不到状态码 → 返回 null,调用方回退显示原始错误信息(不再有统一兜底文案)。
+// 没配该状态码 / 取不到状态码 → 返回 null,调用方回退显示原始错误信息。
+const USER_FACING_FALLBACK_ENV = "OPENCLAW_LLM_ERROR_FALLBACK_TEXT";
 export function userFacingFallbackText(rawError?: string): string | null {
   if (typeof rawError !== "string") return null;
   const status =
@@ -32,6 +28,14 @@ const HTTP_STATUS_CODE_PREFIX_RE = new RegExp(
   `^(?:http\\s*)?(\\d{3})(?:${HTTP_STATUS_DELIMITER_RE.source}([\\s\\S]+))?$`,
   "i",
 );
+// Built-in provider adapters format status as `OpenAI API error (500): ...` (also
+// Azure OpenAI / Mistral / Provider). Keep this anchored so mid-string numbers
+// like model ids or image dimensions never become fake HTTP statuses.
+const PROVIDER_WRAPPED_HTTP_STATUS_RE =
+  /^(?:[a-z][\w-]*(?:\s+[a-z][\w-]*){0,3}\s+)?api\s*error\s*\((\d{3})\)(?:\s*:\s*([\s\S]*))?$/i;
+const LABELED_HTTP_STATUS_RE =
+  /^(?:status code|unexpected status|http status)\s*[:=]?\s*(\d{3})\b(?:\s*[:,]?\s*(?:message\s*:\s*)?([\s\S]*))?$/i;
+const ERROR_STATUS_ENVELOPE_RE = /^error\s*[:,]\s*/i;
 const HTML_ERROR_PREFIX_RE = /^\s*(?:<!doctype\s+html\b|<html\b)/i;
 const HTML_CLOSE_RE = /<\/html>/i;
 const CLOUDFLARE_HTML_ERROR_CODES = new Set([521, 522, 523, 524, 525, 526, 530]);
@@ -115,16 +119,48 @@ export function parseApiErrorPayload(raw?: string): ErrorPayload | null {
   return null;
 }
 
-export function extractLeadingHttpStatus(raw: string): { code: number; rest: string } | null {
-  const match = raw.match(HTTP_STATUS_CODE_PREFIX_RE);
+function extractHttpStatusMatch(
+  match: RegExpMatchArray | null,
+): { code: number; rest: string } | null {
   if (!match) {
     return null;
   }
   const code = Number(match[1]);
-  if (!Number.isFinite(code)) {
+  if (!Number.isInteger(code) || code < 100 || code > 599) {
     return null;
   }
   return { code, rest: (match[2] ?? "").trim() };
+}
+
+export function extractLeadingHttpStatus(raw: string): { code: number; rest: string } | null {
+  return extractHttpStatusMatch(raw.match(HTTP_STATUS_CODE_PREFIX_RE));
+}
+
+export function extractProviderWrappedHttpStatus(
+  raw: string,
+): { code: number; rest: string } | null {
+  return extractHttpStatusMatch(raw.match(PROVIDER_WRAPPED_HTTP_STATUS_RE));
+}
+
+/** Extract an explicitly labeled provider HTTP status without matching embedded numeric text. */
+export function extractErrorHttpStatus(raw: string): { code: number; rest: string } | null {
+  const trimmed = raw.trim();
+  const direct =
+    extractLeadingHttpStatus(trimmed) ??
+    extractProviderWrappedHttpStatus(trimmed) ??
+    extractHttpStatusMatch(trimmed.match(LABELED_HTTP_STATUS_RE));
+  if (direct) {
+    return direct;
+  }
+  const unwrapped = trimmed.replace(ERROR_STATUS_ENVELOPE_RE, "");
+  if (unwrapped === trimmed) {
+    return null;
+  }
+  return (
+    extractLeadingHttpStatus(unwrapped) ??
+    extractProviderWrappedHttpStatus(unwrapped) ??
+    extractHttpStatusMatch(unwrapped.match(LABELED_HTTP_STATUS_RE))
+  );
 }
 
 export function isCloudflareOrHtmlErrorPage(raw: string): boolean {
@@ -141,7 +177,7 @@ export function isCloudflareOrHtmlErrorPage(raw: string): boolean {
     return true;
   }
 
-  const status = extractLeadingHttpStatus(trimmed);
+  const status = extractHttpResponseBody(extractLeadingHttpStatus(trimmed));
   if (!status || status.code < 500) {
     return false;
   }
@@ -151,7 +187,7 @@ export function isCloudflareOrHtmlErrorPage(raw: string): boolean {
   }
 
   return (
-    status.code < 600 && HTML_ERROR_PREFIX_RE.test(status.rest) && HTML_CLOSE_RE.test(status.rest)
+    status.code < 600 && HTML_ERROR_PREFIX_RE.test(status.body) && HTML_CLOSE_RE.test(status.body)
   );
 }
 
@@ -178,10 +214,10 @@ export function parseApiErrorInfo(raw?: string): ApiErrorInfo | null {
   let httpCode: string | undefined;
   let candidate = trimmed;
 
-  const httpPrefixMatch = candidate.match(/^(\d{3})\s+(.+)$/s);
-  if (httpPrefixMatch) {
-    httpCode = httpPrefixMatch[1];
-    candidate = httpPrefixMatch[2].trim();
+  const httpPrefix = extractHttpStatusMatch(candidate.match(/^(\d{3})\s+(.+)$/s));
+  if (httpPrefix) {
+    httpCode = String(httpPrefix.code);
+    candidate = httpPrefix.rest;
   }
 
   const payload = parseApiErrorPayload(candidate);
@@ -304,7 +340,6 @@ export function extractHttpStatusFromErrorText(text: string): number | undefined
 
 // applyFallbackVars 把兜底文案里的 curl 风格变量 %{name} 替换为本次错误的真实值。
 // 支持:%{http_code}（HTTP 状态码）、%{error_type}、%{error_message}、%{request_id}。
-// 未知变量原样保留;无 %{...} 时零开销直接返回。
 export function applyFallbackVars(template: string, rawErr: string): string {
   if (!template.includes("%{")) {
     return template;
@@ -317,17 +352,17 @@ export function applyFallbackVars(template: string, rawErr: string): string {
     error_message: info?.message ?? "",
     request_id: info?.requestId ?? "",
   };
-  return template.replace(/%\{(\w+)\}/g, (match, name: string) =>
-    name in vars ? vars[name] : match,
-  );
+  return template.replace(/%\{(\w+)\}/g, (match, name: string) => {
+    const value = vars[name];
+    return value !== undefined ? value : match;
+  });
 }
 
 export function formatRawAssistantErrorForUi(raw?: string): string {
   const trimmed = (raw ?? "").trim();
   const fallback = userFacingFallbackText(trimmed);
   if (fallback !== null) {
-    // 该状态码已在 env.vars 配置兜底文案 → 用它;%{http_code} 等变量替换为真实值;
-    // 原始详情仍在 provider-http-error 日志可查。未配置的状态码不走这里,落到下方原始错误。
+    // 该状态码已在 env.vars 配置兜底文案 → 用它;未配置的状态码落到下方原始错误。
     return applyFallbackVars(fallback, trimmed);
   }
   if (!trimmed) {
@@ -344,8 +379,6 @@ export function formatRawAssistantErrorForUi(raw?: string): string {
 
   const leadingStatus = extractLeadingHttpStatus(trimmed);
   const isHtmlChallenge = isCloudflareOrHtmlErrorPage(trimmed);
-  // XCPH: 未在 env.vars 配置该状态码 → 不再用硬编码的英文/中文按类文案,直接落到下方
-  // 解析出的「HTTP <code> <type>: <provider 真实 message>」即原始错误信息。
   if (leadingStatus && isHtmlChallenge) {
     return `The AI service is temporarily unavailable (HTTP ${leadingStatus.code}). Please try again in a moment.`;
   }
@@ -358,11 +391,10 @@ export function formatRawAssistantErrorForUi(raw?: string): string {
     );
   }
 
-  const httpMatch = trimmed.match(HTTP_STATUS_PREFIX_RE);
+  const httpMatch = extractHttpStatusMatch(trimmed.match(HTTP_STATUS_PREFIX_RE));
   if (httpMatch) {
-    const rest = httpMatch[2].trim();
-    if (!rest.startsWith("{")) {
-      return `HTTP ${httpMatch[1]}: ${rest}`;
+    if (!httpMatch.rest.startsWith("{")) {
+      return `HTTP ${httpMatch.code}: ${httpMatch.rest}`;
     }
   }
 

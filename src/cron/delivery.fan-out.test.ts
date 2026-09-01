@@ -17,11 +17,11 @@ vi.mock("./isolated-agent/delivery-target.js", () => ({
   resolveDeliveryTarget: mocks.resolveDeliveryTarget,
 }));
 
-vi.mock("../config/sessions/store.js", () => ({
-  listSessionEntries: mocks.listSessionEntries,
+vi.mock("../config/sessions/session-accessor.js", () => ({
+  listSessionEntriesCore: mocks.listSessionEntries,
 }));
 
-vi.mock("../channels/plugins/registry-loaded-read.js", () => ({
+vi.mock("../channels/plugins/registry-loaded.js", () => ({
   getLoadedChannelPluginForRead: mocks.getLoadedChannelPluginForRead,
 }));
 
@@ -31,6 +31,8 @@ vi.mock("../runtime.js", () => ({
 
 vi.mock("../channels/message/runtime.js", () => ({
   sendDurableMessageBatch: mocks.sendDurableMessageBatch,
+  sendDurableMessageBatchCore: mocks.sendDurableMessageBatch,
+  durableMessageBatchMayHaveReachedRecipient: () => false,
 }));
 
 vi.mock("../infra/outbound/identity.js", () => ({
@@ -59,7 +61,14 @@ function announcePlan(channel: string, to: string): CronDeliveryPlan {
 function sessionEntry(channel: string, to: string, accountId?: string) {
   return {
     sessionKey: `k:${to}`,
-    entry: { lastChannel: channel, lastTo: to, lastAccountId: accountId },
+    entry: {
+      delivery: {
+        kind: "external" as const,
+        context: { channel, to, accountId },
+        origin: { provider: channel, to, accountId },
+        route: undefined,
+      },
+    },
   };
 }
 

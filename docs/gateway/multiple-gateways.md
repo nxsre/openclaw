@@ -91,14 +91,16 @@ Keep these unique per Gateway instance:
 | `gateway.port` (or `--port`) | Unique per instance                  |
 | Derived browser/CDP ports    | See below                            |
 
-Sharing any of these causes config races and port conflicts.
+Sharing any of these causes config, state, or port conflicts. Gateway startup
+enforces unique state-directory ownership even when
+`OPENCLAW_ALLOW_MULTI_GATEWAY=1` skips the per-config singleton.
 
 ## Port mapping (derived)
 
 Base port = `gateway.port` (or `OPENCLAW_GATEWAY_PORT` / `--port`).
 
 - Browser control service port = base + 2 (loopback only).
-- Canvas host is served on the Gateway HTTP server itself (same port as `gateway.port`).
+- Hosted widget documents and A2UI renderer assets are served on the Gateway HTTP server itself (same port as `gateway.port`).
 - Browser profile CDP ports auto-allocate from `browser control port + 9` through `+ 108`.
 
 Override any of these in config or env and you must keep them unique per instance.
