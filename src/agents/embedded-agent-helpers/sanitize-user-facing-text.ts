@@ -1,31 +1,44 @@
 /** Strips internal scaffolding from text before user-facing delivery. */
-import { stripPlainTextToolCallBlocks } from "../../../packages/tool-call-repair/src/index.js";
 import { CURRENT_MESSAGE_MARKER, HISTORY_CONTEXT_MARKER } from "../../auto-reply/reply/history.js";
-import { stripInboundMetadata } from "../../auto-reply/reply/strip-inbound-meta.js";
+import {
+  INBOUND_METADATA_MARKERS,
+  stripInboundMetadata,
+} from "../../auto-reply/reply/strip-inbound-meta.js";
 import {
   applyFallbackVars,
   userFacingFallbackText,
 } from "../../shared/assistant-error-format.js";
+import { isRateLimitErrorMessage } from "../failover/message-patterns.js";
 import { coerceChatContentText } from "../../shared/chat-content.js";
 import { escapeRegExp } from "../../shared/regexp.js";
 import {
-  stripAssistantInternalTraceLines,
+  assistantTraceTextFilter,
+  plainToolCallTextFilter,
   stripLegacyBracketToolCallBlocks,
   stripMinimaxToolCallXml,
   stripToolCallXmlTags,
 } from "../../shared/text/assistant-visible-text.js";
-import { findCodeRegions, isInsideCode } from "../../shared/text/code-regions.js";
+import {
+  findCodeRegions,
+  isInsideCode,
+  stripLinesOutsideCode,
+} from "../../shared/text/code-regions.js";
 import { stripFinalTags } from "../../shared/text/final-tags.js";
-import { isRateLimitErrorMessage } from "../failover/message-patterns.js";
+import {
+  applyTextFilters,
+  duplicateParagraphTextFilter,
+  leadingEmptyLinesTextFilter,
+  type TextFilter,
+} from "../../shared/text/text-projection.js";
 import { EXEC_NO_OUTPUT_PLACEHOLDER } from "../bash-tools.exec-output.js";
-import { stripInternalRuntimeContext } from "../internal-runtime-context.js";
+import {
+  INTERNAL_RUNTIME_CONTEXT_BEGIN,
+  INTERNAL_RUNTIME_CONTEXT_END,
+  OPENCLAW_RUNTIME_CONTEXT_NOTICE,
+  stripInternalRuntimeContext,
+} from "../internal-runtime-context.js";
 
 const TOOL_CALLS_OMITTED_PLACEHOLDER_LINE_RE = /^[ \t]*\[tool calls omitted\][ \t]*$/i;
-
-function stripFinalTagsFromText(text: unknown): string {
-  const normalized = coerceChatContentText(text);
-  return normalized ? stripFinalTags(normalized) : normalized;
-}
 
 function stripInternalPlaceholderLines(text: string): string {
   if (
@@ -34,26 +47,12 @@ function stripInternalPlaceholderLines(text: string): string {
   ) {
     return text;
   }
-  let protectedRegions: ReturnType<typeof findCodeRegions> | undefined;
-  let result = "";
-  let start = 0;
-  while (start < text.length) {
-    const newlineIndex = text.indexOf("\n", start);
-    const end = newlineIndex === -1 ? text.length : newlineIndex + 1;
-    const chunk = text.slice(start, end);
-    const line = chunk.endsWith("\n") ? chunk.slice(0, -1).replace(/\r$/, "") : chunk;
-    const isInternalPlaceholder =
+  return stripLinesOutsideCode(
+    text,
+    (line) =>
       TOOL_CALLS_OMITTED_PLACEHOLDER_LINE_RE.test(line) ||
-      line.trim() === EXEC_NO_OUTPUT_PLACEHOLDER;
-    if (
-      !isInternalPlaceholder ||
-      isInsideCode(start, (protectedRegions ??= findCodeRegions(text)))
-    ) {
-      result += chunk;
-    }
-    start = end;
-  }
-  return result;
+      line.trim() === EXEC_NO_OUTPUT_PLACEHOLDER,
+  );
 }
 
 const MARKDOWN_LINE_PREFIX =
@@ -228,26 +227,36 @@ export function createVerifiedConversationContextStreamFilter(
   };
 }
 
-function collapseConsecutiveDuplicateBlocks(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return text;
-  }
-  const blocks = trimmed.split(/\n{2,}/);
-  if (blocks.length < 2) {
-    return text;
-  }
-  const result: string[] = [];
-  let lastNormalized: string | null = null;
-  for (const block of blocks) {
-    const normalized = block.trim().replace(/\s+/g, " ");
-    if (lastNormalized && normalized === lastNormalized) {
-      continue;
-    }
-    result.push(block.trim());
-    lastNormalized = normalized;
-  }
-  return result.length === blocks.length ? text : result.join("\n\n");
+// Share descriptors only; createTextProjection owns each stream's mutable state.
+const userFacingFilters: Partial<Record<"normal" | "error", readonly TextFilter[]>> = {};
+
+export function userFacingTextFilters(errorContext = false): readonly TextFilter[] {
+  return (userFacingFilters[errorContext ? "error" : "normal"] ??= [
+    { transform: stripFinalTags, activationTokens: ["<"] },
+    {
+      transform: stripInternalRuntimeContext,
+      activationTokens: [
+        INTERNAL_RUNTIME_CONTEXT_BEGIN,
+        INTERNAL_RUNTIME_CONTEXT_END,
+        OPENCLAW_RUNTIME_CONTEXT_NOTICE,
+      ],
+    },
+    { transform: stripInboundMetadata, activationTokens: INBOUND_METADATA_MARKERS },
+    { transform: stripMinimaxToolCallXml, activationTokens: ["<"] },
+    {
+      transform: (text) => stripToolCallXmlTags(text, { stripFunctionCallsXmlPayloads: true }),
+      activationTokens: ["<"],
+    },
+    {
+      transform: stripInternalPlaceholderLines,
+      activationTokens: [EXEC_NO_OUTPUT_PLACEHOLDER, "[tool calls omitted]"],
+    },
+    ...(errorContext ? [assistantTraceTextFilter] : []),
+    { transform: stripLegacyBracketToolCallBlocks, activationTokens: ["["] },
+    plainToolCallTextFilter,
+    leadingEmptyLinesTextFilter,
+    duplicateParagraphTextFilter,
+  ]);
 }
 
 export function sanitizeUserFacingText(
@@ -267,26 +276,10 @@ export function sanitizeUserFacingText(
           opts?.streaming,
         )
       : raw;
-  const stripped = stripInboundMetadata(
-    stripInternalRuntimeContext(stripFinalTagsFromText(withoutConversationContext)),
+  const collapsed = applyTextFilters(
+    withoutConversationContext,
+    userFacingTextFilters(opts?.errorContext),
   );
-  const withoutToolCallXml = stripToolCallXmlTags(stripMinimaxToolCallXml(stripped), {
-    stripFunctionCallsXmlPayloads: true,
-  });
-  // Replay repair and empty exec output produce placeholders that never belong in visible replies.
-  const withoutPlaceholder = stripInternalPlaceholderLines(withoutToolCallXml);
-  const withoutInternalTraceLines = opts?.errorContext
-    ? stripAssistantInternalTraceLines(withoutPlaceholder)
-    : withoutPlaceholder;
-  const withoutToolCallBlocks = stripPlainTextToolCallBlocks(
-    stripLegacyBracketToolCallBlocks(withoutInternalTraceLines),
-    { resolveProtectedRanges: findCodeRegions },
-  );
-  if (!withoutToolCallBlocks.trim()) {
-    return "";
-  }
-  const withoutLeadingEmptyLines = withoutToolCallBlocks.replace(/^(?:[ \t]*\r?\n)+/, "");
-  const collapsed = collapseConsecutiveDuplicateBlocks(withoutLeadingEmptyLines);
   if (!opts?.errorContext) {
     return collapsed;
   }

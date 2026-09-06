@@ -142,6 +142,7 @@ test("sessions.preview reads only a bounded tail from a large transcript", async
   );
   const fullRead = vi.spyOn(sessionAccessor, "readSessionTranscriptMessageEvents");
   const tailRead = vi.spyOn(sessionHistoryEvents, "readRecentSessionTranscriptHistoryEvents");
+  const storeRead = vi.spyOn(sessionAccessor, "listSessionEntriesCore");
 
   try {
     const preview = await directSessionReq<{
@@ -156,6 +157,7 @@ test("sessions.preview reads only a bounded tail from a large transcript", async
       })),
     );
     expect(fullRead).not.toHaveBeenCalled();
+    expect(storeRead).not.toHaveBeenCalled();
     expect(tailRead).toHaveBeenCalledOnce();
     expect(tailRead.mock.results[0]).toMatchObject({
       type: "return",
@@ -164,6 +166,7 @@ test("sessions.preview reads only a bounded tail from a large transcript", async
   } finally {
     fullRead.mockRestore();
     tailRead.mockRestore();
+    storeRead.mockRestore();
   }
 });
 
@@ -382,6 +385,15 @@ test("sessions.resolve filters discovery selectors with sessions.list visibility
     { client },
   );
   expect(exactKey).toMatchObject({ ok: true, payload: { ok: true, key: hiddenOnlyKey } });
+
+  for (const key of [hiddenOnlyKey, "agent:main:hidden-only"]) {
+    const reference = await directSessionReq(
+      "sessions.resolve",
+      { reference: { key, slug: "hidden-only" }, agentId: "main", allowMissing: true },
+      { client },
+    );
+    expect(reference).toMatchObject({ ok: true, payload: { ok: false } });
+  }
 
   const ownerDraft = await directSessionReq<{ ok: true; key: string }>(
     "sessions.resolve",

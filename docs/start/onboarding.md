@@ -83,12 +83,38 @@ tool-capable model with at least 16K of measured effective context already
 loaded in a reachable LM Studio or Ollama server. Detection runs on the
 Gateway host, including when the macOS app connects to a Linux Gateway. The best
 option is tested with a real completion and only saved
-after it answers; when a test fails the app automatically tries the next option
-and shows why the previous one failed. If several options are found you can
+after it answers. If setup fails, the app shows the reason so you can retry or
+choose another connection. If several options are found you can
 switch between them before continuing. Automatic local discovery never pulls
 or downloads a model. Ollama checks `/api/ps` for loaded models; an eligible
 model that is only installed on disk requires explicit setup through
 **Choose connection** → **Local only**. See [Ollama](/providers/ollama).
+
+When a connection needs a runtime plugin, the app and dashboard show the
+staged package's source and capabilities, with integrity when available before installing or
+enabling it. Review the details, then explicitly confirm acceptance to continue.
+Declining or confirmed cancellation stops that attempt without selecting another
+inference route. When the Gateway confirms that the live AI test failed before
+saving the connection, the app shows the failure and lets you retry or choose a
+different connection. Runtime plugins installed for that attempt are kept.
+
+If the result is uncertain or settings may already have been saved, the app keeps
+replacement setup blocked while it checks the Gateway. **Check again** repeats
+that check without starting another activation; it does not discard the pending
+attempt or shorten its wait. If reconciliation still cannot confirm completion
+after the wait, the app returns to connection choices with the error visible
+instead of automatically retrying a detected credential. Retry that connection
+or choose another one to start a new activation.
+
+The macOS setup sheet shows the selected provider and current activity with a
+spinner while the Gateway works. Plugin installation does not estimate a
+completion percentage. Review prompts and input controls appear when an answer
+is needed; installation and the final live AI test stay in the same flow.
+
+After you choose **Cancel**, wait for confirmation. The Gateway may need to
+finish an operation that has already reached its commit point. If cancellation
+cannot be confirmed, the sheet says setup may still be running and lets you
+retry **Cancel**.
 
 To use a Claude subscription when the Gateway host has no Claude CLI login, run
 `claude setup-token` on any machine with Claude Code installed, then paste the

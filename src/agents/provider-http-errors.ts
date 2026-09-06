@@ -134,7 +134,7 @@ function readProviderResponseBytes(
   label: string,
   kind: string,
   opts?: ProviderResponseReadOptions,
-): Promise<Uint8Array> {
+): Promise<Buffer> {
   return readResponseWithLimit(response, opts?.maxBytes ?? PROVIDER_RESPONSE_MAX_BYTES, {
     ...opts,
     chunkTimeoutMs: opts?.chunkTimeoutMs ?? 30_000,
@@ -618,7 +618,7 @@ export async function readProviderBinaryResponse(
   label: string,
   kind = "binary",
   opts?: ProviderResponseReadOptions,
-): Promise<Uint8Array> {
+): Promise<Buffer> {
   try {
     assertProviderBinaryResponseContent(response, label, kind);
   } catch (error) {

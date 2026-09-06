@@ -23,6 +23,8 @@ export type CronFailureDestinationConfig = {
 
 export type CronConfig = {
   enabled?: boolean;
+  /** Skip missed recurring slots at startup; one-shot catch-up is unchanged. Default: false. */
+  skipMissedJobs?: boolean;
   triggers?: {
     enabled?: boolean;
   };

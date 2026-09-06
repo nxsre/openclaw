@@ -5,7 +5,7 @@
  * descriptions that match runtime validation.
  */
 import { Type } from "typebox";
-import { optionalStringEnum } from "./schema/typebox.js";
+import { executionTitleSchema, optionalStringEnum } from "./schema/typebox.js";
 
 const EXEC_TOOL_HOST_VALUES = ["auto", "sandbox", "gateway", "node"] as const;
 const PROCESS_TOOL_ACTIONS = [
@@ -23,6 +23,7 @@ const PROCESS_TOOL_ACTIONS = [
 
 /** Parameters accepted by the exec tool. */
 export const execSchema = Type.Object({
+  title: executionTitleSchema(),
   command: Type.String({ description: "Shell command." }),
   workdir: Type.Optional(
     Type.String({
@@ -58,15 +59,10 @@ export const execSchema = Type.Object({
   host: optionalStringEnum(EXEC_TOOL_HOST_VALUES, {
     description: "Omit/auto: inherit configured host.",
   }),
-  security: Type.Optional(
-    Type.String({
-      description: "Ignored per call; tools.exec.security and host approvals decide.",
-    }),
-  ),
   ask: Type.Optional(
     Type.String({
       description:
-        "Uses tools.exec.ask and host approvals; channel-origin calls cannot override host ask=off.",
+        "Requests stricter approvals under tools.exec.mode and host policy; channel-origin calls cannot override host ask=off.",
     }),
   ),
   node: Type.Optional(
@@ -81,6 +77,7 @@ export const execCompletionSchema = Type.Omit(execSchema, ["yieldMs", "backgroun
 
 /** Parameters exposed by node-only exec surfaces. */
 export const nodeExecSchema = Type.Object({
+  title: execSchema.properties.title,
   command: execSchema.properties.command,
   workdir: execSchema.properties.workdir,
   env: execSchema.properties.env,

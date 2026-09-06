@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { resolveTimestampMsToIsoString } from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
+import {
+  deferOpenClawAgentPostCommitPublication,
+  type OpenClawAgentDatabase,
+} from "../../state/openclaw-agent-db.js";
 import type {
   TranscriptMessageAppendOptions,
   TranscriptMessageAppendResult,
@@ -12,6 +15,7 @@ import {
   consumeSessionPendingInput,
   resolveSessionPendingInputAppend,
 } from "./session-accessor.sqlite-pending-inputs.js";
+import { readTranscriptIdentityByEventId } from "./session-accessor.sqlite-read.js";
 import type { ResolvedTranscriptScope } from "./session-accessor.sqlite-scope.js";
 import { readActiveTranscriptEntryAnchorInTransaction } from "./session-accessor.sqlite-transcript-anchor.js";
 import { resolveTranscriptMessageAppendParent } from "./session-accessor.sqlite-transcript-parent.js";
@@ -19,7 +23,6 @@ import {
   appendTranscriptEventInTransaction,
   ensureTranscriptHeader,
   readMessageIdempotencyKey,
-  readTranscriptIdentityByEventId,
   readTranscriptMessageByEventId,
   readTranscriptMessageByScopedIdempotencyKey,
   redactTranscriptMessageForStorage,
@@ -113,7 +116,7 @@ export function appendTranscriptMessageInTransaction<TMessage>(
     }
   }
 
-  if (pending?.alreadyPromoted) {
+  if (pending?.alreadyPromoted && !pending.commitRelocation) {
     const committed = readTranscriptMessageByEventId(database, resolved, pending.inputId);
     if (!committed) {
       throw new Error("Pending input custody ended before transcript promotion");
@@ -130,7 +133,8 @@ export function appendTranscriptMessageInTransaction<TMessage>(
     return undefined;
   }
 
-  const messageId = pending?.inputId ?? options.eventId ?? randomUUID();
+  const messageId =
+    pending && !pending.alreadyPromoted ? pending.inputId : (options.eventId ?? randomUUID());
   const now = options.now ?? Date.now();
   const finalMessage = pending ? prepared : serializeForStorage(prepared);
   ensureTranscriptHeader(database, resolved, options.cwd);
@@ -182,15 +186,27 @@ export function appendTranscriptMessageInTransaction<TMessage>(
   if (!appended) {
     throw new Error(`SQLite transcript append did not insert message ${messageId}.`);
   }
-  const anchor = readAnchor({ message: finalMessage, messageId });
+  // SAFETY: Receipt custody comes from this event's exact committed JSON after storage normalization.
+  const persistedMessage = (JSON.parse(appended) as typeof event).message;
+  const anchor = readAnchor({ message: persistedMessage, messageId });
   if (pending) {
-    consumeSessionPendingInput(database, pending);
+    if (pending.commitRelocation) {
+      if (
+        !deferOpenClawAgentPostCommitPublication(database, () =>
+          pending.commitRelocation?.(messageId),
+        )
+      ) {
+        throw new Error("Pending input relocation requires a transcript write transaction");
+      }
+    } else {
+      consumeSessionPendingInput(database, pending);
+    }
   }
   return {
     appended: true,
     ...(anchor ? { anchor } : {}),
     effectiveParentId: parentId ?? null,
-    message: finalMessage,
+    message: persistedMessage,
     messageId,
   };
 }

@@ -1,3 +1,4 @@
+import { isProviderRefusalAssistantError } from "@openclaw/llm-core/diagnostics";
 import { classifyFailoverSignal } from "../../agents/failover/classify.js";
 import { INCOMPLETE_ASSISTANT_STREAM_RE } from "../../agents/failover/message-patterns.js";
 import {
@@ -25,11 +26,17 @@ const REPLAY_UNSAFE_ASSISTANT_ERROR_CODES = new Set([
   PROVIDER_POST_DISPATCH_AMBIGUITY_ERROR_CODE,
 ]);
 
-/** True when replaying the failed assistant request could duplicate unknown provider output. */
-export function isReplayUnsafeAssistantError(
-  message: Pick<AssistantMessage, "errorCode"> | null | undefined,
+/**
+ * Preserve structured terminal outcomes before text classification.
+ * Replay could duplicate unknown output or override the provider's refusal.
+ */
+export function isTerminalAssistantError(
+  message: Pick<AssistantMessage, "diagnostics" | "errorCode"> | null | undefined,
 ): boolean {
-  return Boolean(message?.errorCode && REPLAY_UNSAFE_ASSISTANT_ERROR_CODES.has(message.errorCode));
+  return (
+    Boolean(message?.errorCode && REPLAY_UNSAFE_ASSISTANT_ERROR_CODES.has(message.errorCode)) ||
+    isProviderRefusalAssistantError(message)
+  );
 }
 
 /**
@@ -41,7 +48,7 @@ export function isRetryableAssistantError(message: AssistantMessage): boolean {
   if (
     message.stopReason !== "error" ||
     !message.errorMessage ||
-    isReplayUnsafeAssistantError(message)
+    isTerminalAssistantError(message)
   ) {
     return false;
   }

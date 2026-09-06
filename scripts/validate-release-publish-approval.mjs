@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Validates that a referenced release-publish workflow run is usable for approval.
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { verifyAndroidNativeCi } from "./android-native-ci.mjs";
 import {
+  runReleaseToolingGh,
   validateReleasePublishParentRun,
   verifyReleaseToolingIdentity,
 } from "./release-tooling-identity.mjs";
-
-const run = JSON.parse(fs.readFileSync(0, "utf8"));
 
 const releasePublishRunId = process.env.RELEASE_PUBLISH_RUN_ID ?? "";
 const expectedBranch = process.env.EXPECTED_WORKFLOW_BRANCH ?? "";
@@ -18,6 +19,8 @@ const expectedRunAttempt = process.env.EXPECTED_RUN_ATTEMPT ?? "";
 const expectedWorkflowFullRef = process.env.EXPECTED_WORKFLOW_FULL_REF ?? "";
 const expectedWorkflowSha = process.env.EXPECTED_WORKFLOW_SHA ?? "";
 const childWorkflowSha = process.env.CHILD_WORKFLOW_SHA ?? "";
+const run =
+  approvalKind === "android" && approvalPath ? null : JSON.parse(fs.readFileSync(0, "utf8"));
 
 function fail(message) {
   console.error(message);
@@ -56,7 +59,7 @@ if (approvalPath) {
   let mismatchMessage;
   if (approvalKind === "android") {
     expectedApproval = {
-      version: 2,
+      version: approval.version === 3 ? 3 : 2,
       repository: process.env.GITHUB_REPOSITORY,
       workflow: "OpenClaw Release Publish",
       parentRunId: releasePublishRunId,
@@ -66,6 +69,7 @@ if (approvalPath) {
       parentWorkflowSha: expectedWorkflowSha,
       releaseTag: process.env.RELEASE_TAG,
       targetSha: process.env.RELEASE_TARGET_SHA,
+      ...(approval.version === 3 ? { nativeCi: approval.nativeCi } : {}),
     };
     mismatchMessage = "Attested Android release approval does not match this run request.";
   } else if (approvalKind === "clawhub-bootstrap") {
@@ -95,8 +99,43 @@ if (approvalPath) {
     fail(mismatchMessage);
   }
   if (approvalKind === "android") {
-    // The attestation binds the receipt; the live tooling identity and REST
-    // parent bind its authority now, including after a parent rerun or tag move.
+    const tag = process.env.RELEASE_TAG;
+    const target = process.env.RELEASE_TARGET_SHA;
+    // Match the publisher's live direct/peeled tag contract; release tags may
+    // be signed annotated tags while protected tooling tags must be lightweight.
+    const refs = execFileSync(
+      "git",
+      ["ls-remote", "--tags", "origin", `refs/tags/${tag}`, `refs/tags/${tag}^{}`],
+      {
+        encoding: "utf8",
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024,
+      },
+    )
+      .trim()
+      .split("\n")
+      .map((line) => line.split(/\s+/u));
+    const targetSha =
+      refs.find(([, ref]) => ref === `refs/tags/${tag}^{}`)?.[0] ??
+      refs.find(([, ref]) => ref === `refs/tags/${tag}`)?.[0];
+    if (targetSha !== target) {
+      fail(`Release tag ${tag} no longer resolves to approved target ${target}.`);
+    }
+    const release = JSON.parse(
+      runReleaseToolingGh([
+        "release",
+        "view",
+        tag,
+        "--repo",
+        process.env.GITHUB_REPOSITORY,
+        "--json",
+        "tagName,isPrerelease,createdAt",
+      ]),
+    );
+    if (release.tagName !== tag || release.isPrerelease !== false) {
+      fail("Android publication requires the exact approved stable GitHub release.");
+    }
+    const buildTimestamp = new Date(release.createdAt).toISOString().replace(/\.000Z$/u, "Z");
     const identity = verifyReleaseToolingIdentity({
       allowPrevalidatedRef: /^release\/[0-9]{4}\.(?:[1-9]|1[0-2])\.[1-9][0-9]*$/u.test(
         expectedBranch,
@@ -106,6 +145,19 @@ if (approvalPath) {
       workflowRef: expectedBranch,
       workflowSha: expectedWorkflowSha,
     });
+    // Native qualification and parent authority must survive child queue/build
+    // time and every preceding target, tooling, and release-asset lookup.
+    verifyAndroidNativeCi(approval);
+    const currentRun = JSON.parse(
+      runReleaseToolingGh([
+        "api",
+        `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${releasePublishRunId}`,
+        "--method",
+        "GET",
+      ]),
+    );
+    // Apps may attach after npm and GitHub publication complete. Keep the exact
+    // approval binding valid for a successful parent without requiring it to wait.
     validateReleasePublishParentRun({
       identity,
       releasePublishFullRef: expectedWorkflowFullRef,
@@ -114,11 +166,9 @@ if (approvalPath) {
       releasePublishRunAttempt: expectedRunAttempt,
       releasePublishRunId,
       repository: process.env.GITHUB_REPOSITORY,
-      run,
+      run: currentRun,
     });
-    console.log(
-      `Using attested Android release approval run ${releasePublishRunId}: ${run.html_url}`,
-    );
+    process.stdout.write(`${buildTimestamp}\n`);
     process.exit(0);
   }
 }

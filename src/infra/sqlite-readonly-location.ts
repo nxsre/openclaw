@@ -8,6 +8,7 @@ import {
   requireNodeSqlite,
   resolveSqliteFilesystemPath,
 } from "./node-sqlite.js";
+import { runtimeProcessEntrypoints } from "./runtime-process-entrypoints.js";
 import { resolveRuntimeWorkerArgv, resolveRuntimeWorkerUrl } from "./runtime-worker-url.js";
 import {
   createPrivateSqliteTempDirectory,
@@ -348,7 +349,7 @@ function recoverPrivateRollbackCopy(snapshotPath: string): void {
 
 function createStableReadOnlyCopyInTempDirectory(
   pathname: string,
-  journalMode: Exclude<SourceJournalMode, "unknown">,
+  journalMode: SourceJournalMode,
   existingTempDir?: string,
 ): PreparedSqliteReadOnlyLocation {
   let tempDir = existingTempDir;
@@ -570,13 +571,9 @@ export function prepareSqliteReadOnlyLocationSyncInProcess(
       lastChange = error;
       continue;
     }
-    if (journalMode === "unknown") {
-      lastChange = new SqliteSourceChangedError(
-        `SQLite journal mode is unavailable while copying: ${canonicalPath}`,
-      );
-      continue;
-    }
     try {
+      // Stable malformed bytes still belong to SQLite's diagnostic path. The
+      // private copy checks bytes, sidecars, and mode before a reader opens it.
       return createStableReadOnlyCopyInTempDirectory(canonicalPath, journalMode);
     } catch (error) {
       if (!(error instanceof SqliteSourceChangedError)) {
@@ -587,14 +584,6 @@ export function prepareSqliteReadOnlyLocationSyncInProcess(
   }
   throw new Error(`SQLite source did not stabilize for read-only inspection: ${canonicalPath}`, {
     cause: lastChange,
-  });
-}
-
-function resolveSqliteReadOnlyWorkerUrl(): URL {
-  return resolveRuntimeWorkerUrl({
-    currentModuleUrl: import.meta.url,
-    sourceWorkerName: "sqlite-readonly-location.worker",
-    distWorkerPath: "infra/sqlite-readonly-location.worker.js",
   });
 }
 
@@ -663,7 +652,7 @@ function adoptSqliteReadOnlyWorkerResult(params: {
 export async function prepareSqliteReadOnlyLocation(
   pathname: string,
 ): Promise<PreparedSqliteReadOnlyLocation> {
-  const workerUrl = resolveSqliteReadOnlyWorkerUrl();
+  const workerUrl = resolveRuntimeWorkerUrl(runtimeProcessEntrypoints.sqliteReadOnly);
   return await new Promise((resolve, reject) => {
     execFile(
       process.execPath,
@@ -689,7 +678,7 @@ export async function prepareSqliteReadOnlyLocation(
 export function prepareSqliteReadOnlyLocationSync(
   pathname: string,
 ): PreparedSqliteReadOnlyLocation {
-  const workerUrl = resolveSqliteReadOnlyWorkerUrl();
+  const workerUrl = resolveRuntimeWorkerUrl(runtimeProcessEntrypoints.sqliteReadOnly);
   const result = spawnSync(
     process.execPath,
     [

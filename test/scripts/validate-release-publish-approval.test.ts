@@ -78,6 +78,8 @@ function runAndroidApproval({
   attestationExitCode = 0,
   release = {},
   targetSha = "a".repeat(40),
+  nativeCi,
+  publication,
 }: {
   ref?: string;
   approval?: Record<string, unknown>;
@@ -87,8 +89,27 @@ function runAndroidApproval({
   attestationExitCode?: number;
   release?: Record<string, unknown>;
   targetSha?: string;
+  nativeCi?: Record<string, unknown>;
+  publication?: {
+    afterAdmission?: Record<string, unknown>;
+    afterFirstUpload?: Record<string, unknown>;
+    afterToolingRead?: Record<string, unknown>;
+    nativeCiAfterAdmission?: Record<string, unknown>;
+    nativeCiAfterAssetLookup?: Record<string, unknown>;
+    nativeCiAfterFirstUpload?: Record<string, unknown>;
+    nativeCiAfterToolingRead?: Record<string, unknown>;
+    beforeProvenance?: boolean;
+    targetSha?: string;
+    release?: Record<string, unknown>;
+  };
 } = {}) {
   const tempRoot = tempRoots.make("openclaw-android-approval-");
+  fs.mkdirSync(path.join(tempRoot, ".release-harness"));
+  fs.symlinkSync(
+    path.join(process.cwd(), "scripts"),
+    path.join(tempRoot, ".release-harness/scripts"),
+    "dir",
+  );
   const fullRef = `${ref.startsWith("release-publish/") ? "refs/tags" : "refs/heads"}/${ref}`;
   const approvalPath = path.join(tempRoot, "android-release-approval/approval.json");
   const env = {
@@ -109,10 +130,139 @@ function runAndroidApproval({
     RELEASE_TAG: "v2026.8.1",
     RELEASE_TARGET_SHA: "a".repeat(40),
     TARGET_SHA: "a".repeat(40),
+    RELEASE_COVERAGE_POLICY: nativeCi ? "npm-stable-v1" : "full",
+    NATIVE_CI_RUN_ID: nativeCi ? "91" : "",
+    NATIVE_CI_WORKFLOW_REF: nativeCi ? ANDROID_PROTECTED_REF : "",
     GITHUB_REF: "refs/tags/v2026.8.1",
     GITHUB_REPOSITORY: "openclaw/openclaw",
     RUNNER_TEMP: tempRoot,
+    GITHUB_OUTPUT: path.join(tempRoot, "output"),
   };
+  const parent = {
+    id: 123,
+    repository: { full_name: "openclaw/openclaw" },
+    event: "workflow_dispatch",
+    head_branch: ref,
+    head_sha: ANDROID_TOOLING_SHA,
+    run_attempt: 2,
+    path: `.github/workflows/openclaw-release-publish.yml@${fullRef}`,
+    status: "in_progress",
+    conclusion: null,
+    html_url: "https://github.com/openclaw/openclaw/actions/runs/123",
+    ...run,
+  };
+  const tooling =
+    identity ??
+    (ref === "main"
+      ? { status: "ahead" }
+      : {
+          ref: fullRef,
+          object: { type: "commit", sha: ANDROID_TOOLING_SHA },
+        });
+  const identityEndpoint =
+    ref === "main"
+      ? `compare/${ANDROID_TOOLING_SHA}...main`
+      : `git/ref/${ref.startsWith("release-publish/") ? "tags" : "heads"}/${ref}`;
+  const parentPath = path.join(tempRoot, "parent.json");
+  const nativeCiPath = path.join(tempRoot, "native-ci.json");
+  const targetPath = path.join(tempRoot, "target.json");
+  const effectsPath = path.join(tempRoot, "uploads.json");
+  fs.writeFileSync(parentPath, JSON.stringify(parent));
+  const nativeRun = {
+    id: 91,
+    run_attempt: 1,
+    event: "workflow_dispatch",
+    path: ".github/workflows/ci.yml",
+    display_title: `CI release-native-android-123-2-${"a".repeat(40)}`,
+    head_branch: ANDROID_PROTECTED_REF,
+    head_sha: ANDROID_TOOLING_SHA,
+    repository: { full_name: "openclaw/openclaw" },
+    actor: { login: "github-actions[bot]" },
+    triggering_actor: { login: "github-actions[bot]" },
+    status: "completed",
+    conclusion: "success",
+  };
+  fs.writeFileSync(nativeCiPath, JSON.stringify(nativeRun));
+  fs.writeFileSync(
+    targetPath,
+    JSON.stringify({
+      sha: targetSha,
+      release: {
+        tagName: "v2026.8.1",
+        isDraft: true,
+        isPrerelease: false,
+        createdAt: "2026-08-30T12:00:00Z",
+        assets: [],
+        ...release,
+      },
+    }),
+  );
+  fs.writeFileSync(effectsPath, "[]");
+  const attestationArgsPath = path.join(tempRoot, "attestation-args.json");
+  fs.writeFileSync(
+    path.join(tempRoot, "gh"),
+    `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "attestation" && args[1] === "verify") {
+  fs.writeFileSync(${JSON.stringify(attestationArgsPath)}, JSON.stringify(args));
+  process.exit(${attestationExitCode});
+}
+if (args[0] === "release" && args[1] === "view") {
+  if (args.includes("assets") && ${JSON.stringify(Boolean(publication?.nativeCiAfterAssetLookup))} && fs.existsSync(${JSON.stringify(path.join(tempRoot, "publishing"))})) {
+    fs.writeFileSync(${JSON.stringify(nativeCiPath)}, ${JSON.stringify(JSON.stringify({ ...nativeRun, ...publication?.nativeCiAfterAssetLookup }))});
+  }
+  process.stdout.write(JSON.stringify(JSON.parse(fs.readFileSync(${JSON.stringify(targetPath)}, "utf8")).release));
+  process.exit(0);
+}
+if (args[0] === "release" && args[1] === "upload") {
+  const effects = JSON.parse(fs.readFileSync(${JSON.stringify(effectsPath)}, "utf8"));
+  effects.push(args[3]);
+  fs.writeFileSync(${JSON.stringify(effectsPath)}, JSON.stringify(effects));
+  if (effects.length === 1 && ${JSON.stringify(Boolean(publication?.afterFirstUpload))}) {
+    fs.writeFileSync(${JSON.stringify(parentPath)}, ${JSON.stringify(JSON.stringify({ ...parent, ...publication?.afterFirstUpload }))});
+  }
+  if (effects.length === 1 && ${JSON.stringify(Boolean(publication?.nativeCiAfterFirstUpload))}) {
+    fs.writeFileSync(${JSON.stringify(nativeCiPath)}, ${JSON.stringify(JSON.stringify({ ...nativeRun, ...publication?.nativeCiAfterFirstUpload }))});
+  }
+  process.exit(0);
+}
+if (args[0] === "api" && args[1] === "repos/openclaw/openclaw/actions/runs/123") {
+  process.stdout.write(fs.readFileSync(${JSON.stringify(parentPath)}, "utf8"));
+  process.exit(0);
+}
+if (args[0] === "api" && args[1] === "repos/openclaw/openclaw/actions/runs/91") {
+  process.stdout.write(fs.readFileSync(${JSON.stringify(nativeCiPath)}, "utf8"));
+  process.exit(0);
+}
+const responses = ${JSON.stringify({
+      [`repos/openclaw/openclaw/${identityEndpoint}`]: tooling,
+    })};
+if (args[0] !== "api" || !responses[args[1]]) process.exit(91);
+if (${JSON.stringify(Boolean(publication?.afterToolingRead))} && fs.existsSync(${JSON.stringify(path.join(tempRoot, "publishing"))})) {
+  fs.writeFileSync(${JSON.stringify(parentPath)}, ${JSON.stringify(JSON.stringify({ ...parent, ...publication?.afterToolingRead }))});
+}
+if (${JSON.stringify(Boolean(publication?.nativeCiAfterToolingRead))} && fs.existsSync(${JSON.stringify(path.join(tempRoot, "publishing"))})) {
+  fs.writeFileSync(${JSON.stringify(nativeCiPath)}, ${JSON.stringify(JSON.stringify({ ...nativeRun, ...publication?.nativeCiAfterToolingRead }))});
+}
+process.stdout.write(JSON.stringify(responses[args[1]]));
+`,
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(
+    path.join(tempRoot, "git"),
+    `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const target = JSON.parse(fs.readFileSync(${JSON.stringify(targetPath)}, "utf8"));
+if (JSON.stringify(args) === JSON.stringify(["rev-parse", "v2026.8.1^{commit}"])) {
+  process.stdout.write(target.sha);
+} else if (JSON.stringify(args) === JSON.stringify(["ls-remote", "--tags", "origin", "refs/tags/v2026.8.1", "refs/tags/v2026.8.1^{}"])) {
+  process.stdout.write(${JSON.stringify("e".repeat(40) + "\trefs/tags/v2026.8.1\n")} + target.sha + ${JSON.stringify("\trefs/tags/v2026.8.1^{}\n")});
+} else process.exit(91);
+`,
+    { mode: 0o755 },
+  );
   const producer = spawnSync(
     "bash",
     [
@@ -122,25 +272,20 @@ function runAndroidApproval({
         "Write Android release approval",
       ),
     ],
-    { encoding: "utf8", env },
+    { cwd: tempRoot, encoding: "utf8", env },
   );
   expect(producer.status, producer.stderr).toBe(0);
-  const dispatchFunction = workflowStep(
-    ".github/workflows/openclaw-release-publish.yml",
-    "Dispatch publish workflows",
-  ).match(/^promote_android_release_asset\(\) \{[\s\S]*?^\}/m)?.[0];
-  expect(dispatchFunction).toBeDefined();
   const dispatch = spawnSync(
     "bash",
     [
       "-c",
       `
 set -euo pipefail
+source scripts/lib/release-publish-children.sh
 is_android_release() { return 0; }
 verify_android_release_asset_contract() { return 1; }
 dispatch_workflow_at_ref() { printf '%s\n' "$@" > "$RUNNER_TEMP/dispatch-args"; echo 456; }
 wait_for_run() { touch "$RUNNER_TEMP/android-waited"; return 0; }
-${dispatchFunction}
 promote_android_release_asset
 `,
     ],
@@ -186,85 +331,53 @@ promote_android_release_asset
       ...approval,
     }),
   );
-  const parent = {
-    id: 123,
-    repository: { full_name: "openclaw/openclaw" },
-    event: "workflow_dispatch",
-    head_branch: ref,
-    head_sha: ANDROID_TOOLING_SHA,
-    run_attempt: 2,
-    path: `.github/workflows/openclaw-release-publish.yml@${fullRef}`,
-    status: "in_progress",
-    conclusion: null,
-    html_url: "https://github.com/openclaw/openclaw/actions/runs/123",
-    ...run,
-  };
-  const tooling =
-    identity ??
-    (ref === "main"
-      ? { status: "ahead" }
-      : {
-          ref: fullRef,
-          object: { type: "commit", sha: ANDROID_TOOLING_SHA },
-        });
-  const identityEndpoint =
-    ref === "main"
-      ? `compare/${ANDROID_TOOLING_SHA}...main`
-      : `git/ref/${ref.startsWith("release-publish/") ? "tags" : "heads"}/${ref}`;
-  const attestationArgsPath = path.join(tempRoot, "attestation-args.json");
-  fs.writeFileSync(
-    path.join(tempRoot, "gh"),
-    `#!${process.execPath}
-const fs = require("node:fs");
-const args = process.argv.slice(2);
-if (args[0] === "attestation" && args[1] === "verify") {
-  fs.writeFileSync(${JSON.stringify(attestationArgsPath)}, JSON.stringify(args));
-  process.exit(${attestationExitCode});
-}
-if (args[0] === "release" && args[1] === "view") {
-  process.stdout.write(${JSON.stringify(
-    JSON.stringify({
-      tagName: "v2026.8.1",
-      isDraft: true,
-      isPrerelease: false,
-      ...release,
-    }),
-  )});
-  process.exit(0);
-}
-const responses = ${JSON.stringify({
-      "repos/openclaw/openclaw/actions/runs/123": parent,
-      [`repos/openclaw/openclaw/${identityEndpoint}`]: tooling,
-    })};
-if (args[0] !== "api" || !responses[args[1]]) process.exit(91);
-process.stdout.write(JSON.stringify(responses[args[1]]));
-`,
-    { mode: 0o755 },
-  );
-  fs.writeFileSync(
-    path.join(tempRoot, "git"),
-    `#!${process.execPath}
-if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(["rev-parse", "v2026.8.1^{commit}"])) process.exit(91);
-process.stdout.write(${JSON.stringify(targetSha)});
-`,
-    { mode: 0o755 },
-  );
+  fs.writeFileSync(nativeCiPath, JSON.stringify({ ...nativeRun, ...nativeCi }));
   // Execute the real producer and consumer handoff, stopping before release
   // mutation/build checks. Only GitHub's external boundary is substituted.
   const admission = workflowStep(
     ".github/workflows/android-release.yml",
     "Validate release approval and target",
   );
-  const targetBoundary = admission.indexOf("release_created_at=");
-  if (targetBoundary < 0) {
-    throw new Error("Missing Android build timestamp boundary");
+  let result = spawnSync("bash", ["-c", admission], { encoding: "utf8", env });
+  if (publication) {
+    expect(result.status, result.stderr).toBe(0);
+    fs.writeFileSync(parentPath, JSON.stringify({ ...parent, ...publication.afterAdmission }));
+    fs.writeFileSync(
+      nativeCiPath,
+      JSON.stringify({ ...nativeRun, ...publication.nativeCiAfterAdmission }),
+    );
+    const target = JSON.parse(fs.readFileSync(targetPath, "utf8"));
+    fs.writeFileSync(
+      targetPath,
+      JSON.stringify({
+        sha: publication.targetSha ?? target.sha,
+        release: { ...target.release, ...publication.release },
+      }),
+    );
+    fs.writeFileSync(path.join(tempRoot, "publishing"), "");
+    fs.symlinkSync(path.join(process.cwd(), "scripts"), path.join(tempRoot, "scripts"), "dir");
+    fs.mkdirSync(path.join(tempRoot, "dist"));
+    for (const name of ["OpenClaw-Android.apk", "OpenClaw-Android-SHA256SUMS.txt"]) {
+      fs.writeFileSync(path.join(tempRoot, "dist", name), "fixture");
+    }
+    result = spawnSync(
+      "bash",
+      [
+        "-c",
+        workflowStep(
+          ".github/workflows/android-release.yml",
+          publication.beforeProvenance
+            ? "Revalidate release approval before Android provenance"
+            : "Upload immutable Android release assets",
+        ),
+      ],
+      { cwd: tempRoot, encoding: "utf8", env },
+    );
   }
-  const result = spawnSync("bash", ["-c", admission.slice(0, targetBoundary)], {
-    encoding: "utf8",
-    env,
-  });
   return {
     ...result,
+    buildOutput: fs.existsSync(env.GITHUB_OUTPUT) ? fs.readFileSync(env.GITHUB_OUTPUT, "utf8") : "",
+    uploads: JSON.parse(fs.readFileSync(effectsPath, "utf8")),
     waitedForAndroid: fs.existsSync(path.join(tempRoot, "android-waited")),
     attestationArgs: JSON.parse(fs.readFileSync(attestationArgsPath, "utf8")),
   };
@@ -387,7 +500,7 @@ describe("scripts/validate-release-publish-approval.mjs", () => {
     (ref) => {
       const result = runAndroidApproval({ ref });
       expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain("Using attested Android release approval run 123");
+      expect(result.buildOutput).toBe("build_timestamp=2026-08-30T12:00:00Z\n");
       expect(result.waitedForAndroid).toBe(false);
       expect(result.attestationArgs).toEqual([
         "attestation",
@@ -420,13 +533,169 @@ describe("scripts/validate-release-publish-approval.mjs", () => {
   });
 
   androidIt.each([
-    ["another tag", { tagName: "v2026.8.2" }, "a".repeat(40), "GitHub release tag does not match"],
-    ["a prerelease", { isPrerelease: true }, "a".repeat(40), "requires a stable GitHub release"],
-    ["a moved release tag", {}, "b".repeat(40), "does not match v2026.8.1"],
+    [
+      "another tag",
+      { tagName: "v2026.8.2" },
+      "a".repeat(40),
+      "exact approved stable GitHub release",
+    ],
+    [
+      "a prerelease",
+      { isPrerelease: true },
+      "a".repeat(40),
+      "exact approved stable GitHub release",
+    ],
+    ["a moved release tag", {}, "b".repeat(40), "no longer resolves to approved target"],
   ])("rejects publication to %s", (_name, release, targetSha, message) => {
     const result = runAndroidApproval({ release, targetSha });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(message);
+  });
+
+  androidIt.each([
+    ["failed", { status: "completed", conclusion: "failure" }],
+    ["cancelled", { status: "completed", conclusion: "cancelled" }],
+    ["rerun", { run_attempt: 3 }],
+  ])("fences asset publication after the parent becomes %s", (_name, parent) => {
+    for (const phase of ["afterAdmission", "afterFirstUpload"] as const) {
+      const result = runAndroidApproval({ publication: { [phase]: parent } });
+      expect(result.status).toBe(1);
+      expect(result.uploads).toHaveLength(phase === "afterAdmission" ? 0 : 1);
+    }
+  });
+
+  androidIt("rechecks the parent after live tooling reads at the upload boundary", () => {
+    const result = runAndroidApproval({
+      publication: { afterToolingRead: { status: "completed", conclusion: "failure" } },
+    });
+    expect(result.status).toBe(1);
+    expect(result.uploads).toEqual([]);
+  });
+
+  androidIt("fences native qualification reruns after the final asset lookup", () => {
+    const result = runAndroidApproval({
+      nativeCi: {},
+      publication: {
+        nativeCiAfterAssetLookup: { run_attempt: 2, status: "queued", conclusion: null },
+      },
+    });
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.uploads).toEqual([]);
+  });
+
+  androidIt.each([
+    ["failed", { status: "completed", conclusion: "failure" }],
+    ["cancelled", { status: "completed", conclusion: "cancelled" }],
+    ["rerun", { run_attempt: 2 }],
+  ])("fences asset publication after native qualification becomes %s", (_name, nativeCi) => {
+    for (const phase of [
+      "nativeCiAfterAdmission",
+      "nativeCiAfterToolingRead",
+      "nativeCiAfterFirstUpload",
+    ] as const) {
+      const result = runAndroidApproval({ nativeCi: {}, publication: { [phase]: nativeCi } });
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.uploads).toHaveLength(phase === "nativeCiAfterFirstUpload" ? 1 : 0);
+    }
+  });
+
+  androidIt("rechecks native qualification before Android provenance", () => {
+    const result = runAndroidApproval({
+      nativeCi: {},
+      publication: {
+        beforeProvenance: true,
+        nativeCiAfterAdmission: { run_attempt: 2 },
+      },
+    });
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.uploads).toEqual([]);
+  });
+
+  androidIt.each(["in_progress", "completed"])(
+    "publishes qualified Android assets after GitHub finalization with parent %s",
+    (status) => {
+      const result = runAndroidApproval({
+        nativeCi: {},
+        run: { status, conclusion: status === "completed" ? "success" : null },
+        release: { isDraft: false },
+        publication: {},
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.uploads).toEqual([
+        "dist/OpenClaw-Android.apk#OpenClaw-Android.apk",
+        "dist/OpenClaw-Android-SHA256SUMS.txt#OpenClaw-Android-SHA256SUMS.txt",
+      ]);
+      expect(result.waitedForAndroid).toBe(false);
+    },
+  );
+
+  androidIt.each([
+    ["run ID", { id: 92 }],
+    ["attempt", { run_attempt: 2 }],
+    ["workflow", { path: ".github/workflows/other.yml" }],
+    ["tooling", { head_sha: "e".repeat(40) }],
+    ["ref", { head_branch: "main" }],
+    ["source", { display_title: `CI release-native-android-123-2-${"b".repeat(40)}` }],
+    ["parent attempt", { display_title: `CI release-native-android-123-1-${"a".repeat(40)}` }],
+    ["repository", { repository: { full_name: "other/repository" } }],
+    ["actor", { actor: { login: "other" } }],
+  ])("rejects another native qualification %s", (_name, nativeCi) => {
+    const result = runAndroidApproval({ nativeCi });
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.uploads).toEqual([]);
+  });
+
+  androidIt.each([
+    { runId: "0", runAttempt: 1, workflowRef: ANDROID_PROTECTED_REF },
+    { runId: 91, runAttempt: 1, workflowRef: ANDROID_PROTECTED_REF },
+    { runId: "91", runAttempt: 2, workflowRef: ANDROID_PROTECTED_REF },
+    { runId: "91", runAttempt: 1, workflowRef: "" },
+    { runId: "91", runAttempt: 1, workflowRef: ANDROID_PROTECTED_REF, extra: true },
+  ])("rejects a malformed attested native qualification tuple: %j", (nativeCi) => {
+    const result = runAndroidApproval({ nativeCi: {}, approval: { nativeCi } });
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stderr).toContain("exact native CI qualification tuple");
+    expect(result.uploads).toEqual([]);
+  });
+
+  androidIt.each([
+    ["success", 0],
+    ["failure", 1],
+  ])("rechecks %s parent authority immediately before provenance", (conclusion, expectedStatus) => {
+    const workflow = parse(fs.readFileSync(".github/workflows/android-release.yml", "utf8"));
+    const steps = workflow.jobs.publish_signed_android_apk.steps;
+    const provenanceIndex = steps.findIndex(
+      (step: { name: string }) => step.name === "Attest Android APK provenance",
+    );
+    expect(steps[provenanceIndex - 1].name).toBe(
+      "Revalidate release approval before Android provenance",
+    );
+    const result = runAndroidApproval({
+      publication: { beforeProvenance: true, afterAdmission: { status: "completed", conclusion } },
+    });
+    expect(result.status, result.stderr).toBe(expectedStatus);
+    expect(result.uploads).toEqual([]);
+  });
+
+  androidIt.each([
+    ["successful completion", false, { status: "completed", conclusion: "success" }],
+    ["explicit failed-parent recovery", true, { status: "completed", conclusion: "failure" }],
+  ])("publishes both assets for %s", (_name, recovery, parent) => {
+    const result = runAndroidApproval({ recovery, publication: { afterAdmission: parent } });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.uploads).toEqual([
+      "dist/OpenClaw-Android.apk#OpenClaw-Android.apk",
+      "dist/OpenClaw-Android-SHA256SUMS.txt#OpenClaw-Android-SHA256SUMS.txt",
+    ]);
+  });
+
+  androidIt.each([
+    ["moved target", { targetSha: "b".repeat(40) }],
+    ["prerelease target", { release: { isPrerelease: true } }],
+  ])("fences asset publication after the release becomes a %s", (_name, publication) => {
+    const result = runAndroidApproval({ publication });
+    expect(result.status).toBe(1);
+    expect(result.uploads).toEqual([]);
   });
 
   androidIt("rejects an Android handoff whose attestation fails", () => {

@@ -1,6 +1,6 @@
 // Provider operation retry helpers run retryable provider operations with backoff.
 import { sleepWithAbort } from "../infra/backoff.js";
-import { formatErrorMessage } from "../infra/errors.js";
+import { formatErrorMessage, readErrorCause } from "../infra/errors.js";
 import { hasRetryableConnectionErrorCode } from "../infra/retryable-network-errors.js";
 import { redactSensitiveText } from "../logging/redact.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -107,13 +107,6 @@ function readErrorCode(error: unknown): string | undefined {
   }
   const code = (error as { code?: unknown }).code;
   return typeof code === "string" ? code : undefined;
-}
-
-function readErrorCause(error: unknown): unknown {
-  if (typeof error !== "object" || error === null) {
-    return undefined;
-  }
-  return (error as { cause?: unknown }).cause;
 }
 
 // Provider reads get one bounded retry for negative DNS responses. Gateway

@@ -9,6 +9,7 @@ import {
   readChatOutboxRecovery,
   restoreChatOutboxRecovery,
 } from "../../lib/chat/outbox-recovery.ts";
+import { listStoredChatOutboxes } from "../../lib/chat/outbox-store-projection.ts";
 import {
   readStoredOutboxStore,
   storageTargetForGateway,
@@ -18,7 +19,6 @@ import {
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { getChatAttachmentDataUrl } from "./attachment-payload-store.ts";
 import { makeChatHost } from "./chat-host.test-support.ts";
-import { listStoredChatOutboxes } from "./composer-persistence.ts";
 import { installOutboxBrowserStorage } from "./outbox-browser.test-support.ts";
 import { prepareOutboxPayload } from "./outbox-payloads.ts";
 
@@ -59,7 +59,7 @@ async function prepare(host: ReturnType<typeof hostFor>, id: string, sessionKey 
   if (result.status !== "ready") {
     throw new Error("Expected complete stored payload");
   }
-  const { attachmentStorageError: _, ...stored } = result.item;
+  const { attachmentStorageError: _, ...stored } = { ...item, ...result.update };
   return {
     ...stored,
     attachments: item.attachments?.map(({ id: attachmentId, mimeType, fileName, sizeBytes }) => ({
@@ -90,7 +90,7 @@ async function expectBytes(host: ReturnType<typeof hostFor>, item: ChatQueueItem
   const result = await prepareOutboxPayload(host, item, "handoff");
   expect(result.status).toBe("ready");
   expect(
-    result.status === "ready" ? result.item.attachments?.map(getChatAttachmentDataUrl) : [],
+    result.status === "ready" ? result.update.attachments?.map(getChatAttachmentDataUrl) : [],
   ).toEqual([dataUrl]);
 }
 
@@ -104,6 +104,24 @@ afterEach(() => {
 });
 
 describe("Blob-preserving metadata migration", () => {
+  it("stores attachment payloads without secure-context-only browser APIs", async () => {
+    vi.stubGlobal("crypto", {
+      getRandomValues: <T extends Exclude<BufferSource, ArrayBuffer>>(array: T): T => {
+        new Uint8Array(array.buffer, array.byteOffset, array.byteLength).fill(7);
+        return array;
+      },
+    });
+    Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+
+    const host = hostFor();
+    const item = await prepare(host, "insecure-http");
+
+    await expectBytes(host, item);
+    expect(sessionStorage.getItem("openclaw.control.outboxTab.v1")).toBe(
+      "07070707-0707-4707-8707-070707070707",
+    );
+  });
+
   it("does not settle payload preparation under a pending connected recovery owner", async () => {
     const host = hostFor();
     const original = await prepare(host, "pending-owner");

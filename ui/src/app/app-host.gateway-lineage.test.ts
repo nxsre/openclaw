@@ -1,6 +1,5 @@
-/* @vitest-environment jsdom */
-
 import { render } from "lit";
+/* @vitest-environment jsdom */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   GatewayBrowserClient,
@@ -8,8 +7,14 @@ import type {
   GatewayHelloOk,
 } from "../api/gateway.ts";
 import type { AgentsListResult } from "../api/types.ts";
-import { createSessionCapability } from "../lib/sessions/index.ts";
-import { sessionsResult } from "../lib/sessions/session-capability.test-support.ts";
+// These direct-render fixtures exercise Gateway lineage without the app lifecycle.
+// Browser tests cover deferred login loading and recovery.
+import "../components/login-gate.ts";
+import { captureChatOutboxAdmission } from "../lib/chat/outbox-store.ts";
+import {
+  createTestSessionCapability,
+  sessionsResult,
+} from "../lib/sessions/session-capability.test-support.ts";
 import {
   createComposerProps,
   resetComposerFixture,
@@ -160,7 +165,7 @@ describe("Control UI Gateway target lineage", () => {
       clients[0]!.recoveryScope = "synthetic-recovery-a";
       clients[0]!.recoveryScopeReady = true;
       clients[0]!.opts.onRecoveryScopeChange?.();
-      const sessions = createSessionCapability(gateway);
+      const sessions = createTestSessionCapability(gateway);
       const { pane, state } = createTestChatPane({ client: gateway.snapshot.client!, sessions });
       state.sessionKey = sessionKey;
       state.agentsList = agentsList;
@@ -194,7 +199,7 @@ describe("Control UI Gateway target lineage", () => {
       const composer = document.createElement("div");
       try {
         expect(
-          admitQueuedMessageForSession(state, sessionKey, {
+          admitQueuedMessageForSession(state, captureChatOutboxAdmission(state, sessionKey), {
             id: "owner-row",
             text: "Original queued message",
             createdAt: 1000,

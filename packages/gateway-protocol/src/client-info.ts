@@ -90,6 +90,7 @@ export const GATEWAY_CLIENT_CAPS = {
   PLUGIN_APPROVALS: "plugin-approvals",
   TASK_SUGGESTIONS: "task-suggestions",
   TERMINAL_OFFSET_SEQ: "terminal-offset-seq",
+  TERMINAL_SESSION_METADATA: "terminal-session-metadata",
   TOOL_EVENTS: "tool-events",
   /** Control UI / gateway clients that want `agent` WS events with `stream: "thinking"`. */
   THINKING_EVENTS: "thinking-events",
