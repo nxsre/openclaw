@@ -270,6 +270,29 @@ function createCronDeliverySchema(): TSchema {
           }),
         ),
         accountId: deliveryStringSchema("Delivery account"),
+        targets: Type.Optional(
+          Type.Union(
+            [
+              Type.Array(
+                Type.Object(
+                  {
+                    channel: deliveryStringSchema("Target channel"),
+                    to: deliveryStringSchema("Target recipient"),
+                    threadId: Type.Optional(
+                      Type.Union([Type.String(), Type.Number()], {
+                        description: "Target thread/topic id",
+                      }),
+                    ),
+                    accountId: deliveryStringSchema("Target account"),
+                  },
+                  { additionalProperties: true },
+                ),
+              ),
+              Type.Null(),
+            ],
+            { description: "Announce fan-out targets, or null to clear" },
+          ),
+        ),
         failureDestination: Type.Optional(
           Type.Union([failureDestinationObject, Type.Null()], {
             description:

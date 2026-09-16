@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { THINKING_LEVELS_HELP } from "../../auto-reply/thinking.shared.js";
-import { getCronChannelOptions } from "./shared.js";
+import { collectCronOption, getCronChannelOptions } from "./shared.js";
 
 export function registerCronMutationOptions(command: Command, mode: "add" | "edit"): Command {
   const create = mode === "add";
@@ -78,6 +78,12 @@ export function registerCronMutationOptions(command: Command, mode: "add" | "edi
     .option("--to <dest>", "Delivery destination (E.164, Telegram chatId, or Discord channel/user)")
     .option("--thread-id <id>", "Telegram forum topic thread id")
     .option("--account <id>", "Channel account id for delivery (multi-account setups)")
+    .option(
+      "--target <channel:dest>",
+      "Announce fan-out target as <channel>:<dest>; repeat to deliver to multiple channels",
+      collectCronOption,
+      [] as string[],
+    )
     .option(
       "--best-effort-deliver",
       create

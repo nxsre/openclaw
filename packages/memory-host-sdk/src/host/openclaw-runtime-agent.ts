@@ -6,6 +6,8 @@ export {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
   resolveSessionAgentId,
+  resolveSessionMemoryGroupSegment,
+  resolveSessionWorkspaceDir,
 } from "../../../../src/agents/agent-scope.js";
 export { resolveCronStyleNow } from "../../../../src/agents/current-time.js";
 export { DEFAULT_AGENT_COMPACTION_RESERVE_TOKENS_FLOOR } from "../../../../src/agents/agent-settings.js";

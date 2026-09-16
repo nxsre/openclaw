@@ -15,6 +15,8 @@ type MemorySearchManagerParams = {
   purpose?: MemorySearchManagerPurpose;
   inspectSources?: boolean;
   acquireLocalService?: MemoryCoreAcquireLocalService;
+  /** Group/session key; scopes builtin sqlite (and qmd index dir) per group. */
+  sessionKey?: string | null;
 };
 
 type MemorySearchManagerResult = {

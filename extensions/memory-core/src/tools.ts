@@ -309,6 +309,7 @@ export function createMemorySearchTool(options: MemoryToolOptions) {
                   agentId,
                   purpose: memoryManagerPurpose,
                   acquireLocalService: options.acquireLocalService,
+                  sessionKey: options.agentSessionKey,
                 }),
               );
               if ("error" in memory) {
@@ -331,6 +332,7 @@ export function createMemorySearchTool(options: MemoryToolOptions) {
                       agentId,
                       purpose: memoryManagerPurpose,
                       acquireLocalService: options.acquireLocalService,
+                      sessionKey: options.agentSessionKey,
                     }),
                   );
                   return "error" in refreshed

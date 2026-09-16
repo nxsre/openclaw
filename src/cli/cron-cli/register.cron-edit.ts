@@ -88,6 +88,7 @@ export function registerCronEditCommand(cron: Command) {
       .option("--clear-to", "Unset the delivery destination", false)
       .option("--clear-thread-id", "Unset the Telegram forum topic thread id", false)
       .option("--clear-account", "Unset the per-job delivery account override", false)
+      .option("--clear-targets", "Remove announce fan-out targets (single-target delivery)", false)
       .option("--no-best-effort-deliver", "Fail job when delivery fails")
       .option("--failure-alert", "Enable failure alerts for this job")
       .option("--no-failure-alert", "Disable failure alerts for this job")

@@ -10,6 +10,7 @@ import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import {
   hasExplicitCronDeliveryTarget,
   resolveCronDeliveryPlan,
+  resolveCronDeliveryPlans,
   type CronDeliveryPlan,
 } from "../delivery-plan.js";
 import {
@@ -237,7 +238,27 @@ export async function resolveCronDeliveryContext(params: {
   job: CronJob;
   agentId: string;
 }) {
-  const deliveryPlan = resolveCronDeliveryPlan(params.job);
+  // With delivery.targets the first target is the primary route (message-tool
+  // source delivery, session identity); additional targets fan out after the
+  // run. `all` wildcards expand to concrete recipients first. Without targets,
+  // keep the single-plan path so callers/tests that depend on
+  // resolveCronDeliveryPlan see no behavior change.
+  let deliveryPlan: CronDeliveryPlan;
+  // Expand `all` wildcards / fan-out targets exactly once and carry the extra
+  // plans forward so finalizeCronRun reuses the same snapshot (no second
+  // directory/session enumeration, no cross-call dedup drift).
+  let additionalDeliveryPlans: CronDeliveryPlan[] = [];
+  if (params.job.delivery?.targets?.length) {
+    const { expandCronDeliveryPlans } = await loadCronDeliveryRuntime();
+    const expanded = await expandCronDeliveryPlans(resolveCronDeliveryPlans(params.job), {
+      cfg: params.cfg,
+      agentId: params.agentId,
+    });
+    deliveryPlan = expanded[0] ?? resolveCronDeliveryPlan(params.job);
+    additionalDeliveryPlans = expanded.slice(1);
+  } else {
+    deliveryPlan = resolveCronDeliveryPlan(params.job);
+  }
   if (deliveryPlan.mode === "webhook") {
     const resolvedDelivery = {
       ok: false as const,
@@ -250,6 +271,7 @@ export async function resolveCronDeliveryContext(params: {
     };
     return {
       deliveryPlan,
+      additionalDeliveryPlans,
       deliveryRequested: deliveryPlan.requested,
       resolvedDelivery,
       sourceDelivery: resolveCronSourceDeliveryPlan({ deliveryPlan, resolvedDelivery }),
@@ -267,6 +289,7 @@ export async function resolveCronDeliveryContext(params: {
     };
     return {
       deliveryPlan,
+      additionalDeliveryPlans,
       deliveryRequested: false,
       resolvedDelivery,
       sourceDelivery: resolveCronSourceDeliveryPlan({ deliveryPlan, resolvedDelivery }),
@@ -282,6 +305,7 @@ export async function resolveCronDeliveryContext(params: {
   });
   return {
     deliveryPlan,
+    additionalDeliveryPlans,
     deliveryRequested: deliveryPlan.requested,
     resolvedDelivery,
     sourceDelivery: resolveCronSourceDeliveryPlan({ deliveryPlan, resolvedDelivery }),

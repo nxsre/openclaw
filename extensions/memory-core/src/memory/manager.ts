@@ -129,6 +129,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
     inspectSources?: boolean;
     acquireLocalService?: MemoryCoreAcquireLocalService;
     maintenanceSource?: MemoryIndexManager;
+    sessionKey?: string | null;
   }): Promise<MemoryIndexManager | null> {
     const source = params.maintenanceSource;
     const cfg = source?.cfg ?? params.cfg;
@@ -138,7 +139,11 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
       { agentId, purpose },
       {
         prepare: () => {
-          const settings = source?.settings ?? resolveMemorySearchConfig(cfg, agentId);
+          const settings =
+            source?.settings ??
+            resolveMemorySearchConfig(cfg, agentId, {
+              sessionKey: params.sessionKey,
+            });
           if (!settings) {
             return null;
           }

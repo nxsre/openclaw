@@ -7,6 +7,7 @@ import { CronCliError } from "./cron-cli-error.js";
 import {
   parseCronCommandArgv,
   parseCronCommandEnv,
+  parseCronDeliveryTargets,
   parseCronFallbacks,
   parseCronToolsAllow,
 } from "./shared.js";
@@ -109,9 +110,15 @@ export async function resolveCronEditPayloadDeliveryPatch(
     Boolean(opts.clearTo) ||
     Boolean(opts.clearThreadId);
   const hasDeliveryAccount = typeof opts.account === "string" || Boolean(opts.clearAccount);
+  const fanOutTargets = parseCronDeliveryTargets(opts.target);
+  const hasClearTargets = Boolean(opts.clearTargets);
+  const hasFanOutTargets = fanOutTargets !== undefined || hasClearTargets;
   const hasBestEffort = typeof opts.bestEffortDeliver === "boolean";
-  if (hasWebhookDelivery && (hasDeliveryTarget || hasDeliveryAccount)) {
+  if (hasWebhookDelivery && (hasDeliveryTarget || hasDeliveryAccount || hasFanOutTargets)) {
     throw new CronCliError("--webhook cannot be combined with chat delivery options.");
+  }
+  if (fanOutTargets && hasClearTargets) {
+    throw new CronCliError("Use --target or --clear-targets, not both");
   }
   if (typeof opts.channel === "string" && opts.clearChannel) {
     throw new CronCliError("Use --channel or --clear-channel, not both");
@@ -271,7 +278,13 @@ export async function resolveCronEditPayloadDeliveryPatch(
     patch.payload = payload;
   }
 
-  if (hasDeliveryModeFlag || hasDeliveryTarget || hasDeliveryAccount || hasBestEffort) {
+  if (
+    hasDeliveryModeFlag ||
+    hasDeliveryTarget ||
+    hasDeliveryAccount ||
+    hasFanOutTargets ||
+    hasBestEffort
+  ) {
     const delivery: Record<string, unknown> = {};
     if (hasDeliveryModeFlag) {
       delivery.mode = hasWebhookDelivery
@@ -307,6 +320,11 @@ export async function resolveCronEditPayloadDeliveryPatch(
     } else if (typeof opts.account === "string") {
       const account = opts.account.trim();
       delivery.accountId = account ? account : undefined;
+    }
+    if (hasClearTargets) {
+      delivery.targets = null;
+    } else if (fanOutTargets) {
+      delivery.targets = fanOutTargets;
     }
     if (typeof opts.bestEffortDeliver === "boolean") {
       delivery.bestEffort = opts.bestEffortDeliver;

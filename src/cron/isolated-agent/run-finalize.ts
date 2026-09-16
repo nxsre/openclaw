@@ -35,6 +35,7 @@ import {
   createCronRunDiagnosticsFromError,
   mergeCronRunDiagnostics,
 } from "../run-diagnostics.js";
+import { resolveCronDeliverySessionKey } from "../session-target.js";
 import type { CronDeliveryTrace, CronRunTelemetry } from "../types.js";
 import { resolveCronChannelOutputPolicy } from "./channel-output-policy.js";
 import { resolveCronPayloadOutcome } from "./helpers.js";
@@ -539,6 +540,49 @@ export async function finalizeCronRun(params: {
     abortReason: params.abortReason,
     withRunSession: prepared.withRunSession,
   });
+  // Broadcast the same delivered text to any additional delivery.targets
+  // (targets[1..], with `all` wildcards expanded to concrete recipients). The
+  // primary target (targets[0]) already went through the full dispatch above;
+  // extra targets are best-effort announces whose failures are logged and
+  // surfaced in diagnostics but do not flip the primary outcome.
+  const fanOutText = deliveryResult.outputText ?? outputText;
+  const additionalDeliveryPlans = prepared.additionalDeliveryPlans;
+  let fanOut: { attempted: boolean; delivered: number; failures: string[] } | undefined;
+  if (
+    additionalDeliveryPlans.length > 0 &&
+    prepared.deliveryRequested &&
+    // Heartbeat-only responses are suppressed for the primary target; do not
+    // broadcast that suppressed text to the additional targets either.
+    !skipHeartbeatDelivery &&
+    typeof fanOutText === "string" &&
+    fanOutText.trim().length > 0
+  ) {
+    const { fanOutAdditionalCronAnnounceTargets } = await loadCronDeliveryRuntime();
+    fanOut = await fanOutAdditionalCronAnnounceTargets({
+      deps: prepared.input.deps,
+      cfg: prepared.input.cfg,
+      agentId: prepared.agentId,
+      jobId: prepared.input.job.id,
+      sessionKey: resolveCronDeliverySessionKey(prepared.input.job),
+      message: fanOutText,
+      additionalPlans: additionalDeliveryPlans,
+      abortSignal:
+        prepared.input.abortSignal ?? prepared.input.signal ?? new AbortController().signal,
+    });
+  }
+  // Run-level delivered/presentation reflect ONLY the primary target. Fan-out to
+  // additional targets is best-effort: its failures surface via diagnostics and
+  // its successes never mark a failed primary delivery as delivered. Attempted is
+  // safe to aggregate (it only records that some send was tried).
+  const aggregateDeliveryAttempted =
+    (deliveryResult.deliveryAttempted ?? false) || (fanOut?.attempted ?? false);
+  const fanOutDiagnostics =
+    fanOut && fanOut.failures.length > 0
+      ? createCronRunDiagnosticsFromError(
+          "delivery",
+          new Error(`fan-out delivery failed: ${fanOut.failures.join("; ")}`),
+        )
+      : undefined;
   const deliveryTrace = buildCronDeliveryTrace({
     deliveryPlan: prepared.deliveryPlan,
     resolvedDelivery: prepared.resolvedDelivery,
@@ -559,8 +603,7 @@ export async function finalizeCronRun(params: {
       replyDisposition,
       deliveryState: deliveryResult.deliveryState,
       delivered: deliveryResult.result.delivered ?? deliveryResult.delivered,
-      deliveryAttempted:
-        deliveryResult.result.deliveryAttempted ?? deliveryResult.deliveryAttempted,
+      deliveryAttempted: deliveryResult.result.deliveryAttempted ?? aggregateDeliveryAttempted,
       deliveryError,
       delivery: deliveryTrace,
       diagnostics: mergeCronRunDiagnostics(
@@ -569,6 +612,7 @@ export async function finalizeCronRun(params: {
         deliveryDiagnosticError
           ? createCronRunDiagnosticsFromError("delivery", deliveryDiagnosticError)
           : undefined,
+        fanOutDiagnostics,
       ),
     };
     failPendingPresentationWarningUnlessDelivered(
@@ -594,7 +638,7 @@ export async function finalizeCronRun(params: {
   return resolveRunOutcome({
     deliveryState: deliveryResult.deliveryState,
     delivered: deliveryResult.delivered,
-    deliveryAttempted: deliveryResult.deliveryAttempted,
+    deliveryAttempted: aggregateDeliveryAttempted,
     deliveryError: deliveryResult.deliveryError,
     deliverySuppressionReason: deliveryResult.deliverySuppressionReason,
     delivery: deliveryTrace,

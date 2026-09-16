@@ -38,7 +38,11 @@ import {
   SECRET_SENTINEL_PATTERN,
   swapSecretSentinelsInText,
 } from "../secrets/sentinel.js";
-import { ProviderHttpError, readResponseTextLimited } from "./provider-http-errors.js";
+import {
+  maybeLogProviderHttpErrorResponse,
+  ProviderHttpError,
+  readResponseTextLimited,
+} from "./provider-http-errors.js";
 import type { ProviderLocalServiceLease } from "./provider-local-service-target.js";
 import { ensureModelProviderLocalService } from "./provider-local-service.js";
 import {
@@ -901,6 +905,12 @@ export function buildGuardedModelFetch(
       throw remediatedError;
     }
     let response = result.response;
+    if (!response.ok) {
+      await maybeLogProviderHttpErrorResponse(response, {
+        label: "model-fetch",
+        url: formatModelTransportDebugUrl(url),
+      });
+    }
     emitModelTransportDebug(
       log,
       `[model-fetch] response provider=${model.provider} api=${model.api} model=${model.id} ` +

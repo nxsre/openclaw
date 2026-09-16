@@ -390,9 +390,17 @@ export function createChannelProgressDraftCompositor(params: {
 
   const noteProgress = async (
     line?: ChannelProgressDraftCompositorLine,
-    options?: { toolName?: string; startImmediately?: boolean; flush?: boolean },
+    options?: {
+      toolName?: string;
+      startImmediately?: boolean;
+      flush?: boolean;
+      allowAfterFinal?: boolean;
+    },
   ) => {
-    if (!params.active || finalReplyStarted || finalReplyDelivered) {
+    if (
+      !params.active ||
+      ((finalReplyStarted || finalReplyDelivered) && !options?.allowAfterFinal)
+    ) {
       return false;
     }
     if (options?.toolName !== undefined && !isChannelProgressDraftWorkToolName(options.toolName)) {

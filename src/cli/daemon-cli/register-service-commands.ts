@@ -92,7 +92,7 @@ export function addGatewayServiceCommands(parent: Command, opts?: { statusDescri
     .description("Install and start the Gateway service (launchd/systemd/schtasks)")
     .addOption(new Option("--defer-activation", "Updater service-load handoff").hideHelp())
     .option("--port <port>", "Gateway port")
-    .option("--runtime <runtime>", "Daemon runtime (node|bun). Default: node")
+    .option("--runtime <runtime>", "Daemon runtime (node). Default: node")
     .option("--token <token>", "Gateway token (token auth)")
     .option("--wrapper <path>", "Executable wrapper for generated service ProgramArguments")
     .option("--force", "Reinstall if already installed (may restart a running Gateway)", false)

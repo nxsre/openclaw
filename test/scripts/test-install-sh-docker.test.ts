@@ -2909,6 +2909,8 @@ node -e 'const fs=require("node:fs");const p=process.argv[1];const value=JSON.pa
     expect(workflow).not.toMatch(/(^|\n)\s+docker run --rm --entrypoint sh/u);
     expect(workflow).toContain("--progress=plain");
     expect(workflow).toContain("--load");
+    expect(workflow).toContain('OPENCLAW_DOCKER_E2E_CPUS: "4"');
+    expect(workflow).toContain('OPENCLAW_QR_SMOKE_FORCE_INSTALL: "1"');
     expect(workflow).toContain("OPENCLAW_INSTALL_URL: file:///tmp/openclaw-install.sh");
     expect(workflow).toContain("OPENCLAW_INSTALL_CLI_URL: file:///tmp/openclaw-install-cli.sh");
     expect(workflow).toContain('OPENCLAW_INSTALL_SMOKE_SKIP_CLI: "0"');

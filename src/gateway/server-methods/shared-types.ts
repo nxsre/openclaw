@@ -333,6 +333,7 @@ type GatewayTransportContext = {
   unsubscribeAllSessionEvents: (connId: string) => void;
   getSessionEventSubscriberConnIds: () => ReadonlySet<string>;
   registerToolEventRecipient: (runId: string, connId: string) => void;
+  registerThinkingEventRecipient?: (runId: string, connId: string) => void;
 };
 
 /** Resident-owned services bridged into request handling by the server lifecycle. */
