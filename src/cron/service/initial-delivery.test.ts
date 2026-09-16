@@ -67,32 +67,6 @@ describe("resolveInitialCronDelivery", () => {
       ),
     ).toBeUndefined();
   });
-
-  it("applies cron.defaultDelivery for isolated jobs without their own delivery", () => {
-    const configDefault: CronDelivery = {
-      mode: "announce",
-      targets: [{ channel: "openclaw-weixin", to: "all" }],
-    };
-    const resolved = resolveInitialCronDelivery(
-      createInput({
-        sessionTarget: "isolated",
-        payload: { kind: "agentTurn", message: "remind me" },
-      }),
-      configDefault,
-    );
-    // Equal in value but a distinct object: the job must not alias the live config.
-    expect(resolved).toEqual(configDefault);
-    expect(resolved).not.toBe(configDefault);
-  });
-
-  it("does not apply the config default to main-session jobs", () => {
-    expect(
-      resolveInitialCronDelivery(
-        createInput({ sessionTarget: "main", payload: { kind: "systemEvent", text: "ping" } }),
-        { mode: "announce" },
-      ),
-    ).toBeUndefined();
-  });
 });
 
 // Direct service callers do not pass through normalizeCronJobCreate, so keep

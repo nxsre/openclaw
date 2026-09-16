@@ -32,9 +32,7 @@ export function isConfiguredContextSizeOverflowError(errorMessage: string): bool
  * - GitHub Copilot: "prompt token count of X exceeds the limit of Y"
  * - MiniMax: "invalid params, context window exceeds limit"
  * - Kimi For Coding: "Your request exceeded model token limit: X (requested: Y)"
- * - Cerebras: "413 status code (no body)"; bare "400 status code (no body)" is
- *   only treated as overflow when provider === "cerebras" (other providers use
- *   empty-body 400 for unrelated failures such as content filters).
+ * - Cerebras: "413 status code (no body)"
  * - Mistral: "Prompt contains X tokens ... too large for model with Y maximum context length"
  * - z.ai: May return "tokens in request more than max tokens allowed" (code 1210),
  *   "Prompt exceeds max length" (code 1261), or accept overflow silently; handled via the
@@ -71,11 +69,8 @@ const ASSISTANT_OVERFLOW_PATTERNS = [
   /context[_ ]length[_ ]exceeded/i, // Generic fallback
   /too many tokens/i, // Generic fallback
   /token limit exceeded/i, // Generic fallback
-  /^413\s*(?:status code)?\s*\(no body\)/i, // Content-too-large empty bodies
+  /^413\s*(?:status code)?\s*\(no body\)/i, // Cerebras: 413 with no body
 ];
-
-/** Cerebras-only empty-body 400 overflow signal (other providers must not match). */
-const CEREBRAS_EMPTY_BODY_400_OVERFLOW_RE = /^400\s*(?:status code)?\s*\(no body\)$/i;
 
 const FAILOVER_EXPLICIT_OVERFLOW_PATTERNS = [
   /request_too_large/i, // Anthropic request byte-size overflow
@@ -185,7 +180,7 @@ function resolveContextInputTokens(message: AssistantMessage): number | undefine
  * - Google Gemini: "input token count exceeds the maximum"
  * - xAI (Grok): "maximum prompt length is X but request contains Y"
  * - Groq: "reduce the length of the messages"
- * - Cerebras: 413 status code (no body); 400 status code (no body) only when provider is cerebras
+ * - Cerebras: 413 status code (no body)
  * - Mistral: "Prompt contains X tokens ... too large for model with Y maximum context length"
  * - OpenRouter (all backends): "maximum context length is X tokens"
  * - Together AI: "The input (X tokens) is longer than the model's context length (Y tokens)."
@@ -231,16 +226,6 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
     // Skip messages matching known non-overflow patterns (e.g. throttling / rate-limit)
     const isNonOverflow = NON_OVERFLOW_PATTERNS.some((p) => p.test(errorMessage));
     if (!isNonOverflow && matchesContextOverflowMessage(errorMessage, "assistant-error")) {
-      return true;
-    }
-    // Cerebras historically returns empty-body HTTP 400 for overflow. Gate that
-    // heuristic to the cerebras provider so other OpenAI-compatible 400s
-    // (sensitive-word filters, validation) do not enter compact-and-retry.
-    if (
-      !isNonOverflow &&
-      message.provider === "cerebras" &&
-      CEREBRAS_EMPTY_BODY_400_OVERFLOW_RE.test(errorMessage)
-    ) {
       return true;
     }
   }

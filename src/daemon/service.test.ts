@@ -3,10 +3,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { admitUpdateCommandRun } from "../cli/update-cli/update-command-run.js";
 import { clearConfigCache, clearRuntimeConfigSnapshot } from "../config/config.js";
+import { getUpdateRun } from "../infra/update-run-ledger.js";
+import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { makeTempWorkspace } from "../test-helpers/workspace.js";
 import { captureEnv } from "../test-utils/env.js";
 import { mockProcessPlatform } from "../test-utils/vitest-spies.js";
+import { resolveNodeService } from "./node-service.js";
 import type { GatewayService } from "./service.js";
 import {
   describeGatewayServiceRestart,
@@ -54,6 +58,8 @@ const managerlessPreflightCases = [
     })),
   ),
   { updateInstallKind: "package" as const, shouldRestart: true, condition: "installed" },
+  { updateInstallKind: "package" as const, shouldRestart: true, condition: "node absent" },
+  { updateInstallKind: "package" as const, shouldRestart: true, condition: "node installed" },
   { updateInstallKind: "package" as const, shouldRestart: true, condition: "global definition" },
   { updateInstallKind: "package" as const, shouldRestart: true, condition: "unreadable" },
   { updateInstallKind: "package" as const, shouldRestart: true, condition: "manager" },
@@ -186,8 +192,37 @@ describe("resolveGatewayService", () => {
 });
 
 describe("readGatewayServiceState", () => {
+  it("passes update loaded-only admission to every native inspection adapter", async () => {
+    const readCommand = vi.fn(async () => null);
+    const readRuntime = vi.fn(async () => ({ status: "stopped" }));
+    const readDefinitionMutationCapability = vi.fn<
+      NonNullable<GatewayService["readDefinitionMutationCapability"]>
+    >(async () => ({ kind: "writable" }));
+    const service = createService({ readCommand, readRuntime, readDefinitionMutationCapability });
+    await readGatewayServiceState(service, {
+      requireEffective: true,
+      requireLoadedCommand: true,
+      timeoutMs: 100,
+    });
+    expect(readCommand).toHaveBeenCalledWith(expect.anything(), {
+      requireEffective: true,
+      requireLoaded: true,
+      timeoutMs: 100,
+    });
+    expect(readRuntime).toHaveBeenCalledWith(expect.anything(), {
+      requireLoaded: true,
+      timeoutMs: 100,
+    });
+    expect(readDefinitionMutationCapability).toHaveBeenCalledWith({
+      env: expect.anything(),
+      environment: expect.anything(),
+      requireLoaded: true,
+      timeoutMs: 100,
+    });
+  });
+
   it.each(managerlessPreflightCases)(
-    "handles managerless Linux preflight for $updateInstallKind restart=$shouldRestart ($condition)",
+    "handles managerless Linux inspection for $updateInstallKind restart=$shouldRestart ($condition)",
     async ({ updateInstallKind, shouldRestart, condition, portUsage, portSource }) => {
       const { maybeStopManagedServiceBeforeMutableUpdate } =
         await import("../cli/update-cli/update-command-service.js");
@@ -235,14 +270,42 @@ describe("readGatewayServiceState", () => {
         if (portUsage) {
           probePortUsage.mockResolvedValue(portUsage);
         }
-        const unit = path.join(home, ".config/systemd/user/openclaw-gateway.service");
-        if (condition === "installed") {
+        const node = condition.startsWith("node ");
+        const unit = path.join(
+          home,
+          `.config/systemd/user/openclaw-${node ? "node" : "gateway"}.service`,
+        );
+        if (condition === "installed" || condition === "node installed") {
           await fs.mkdir(path.dirname(unit), { recursive: true });
-          await fs.writeFile(unit, "[Service]\nExecStart=/missing/openclaw gateway\n");
+          await fs.writeFile(
+            unit,
+            `[Service]\nExecStart=/missing/openclaw ${node ? "node run" : "gateway"}\n`,
+          );
+        }
+        if (node) {
+          // Only the fixture HOME contains definitions; no native manager is contacted.
+          vi.spyOn(await import("./exec-file.js"), "execFileUtf8").mockResolvedValue({
+            stdout: "",
+            stderr: "service manager unavailable",
+            code: 1,
+            termination: "error",
+            errorCode: "ENOENT",
+          });
+          const access = fs.access;
+          vi.spyOn(fs, "access").mockImplementation(async (target, mode) => {
+            if (!String(target).startsWith(`${home}${path.sep}`)) {
+              throw Object.assign(new Error("missing"), { code: "ENOENT" });
+            }
+            return access(target, mode);
+          });
+          vi.spyOn(fs, "readdir").mockResolvedValue([]);
         }
         const lstat = fs.lstat;
         vi.spyOn(fs, "lstat").mockImplementation(async (target, options) => {
           const name = String(target);
+          if (node && !name.startsWith(`${home}${path.sep}`)) {
+            throw Object.assign(new Error("missing"), { code: "ENOENT" });
+          }
           if (
             (condition === "manager" && name === "/run/systemd") ||
             (condition === "global definition" &&
@@ -259,6 +322,30 @@ describe("readGatewayServiceState", () => {
           }
           return lstat(target, options);
         });
+        if (node) {
+          const result = await readGatewayServiceState(resolveNodeService(), {
+            env: process.env,
+            timeoutMs: 2_000,
+          });
+          expect(result.installed).toBe(condition === "node installed");
+          if (condition === "node installed") {
+            expect(result.command?.sourcePath).toBe(unit);
+            expect(result.loadState.status).toBe("unknown");
+            expect(result.runtime?.status).toBe("unknown");
+          } else {
+            expect(result.command).toBeNull();
+            expect(result.runtime?.missingUnit).toBe(true);
+          }
+          return;
+        }
+        if (condition === "absent") {
+          const run = await admitUpdateCommandRun({
+            opts: { restart: shouldRestart },
+            root: home,
+          });
+          expect(run.env.HOME).toBe(home);
+          expect(getUpdateRun(run.runId, { env: run.env })?.status).toBe("running");
+        }
         const result = await maybeStopManagedServiceBeforeMutableUpdate({
           root: home,
           updateInstallKind,
@@ -287,6 +374,7 @@ describe("readGatewayServiceState", () => {
           expect(probePortUsage).not.toHaveBeenCalled();
         }
       } finally {
+        closeOpenClawStateDatabaseForTest();
         snapshot.restore();
         await fs.rm(home, { recursive: true, force: true });
       }

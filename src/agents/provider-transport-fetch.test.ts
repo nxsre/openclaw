@@ -175,8 +175,6 @@ describe("buildGuardedModelFetch", () => {
     delete process.env.OPENCLAW_DEBUG_PROXY_ENABLED;
     delete process.env.OPENCLAW_DEBUG_PROXY_URL;
     delete process.env.OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS;
-    delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-    delete process.env.OPENCLAW_DEBUG_MODEL_TRANSPORT;
   });
 
   afterEach(() => {
@@ -530,6 +528,48 @@ describe("buildGuardedModelFetch", () => {
     expect(ensureModelProviderLocalServiceMock).toHaveBeenCalledWith(model, undefined, undefined);
     expect(fetchWithSsrFGuardMock).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+  });
+
+  it("waits for local service reconciliation before starting the provider fetch", async () => {
+    let finishReconciliation: (() => void) | undefined;
+    ensureModelProviderLocalServiceMock.mockImplementation(
+      async () =>
+        await new Promise((resolve) => {
+          finishReconciliation = () => resolve({ release: vi.fn() });
+        }),
+    );
+    const model = makeProviderModelFixture<"openai-completions">({
+      id: "local-model",
+      provider: "local-provider",
+      api: "openai-completions",
+      baseUrl: "http://127.0.0.1:18000/v1",
+    });
+
+    const pending = buildGuardedModelFetch(model)("http://127.0.0.1:18000/v1/chat/completions", {
+      method: "POST",
+    });
+    await vi.waitFor(() => expect(ensureModelProviderLocalServiceMock).toHaveBeenCalledOnce());
+    expect(fetchWithSsrFGuardMock).not.toHaveBeenCalled();
+    finishReconciliation?.();
+    await pending;
+    expect(fetchWithSsrFGuardMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not start the provider fetch when local service reconciliation fails", async () => {
+    ensureModelProviderLocalServiceMock.mockRejectedValue(new Error("reconciliation failed"));
+    const model = makeProviderModelFixture<"openai-completions">({
+      id: "local-model",
+      provider: "local-provider",
+      api: "openai-completions",
+      baseUrl: "http://127.0.0.1:18000/v1",
+    });
+
+    await expect(
+      buildGuardedModelFetch(model)("http://127.0.0.1:18000/v1/chat/completions", {
+        method: "POST",
+      }),
+    ).rejects.toThrow("reconciliation failed");
+    expect(fetchWithSsrFGuardMock).not.toHaveBeenCalled();
   });
 
   it("releases guarded fetch slots when streamed bodies are abandoned", async () => {
@@ -1975,11 +2015,14 @@ describe("buildGuardedModelFetch", () => {
       expect(response.headers.get("x-should-retry")).toBe("false");
     });
 
-    it("parses retry-after-ms from OpenAI-compatible responses", async () => {
+    it.each<Record<string, string>>([
+      { "retry-after-ms": "90000" },
+      { "retry-after": "90", "retry-after-ms": "335" },
+    ])("caps SDK retries using both response floors: %j", async (headers) => {
       fetchWithSsrFGuardMock.mockResolvedValue({
         response: new Response(null, {
           status: 429,
-          headers: { "retry-after-ms": "90000" },
+          headers,
         }),
         finalUrl: "https://api.openai.com/v1/responses",
         release: vi.fn(async () => undefined),

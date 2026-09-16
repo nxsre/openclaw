@@ -310,38 +310,6 @@ function normalizeConfigModelRefsForWrite(
   };
 }
 
-/** Keep a restrictive model allowlist consistent with the configured primary and fallbacks. */
-function ensureConfiguredDefaultModelsAllowed(cfg: OpenClawConfig): OpenClawConfig {
-  const defaults = cfg.agents?.defaults;
-  if (!defaults?.models) {
-    return cfg;
-  }
-  const model = defaults.model;
-  const refs = [
-    typeof model === "string" ? model : model?.primary,
-    ...(typeof model === "object" ? (model.fallbacks ?? []) : []),
-  ].filter((ref): ref is string => typeof ref === "string" && ref.trim().length > 0);
-  const models = normalizeAgentModelMapForConfig(defaults.models);
-  let changed = false;
-  for (const ref of refs) {
-    const normalizedRef = normalizeAgentModelRefForConfig(ref);
-    if (!models[normalizedRef]) {
-      models[normalizedRef] = {};
-      changed = true;
-    }
-  }
-  if (!changed) {
-    return cfg;
-  }
-  return {
-    ...cfg,
-    agents: {
-      ...cfg.agents,
-      defaults: { ...defaults, models },
-    },
-  };
-}
-
 export function applyProviderAuthConfigPatch(
   cfg: OpenClawConfig,
   patch: unknown,
@@ -357,7 +325,7 @@ export function applyProviderAuthConfigPatch(
     providerConfigNormalizer,
   );
   if (!options?.replaceDefaultModels || !isPlainRecord(patch)) {
-    return ensureConfiguredDefaultModelsAllowed(merged);
+    return merged;
   }
 
   const patchModels = (patch.agents as { defaults?: { models?: unknown } } | undefined)?.defaults
@@ -385,25 +353,34 @@ export function applyProviderAuthConfigPatch(
 }
 
 /**
- * Restore `agents.defaults.model` after a provider auth config merge when the user did not pass
- * `--set-default`, so `applyConfig` patches cannot replace the primary without an explicit opt-in.
+ * Restore `agents.defaults.model`, including its absence, after a provider auth config merge when
+ * the user did not pass `--set-default`.
  */
 export function restorePriorAgentsDefaultsModelUnlessOptIn(params: {
   cfg: OpenClawConfig;
   priorAgentsDefaultsModel?: AgentModelConfig;
   setDefault?: boolean;
 }): OpenClawConfig {
-  if (params.setDefault || params.priorAgentsDefaultsModel === undefined) {
+  if (params.setDefault) {
     return params.cfg;
+  }
+  if (
+    params.priorAgentsDefaultsModel === undefined &&
+    params.cfg.agents?.defaults?.model === undefined
+  ) {
+    return params.cfg;
+  }
+  const defaults = { ...params.cfg.agents?.defaults };
+  if (params.priorAgentsDefaultsModel === undefined) {
+    delete defaults.model;
+  } else {
+    defaults.model = params.priorAgentsDefaultsModel;
   }
   return {
     ...params.cfg,
     agents: {
       ...params.cfg.agents,
-      defaults: {
-        ...params.cfg.agents?.defaults,
-        model: params.priorAgentsDefaultsModel,
-      },
+      defaults,
     },
   };
 }
@@ -435,7 +412,7 @@ export function applyDefaultModel(
           normalizeAgentModelRefForConfig(fallback),
         )
       : undefined;
-  return ensureConfiguredDefaultModelsAllowed({
+  return {
     ...cfg,
     agents: {
       ...cfg.agents,
@@ -451,5 +428,5 @@ export function applyDefaultModel(
         },
       },
     },
-  });
+  };
 }

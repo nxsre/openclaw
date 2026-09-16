@@ -36,8 +36,8 @@ import {
   createCliStatusTextStyles,
   createDaemonInstallActionContext,
   resolveDaemonInstallBlockMessage,
-  filterDaemonEnv,
   formatRuntimeStatus,
+  projectDaemonServiceForJson,
   resolveRuntimeStatusColor,
 } from "../daemon-cli/shared.js";
 import { formatInvalidConfigPort, formatInvalidPortOption } from "../error-format.js";
@@ -145,7 +145,7 @@ export async function runNodeDaemonInstall(opts: NodeDaemonInstallOptions) {
 
   const runtimeRaw = opts.runtime ? opts.runtime : DEFAULT_GATEWAY_DAEMON_RUNTIME;
   if (!isGatewayDaemonRuntime(runtimeRaw)) {
-    fail('Invalid --runtime (use "node"; Bun lacks the required node:sqlite API)');
+    fail('Invalid --runtime (use "node" or "bun")');
     return;
   }
 
@@ -298,20 +298,8 @@ export async function runNodeDaemonStatus(opts: NodeDaemonStatusOptions = {}) {
   };
 
   if (json) {
-    const safeEnvironment = filterDaemonEnv(command?.environment);
-    const publicCommand = command && {
-      ...command,
-      environment: Object.keys(safeEnvironment).length > 0 ? safeEnvironment : undefined,
-    };
-    if (publicCommand) {
-      delete publicCommand.managedDefinition;
-      delete publicCommand.managedOverrides;
-    }
     defaultRuntime.writeJson({
-      service: {
-        ...payload.service,
-        command: publicCommand,
-      },
+      service: projectDaemonServiceForJson(payload.service, { includeDefinitionPaths: true }),
     });
     return;
   }

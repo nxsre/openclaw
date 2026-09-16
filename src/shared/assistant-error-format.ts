@@ -1,23 +1,8 @@
 // Assistant error formatting helpers normalize assistant-visible error payloads.
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { extractHttpResponseBody } from "./http-error-response.js";
-// XCPH: 按 HTTP 状态码读 env 配置的面向用户兜底文案。
-// 变量名 = OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status>(如 _402 _429 _500;放在 openclaw.json 的
-// env.vars 里)。配了该状态码 → 返回对应文案(支持 %{http_code}/%{error_message} 等变量替换);
-// 没配该状态码 / 取不到状态码 → 返回 null,调用方回退显示原始错误信息。
-const USER_FACING_FALLBACK_ENV = "OPENCLAW_LLM_ERROR_FALLBACK_TEXT";
-export function userFacingFallbackText(rawError?: string): string | null {
-  if (typeof rawError !== "string") return null;
-  const status =
-    extractLeadingHttpStatus(rawError)?.code ?? extractHttpStatusFromErrorText(rawError);
-  if (status === undefined || !Number.isFinite(status)) return null;
-  const raw = process.env[`${USER_FACING_FALLBACK_ENV}_${status}`];
-  if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
 const ERROR_PAYLOAD_PREFIX_RE =
   /^(?:error|(?:[a-z][\w-]*\s+)?api\s*error|apierror|openai\s*error|anthropic\s*error|gateway\s*error|codex\s*error)(?:\s+\d{3})?[:\s-]+/i;
 const HTTP_STATUS_DELIMITER_RE = /(?:\s*:\s*|\s+)/;
@@ -57,6 +42,7 @@ type ErrorPayload = Record<string, unknown>;
 type ApiErrorInfo = {
   httpCode?: string;
   type?: string;
+  code?: string;
   message?: string;
   requestId?: string;
 };
@@ -230,7 +216,7 @@ export function parseApiErrorInfo(raw?: string): ApiErrorInfo | null {
   let httpCode: string | undefined;
   let candidate = trimmed;
 
-  const httpPrefix = extractHttpStatusMatch(candidate.match(/^(\d{3})\s+(.+)$/s));
+  const httpPrefix = extractLeadingHttpStatus(candidate);
   if (httpPrefix) {
     httpCode = String(httpPrefix.code);
     candidate = httpPrefix.rest;
@@ -249,17 +235,22 @@ export function parseApiErrorInfo(raw?: string): ApiErrorInfo | null {
         : undefined;
 
   const topType = typeof payload.type === "string" ? payload.type : undefined;
+  const topCode = typeof payload.code === "string" ? payload.code : undefined;
   const topMessage = typeof payload.message === "string" ? payload.message : undefined;
 
   let errType: string | undefined;
+  let errCode: string | undefined;
   let errMessage: string | undefined;
   if (payload.error && typeof payload.error === "object" && !Array.isArray(payload.error)) {
     const err = payload.error as Record<string, unknown>;
     if (typeof err.type === "string") {
       errType = err.type;
     }
-    if (typeof err.code === "string" && !errType) {
-      errType = err.code;
+    if (typeof err.code === "string") {
+      errCode = err.code;
+      if (!errType) {
+        errType = err.code;
+      }
     }
     if (typeof err.message === "string") {
       errMessage = err.message;
@@ -269,118 +260,18 @@ export function parseApiErrorInfo(raw?: string): ApiErrorInfo | null {
     errType = payload.error;
   }
 
+  const code = errCode ?? topCode;
   return {
     httpCode,
     type: errType ?? topType,
+    ...(code === undefined ? {} : { code }),
     message: errMessage ?? topMessage,
     requestId,
   };
 }
 
-export function isNonOkHttpStatus(status: number | undefined): boolean {
-  return typeof status === "number" && Number.isFinite(status) && (status < 200 || status >= 300);
-}
-
-function formatBilingualUserMessage(english: string, chinese: string): string {
-  return `${english}\n\n${chinese}`;
-}
-
-export function formatNonOkHttpStatusUserMessage(status: number): string {
-  if (status === 401 || status === 403) {
-    return formatBilingualUserMessage(
-      "Authentication failed while contacting the model provider. Your message was not saved. Check your API key or credentials and try again.",
-      "联系模型服务时鉴权失败，本条消息未保存。请检查 API Key 或凭证后重试。",
-    );
-  }
-  if (status === 404) {
-    return formatBilingualUserMessage(
-      "The requested model or endpoint was not found (HTTP 404). Your message was not saved. Check the configured model and try again.",
-      "未找到请求的模型或接口（HTTP 404），本条消息未保存。请检查模型配置后重试。",
-    );
-  }
-  if (status === 408 || status === 504) {
-    return formatBilingualUserMessage(
-      `The model request timed out (HTTP ${status}). Your message was not saved. Please try again in a moment.`,
-      `模型请求超时（HTTP ${status}），本条消息未保存。请稍后再试。`,
-    );
-  }
-  if (status === 429) {
-    return formatBilingualUserMessage(
-      "The model provider is rate-limiting requests (HTTP 429). Your message was not saved. Please wait a moment and try again.",
-      "模型服务触发限流（HTTP 429），本条消息未保存。请稍后再试。",
-    );
-  }
-  if (status >= 500) {
-    return formatBilingualUserMessage(
-      `The model service is temporarily unavailable (HTTP ${status}). Your message was not saved. Please try again in a moment.`,
-      `模型服务暂时不可用（HTTP ${status}），本条消息未保存。请稍后再试。`,
-    );
-  }
-  if (status === 400 || status === 422) {
-    return formatBilingualUserMessage(
-      "The model provider rejected this request. Your message was not saved. Adjust the request and try again.",
-      "模型服务拒绝了本次请求，本条消息未保存。请调整请求内容后重试。",
-    );
-  }
-  return formatBilingualUserMessage(
-    `The model request failed (HTTP ${status}). Your message was not saved. Please try again.`,
-    `模型请求失败（HTTP ${status}），本条消息未保存。请重试。`,
-  );
-}
-
-export function extractHttpStatusFromErrorText(text: string): number | undefined {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  const leading = extractLeadingHttpStatus(trimmed);
-  if (leading) {
-    return leading.code;
-  }
-  // OpenAI SDK empty-body shape: "400 status code (no body)". Also match when
-  // wrapped by Control UI prefixes such as "⚠️ Agent failed before reply: 400...".
-  const statusCodeWordMatch = trimmed.match(/\b(\d{3})\s+status code\b/i);
-  if (statusCodeWordMatch?.[1]) {
-    return Number.parseInt(statusCodeWordMatch[1], 10);
-  }
-  const statusCodeMatch = trimmed.match(/\bstatus code:\s*(\d{3})\b/i);
-  if (statusCodeMatch?.[1]) {
-    return Number.parseInt(statusCodeMatch[1], 10);
-  }
-  const httpMatch = trimmed.match(/\bhttp\s*(\d{3})\b/i);
-  if (httpMatch?.[1]) {
-    return Number.parseInt(httpMatch[1], 10);
-  }
-  return undefined;
-}
-
-// applyFallbackVars 把兜底文案里的 curl 风格变量 %{name} 替换为本次错误的真实值。
-// 支持:%{http_code}（HTTP 状态码）、%{error_type}、%{error_message}、%{request_id}。
-export function applyFallbackVars(template: string, rawErr: string): string {
-  if (!template.includes("%{")) {
-    return template;
-  }
-  const info = parseApiErrorInfo(rawErr);
-  const status = extractHttpStatusFromErrorText(rawErr) ?? extractLeadingHttpStatus(rawErr)?.code;
-  const vars: Record<string, string> = {
-    http_code: status !== undefined ? String(status) : (info?.httpCode ?? ""),
-    error_type: info?.type ?? "",
-    error_message: info?.message ?? "",
-    request_id: info?.requestId ?? "",
-  };
-  return template.replace(/%\{(\w+)\}/g, (match, name: string) => {
-    const value = vars[name];
-    return value !== undefined ? value : match;
-  });
-}
-
 export function formatRawAssistantErrorForUi(raw?: string): string {
   const trimmed = (raw ?? "").trim();
-  const fallback = userFacingFallbackText(trimmed);
-  if (fallback !== null) {
-    // 该状态码已在 env.vars 配置兜底文案 → 用它;未配置的状态码落到下方原始错误。
-    return applyFallbackVars(fallback, trimmed);
-  }
   if (!trimmed) {
     return "LLM request failed with an unknown error.";
   }
@@ -422,4 +313,66 @@ export function formatRawAssistantErrorForUi(raw?: string): string {
   }
 
   return trimmed.length > 600 ? `${truncateUtf16Safe(trimmed, 600)}…` : trimmed;
+}
+
+const REFUSED_TRANSPORT_CODE_RE = /\beconnrefused\b/i;
+const INTERRUPTED_TRANSPORT_CODE_RE = /\beconnreset\b|\beconnaborted\b|\benetreset\b|\bepipe\b/i;
+const DNS_TRANSPORT_CODE_RE = /\benotfound\b|\beai_again\b/i;
+const UNREACHABLE_TRANSPORT_CODE_RE = /\benetunreach\b|\behostunreach\b|\behostdown\b/i;
+
+export function isKnownTransportErrorCode(value: string): boolean {
+  return [
+    REFUSED_TRANSPORT_CODE_RE,
+    INTERRUPTED_TRANSPORT_CODE_RE,
+    DNS_TRANSPORT_CODE_RE,
+    UNREACHABLE_TRANSPORT_CODE_RE,
+  ].some((pattern) => pattern.exec(value)?.[0] === value);
+}
+
+export function formatTransportErrorCopy(raw: string): string | undefined {
+  if (!raw || isCloudflareOrHtmlErrorPage(raw)) {
+    return undefined;
+  }
+  const lower = normalizeLowercaseStringOrEmpty(raw);
+  if (
+    REFUSED_TRANSPORT_CODE_RE.test(raw) ||
+    lower.includes("connection refused") ||
+    lower.includes("actively refused")
+  ) {
+    return "LLM request failed: connection refused by the provider endpoint.";
+  }
+  if (
+    INTERRUPTED_TRANSPORT_CODE_RE.test(raw) ||
+    lower.includes("socket hang up") ||
+    lower.includes("connection reset") ||
+    lower.includes("connection aborted")
+  ) {
+    return "LLM request failed: network connection was interrupted.";
+  }
+  if (
+    DNS_TRANSPORT_CODE_RE.test(raw) ||
+    lower.includes("getaddrinfo") ||
+    lower.includes("no such host") ||
+    lower.includes("dns")
+  ) {
+    return "LLM request failed: DNS lookup for the provider endpoint failed.";
+  }
+  if (
+    UNREACHABLE_TRANSPORT_CODE_RE.test(raw) ||
+    lower.includes("network is unreachable") ||
+    lower.includes("host is unreachable")
+  ) {
+    return "LLM request failed: the provider endpoint is unreachable from this host.";
+  }
+  if (
+    lower.includes("fetch failed") ||
+    lower.includes("connection error") ||
+    lower.includes("network request failed")
+  ) {
+    return "LLM request failed: network connection error.";
+  }
+  if (raw.includes("网络错误") || raw.includes("网络异常") || raw.includes("连接错误")) {
+    return "LLM request failed: provider reported a network error.";
+  }
+  return undefined;
 }

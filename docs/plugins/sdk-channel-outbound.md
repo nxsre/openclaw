@@ -125,8 +125,14 @@ export const demoMessageAdapter = defineChannelMessageAdapter({
 ```
 
 Only declare capabilities the native transport actually preserves. Cover
-each declared send, receipt, live-preview, and receive-ack capability with
-the contract helpers exported from this subpath.
+each declared capability with the matching contract helper exported from this
+subpath:
+
+- send: `verifyChannelMessageAdapterCapabilityProofs(...)`
+- durable final delivery: `verifyDurableFinalCapabilityProofs(...)`
+- live preview: `verifyChannelMessageLiveCapabilityAdapterProofs(...)` and
+  `verifyChannelMessageLiveFinalizerProofs(...)`
+- receive ack: `verifyChannelMessageReceiveAckPolicyAdapterProofs(...)`
 
 ## Outbound echo suppression
 
@@ -236,6 +242,14 @@ These durable helpers do not accept `durability: "disabled"`.
 Use `payloadOutcomes` when a batch mixes sent, suppressed, and failed
 payloads. Do not infer hook cancellation from an empty legacy
 direct-delivery result.
+
+Failure is not permission to send the same payload through another path.
+Once admitted, the queue owns retry or reconciliation until its exact owner
+acknowledges or terminally retires the intent. Pending custody is not a
+delivery receipt: preserve partial receipts, and do not report an unconfirmed
+`ask_user` prompt as visible. Gateway `OUTBOUND_DELIVERY_QUEUED` responses mean
+delivery is pending and must not be resent; an ambiguous send may need
+reconciliation rather than an automatic retry.
 
 When a transport creates a thread during its first successful send, the
 outbound adapter may implement `adoptTargetFromDelivery(...)`. Return the

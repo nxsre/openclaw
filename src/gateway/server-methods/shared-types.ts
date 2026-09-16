@@ -26,7 +26,10 @@ import type { WizardSession } from "../../wizard/session.js";
 import type { AgentRuntimeApprovalAuthorityValidator } from "../agent-runtime-identity-token.js";
 import type { InternalAgentTurnFacadeFactory } from "../agent-turn/internal-facade.types.js";
 import type { ChatAbortControllerEntry } from "../chat-abort.js";
-import type { GatewayHotReloadStatus } from "../config-reload-status.types.js";
+import type {
+  GatewayDeferredChannelReload,
+  GatewayHotReloadStatus,
+} from "../config-reload-status.types.js";
 import type { GatewayConfigRevisionProjector } from "../config-revision-token.js";
 import type { ScopeUpgradeCoordinator } from "../device-scope-upgrade.js";
 import type { ExecApprovalManager, ExecApprovalRecord } from "../exec-approval-manager.js";
@@ -330,7 +333,6 @@ type GatewayTransportContext = {
   unsubscribeAllSessionEvents: (connId: string) => void;
   getSessionEventSubscriberConnIds: () => ReadonlySet<string>;
   registerToolEventRecipient: (runId: string, connId: string) => void;
-  registerThinkingEventRecipient?: (runId: string, connId: string) => void;
 };
 
 /** Resident-owned services bridged into request handling by the server lifecycle. */
@@ -362,6 +364,9 @@ type GatewayResidentBridgeContext = {
   validateAgentRuntimeApprovalAuthority?: AgentRuntimeApprovalAuthorityValidator;
   /** One-way local-to-worker dispatch; absent when cloud workers are disabled. */
   workerPlacementDispatchService?: WorkerPlacementDispatchContract;
+  workerRepositoryWorkspaceMutationService?: ReturnType<
+    typeof import("../worker-environments/repository-workspace-mutation.js").createRepositoryWorkspaceMutationService
+  >;
   githubPublicationService?: import("../github-publication.js").GitHubPublicationCoordinator;
   githubOAuthService?: ReturnType<
     typeof import("../github-oauth-lifecycle.js").createGitHubOAuthLifecycle
@@ -372,6 +377,7 @@ type GatewayResidentBridgeContext = {
   getRuntimeSnapshot: () => ChannelRuntimeSnapshot;
   getEventLoopHealth?: () => GatewayEventLoopHealth | undefined;
   getConfigReloaderHotReloadStatus?: () => GatewayHotReloadStatus | undefined;
+  getDeferredChannelReloads?: () => readonly GatewayDeferredChannelReload[];
   startChannel: (
     channel: import("../../channels/plugins/types.public.js").ChannelId,
     accountId?: string,
@@ -423,6 +429,8 @@ export type GatewayRequestOptions = {
   sessionMutationCommitGuard?: () => void;
   /** In-process caller lifetime; never serialized into a Gateway request frame. */
   signal?: AbortSignal;
+  /** Live transport authority; in-process only and never derived from request data. */
+  hasCurrentClientAuthority?: () => boolean;
 };
 
 /** Commit-time guard captured by the pre-dispatch session participation check. */
@@ -449,6 +457,8 @@ export type GatewayRequestHandlerOptions = {
   sessionMutationAuthorization?: SessionMutationAuthorization;
   /** In-process caller lifetime; absent for ordinary transport requests. */
   signal?: AbortSignal;
+  /** Live transport authority; in-process only and never derived from request data. */
+  hasCurrentClientAuthority?: () => boolean;
 };
 
 /** Single gateway method implementation. */

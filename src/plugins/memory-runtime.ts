@@ -180,7 +180,6 @@ export async function getActiveMemorySearchManagerCore(params: {
   agentId: string;
   purpose?: "default" | "status" | "cli";
   inspectSources?: boolean;
-  sessionKey?: string | null;
 }) {
   const owner = ensureMemoryRuntime(params);
   if (!owner) {

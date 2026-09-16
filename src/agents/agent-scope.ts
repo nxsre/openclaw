@@ -1,5 +1,4 @@
 /** Higher-level agent scope helpers for model selection, fallbacks, skills, and workspaces. */
-import path from "node:path";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -305,113 +304,19 @@ export function clearAutoFallbackPrimaryProbeSelection(
 
 export { resolveAgentIdFromSessionKey };
 
-/**
- * Sanitize one path segment so it cannot escape the workspace root.
- * Keeps only [A-Za-z0-9_.-]; returns empty string when nothing remains.
- */
-export function sanitizeSegment(value: string): string {
-  const cleaned = (value ?? "").replace(/[^A-Za-z0-9_.-]/g, "");
-  if (cleaned === "" || cleaned === "." || cleaned === "..") {
-    return "";
-  }
-  return cleaned;
-}
-
-/**
- * Extract a group id from a session key of the form
- * `agent:<agentId>:<channel>:group:<gid...>` or `<channel>:group:<gid...>`
- * (also handles the `:channel:` peer kind).
- */
-export function extractGroupId(sessionKey: string | undefined | null): string | undefined {
-  const raw = normalizeOptionalString(sessionKey);
-  if (!raw) {
-    return undefined;
-  }
-  const segments = raw.split(":");
-  for (let i = 0; i < segments.length - 1; i += 1) {
-    const marker = segments[i]?.toLowerCase();
-    if (marker === "group" || marker === "channel") {
-      const remainder = segments.slice(i + 1).join("_");
-      return remainder || undefined;
-    }
-  }
-  return undefined;
-}
-
-/** True when a session is a group/channel chat (by entry chatType or key shape). */
-function isGroupLikeSession(params: {
-  sessionKey?: string | null;
-  chatType?: SessionEntry["chatType"];
-}): boolean {
-  if (params.chatType === "group" || params.chatType === "channel") {
-    return true;
-  }
-  const raw = normalizeOptionalString(params.sessionKey);
-  if (!raw) {
-    return false;
-  }
-  const lowered = raw.toLowerCase();
-  return lowered.includes(":group:") || lowered.includes(":channel:");
-}
-
-/**
- * Resolve the filesystem-safe group token for a session key, or undefined for
- * direct/main/non-group sessions. Pure helper used to scope per-group memory
- * collections. Malformed input collapses to undefined. Never throws.
- */
-export function resolveSessionMemoryGroupSegment(
-  sessionKey?: string | null,
-  sessionEntry?: Pick<SessionEntry, "chatType"> | null,
-): string | undefined {
-  try {
-    if (!isGroupLikeSession({ sessionKey, chatType: sessionEntry?.chatType })) {
-      return undefined;
-    }
-    const gid = extractGroupId(sessionKey);
-    const safeGid = gid ? sanitizeSegment(gid) : "";
-    return safeGid || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Resolve the workspace directory for a session, isolating group/channel chats
- * into `<base>/groups/<gid>`. Direct/main/non-group sessions return the agent
- * base workspace. Pure: no filesystem side effects.
- */
-export function resolveSessionWorkspaceDir(
-  cfg: OpenClawConfig,
-  agentId: string,
-  sessionKey?: string | null,
-  sessionEntry?: Pick<SessionEntry, "chatType"> | null,
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  const base = resolveAgentWorkspaceDir(cfg, agentId, env);
-  try {
-    if (!isGroupLikeSession({ sessionKey, chatType: sessionEntry?.chatType })) {
-      return base;
-    }
-    const gid = extractGroupId(sessionKey);
-    const safeGid = gid ? sanitizeSegment(gid) : "";
-    if (!safeGid) {
-      return base;
-    }
-    return path.join(base, "groups", safeGid).replaceAll("\0", "");
-  } catch {
-    return base;
-  }
-}
-
-export function resolveSessionAgentIdsStrict(params: {
+type SessionAgentResolutionParams = {
   sessionKey?: string;
   config?: OpenClawConfig;
   agentId?: string | undefined;
   fallbackAgentId?: string;
-}): {
-  defaultAgentId: string;
-  sessionAgentId: string;
-} {
+};
+
+const SESSION_AGENT_SELECTION_CONTEXT = {
+  surface: "session agent resolution",
+  hint: "Pass an agentId, an agent-scoped session key, or a prepared fallbackAgentId.",
+};
+
+function resolveSelectedSessionAgentId(params: SessionAgentResolutionParams): string | undefined {
   const explicitAgentIdRaw = normalizeLowercaseStringOrEmpty(params.agentId);
   const explicitAgentId = explicitAgentIdRaw ? normalizeAgentId(explicitAgentIdRaw) : null;
   const fallbackAgentIdRaw = normalizeLowercaseStringOrEmpty(params.fallbackAgentId);
@@ -446,29 +351,39 @@ export function resolveSessionAgentIdsStrict(params: {
       hint: `The shared fixed-store row belongs to "${persistedStoreOwner.agentId}", not "${requestedUnscopedAgentId}".`,
     });
   }
-  const compatibilityAgentId = tryResolveLegacyCompatibilityAgentId(cfg);
-  const sessionAgentId =
+  return (
     sessionKeyAgentId ??
     (persistedStoreOwner.kind === "configured" ? persistedStoreOwner.agentId : undefined) ??
     requestedUnscopedAgentId ??
+    undefined
+  );
+}
+
+export function resolveSessionAgentIdsStrict(params: SessionAgentResolutionParams): {
+  defaultAgentId: string;
+  sessionAgentId: string;
+} {
+  const selectedAgentId = resolveSelectedSessionAgentId(params);
+  const cfg = params.config ?? {};
+  const compatibilityAgentId = tryResolveLegacyCompatibilityAgentId(cfg);
+  const sessionAgentId =
+    selectedAgentId ??
     compatibilityAgentId ??
-    resolveDefaultAgentId(cfg, {
-      surface: "session agent resolution",
-      hint: "Pass an agentId, an agent-scoped session key, or a prepared fallbackAgentId.",
-    });
+    resolveDefaultAgentId(cfg, SESSION_AGENT_SELECTION_CONTEXT);
   const defaultAgentId = compatibilityAgentId ?? sessionAgentId;
   return { defaultAgentId, sessionAgentId };
 }
 
 export const resolveSessionAgentIds = resolveSessionAgentIdsStrict;
 
-export function resolveSessionAgentIdStrict(params: {
-  sessionKey?: string;
-  config?: OpenClawConfig;
-  agentId?: string;
-  fallbackAgentId?: string;
-}): string {
-  return resolveSessionAgentIdsStrict(params).sessionAgentId;
+export function resolveSessionAgentIdStrict(params: SessionAgentResolutionParams): string {
+  const selectedAgentId = resolveSelectedSessionAgentId(params);
+  const cfg = params.config ?? {};
+  return (
+    selectedAgentId ??
+    tryResolveLegacyCompatibilityAgentId(cfg) ??
+    resolveDefaultAgentId(cfg, SESSION_AGENT_SELECTION_CONTEXT)
+  );
 }
 
 export const resolveSessionAgentId = resolveSessionAgentIdStrict;

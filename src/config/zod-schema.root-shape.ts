@@ -76,7 +76,6 @@ export const OpenClawSchemaShape = {
       lastRunCommit: z.string().optional(),
       lastRunCommand: z.string().optional(),
       lastRunMode: z.union([z.literal("local"), z.literal("remote")]).optional(),
-      localModelLeanAutoModel: z.string().optional(),
       securityAcknowledgedAt: z.string().optional(),
     })
     .optional(),
@@ -359,26 +358,6 @@ export const OpenClawSchemaShape = {
           to: z.string().optional(),
         })
         .optional(),
-      defaultDelivery: z
-        .strictObject({
-          mode: z.enum(["none", "announce", "webhook"]).optional(),
-          channel: z.string().optional(),
-          to: z.string().optional(),
-          threadId: z.union([z.string(), z.number()]).optional(),
-          accountId: z.string().optional(),
-          bestEffort: z.boolean().optional(),
-          targets: z
-            .array(
-              z.strictObject({
-                channel: z.string().optional(),
-                to: z.string().optional(),
-                threadId: z.union([z.string(), z.number()]).optional(),
-                accountId: z.string().optional(),
-              }),
-            )
-            .optional(),
-        })
-        .optional(),
     })
     .superRefine((val, ctx) => {
       if (val.sessionRetention !== undefined && val.sessionRetention !== false) {
@@ -510,7 +489,6 @@ export const OpenClawSchemaShape = {
             })
             .optional(),
           approvalPolicy: z.union([z.literal("pending"), z.literal("auto")]).optional(),
-          allowSymlinkTargetWrites: z.boolean().optional(),
           maxPending: z.number().int().min(1).optional(),
           maxSkillBytes: z.number().int().min(1).optional(),
         })

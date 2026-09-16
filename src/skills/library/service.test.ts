@@ -4,6 +4,7 @@ import path from "node:path";
 import { constants } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SKILL_LIBRARY_MAX_FILE_BYTES } from "../../../packages/gateway-protocol/src/schema/skill-library.js";
+import { trackSqliteStatementExecutions } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { tableExists } from "../../state/openclaw-state-db-schema-helpers.js";
 import {
@@ -85,29 +86,43 @@ async function beginZipUpload(
 }
 
 describe("profile-owned skill publication and selection", () => {
-  it("uses the same readable identity in the prompt and picker and rejects a copied workspace command", async () => {
-    const { options, alice, stateDir } = fixture();
-    await saveSkillLibrary(alice, draft("long---skill---name"), options);
-    const pins = seedSkillLibrarySelection(alice, options);
-    const entries = loadSkillLibrarySelection(pins, options);
-    const { buildSkillSnapshot } = await import("../loading/workspace-skill-prompt.js");
-    const { buildWorkspaceSkillCommandSpecs } = await import("../discovery/command-specs.js");
-    const snapshot = buildSkillSnapshot(stateDir, { entries });
-    const commands = buildWorkspaceSkillCommandSpecs(stateDir, { entries });
-    expect(pins[0]!.name).toMatch(/^s_long_skil_[a-f0-9]{20}$/);
-    expect(commands[0]).toMatchObject({ name: pins[0]!.name, skillName: pins[0]!.name });
-    expect(snapshot.prompt).toContain(`<name>${pins[0]!.name}</name>`);
-    const copied = {
-      ...entries[0]!,
-      skill: { ...entries[0]!.skill, source: "openclaw-workspace" },
-    };
-    expect(() => buildSkillSnapshot(stateDir, { entries: [copied, ...entries] })).toThrow(
-      "ambiguous",
-    );
-    expect(() =>
-      buildWorkspaceSkillCommandSpecs(stateDir, { entries: [copied, ...entries] }),
-    ).toThrow("ambiguous");
-  });
+  it.each([
+    ["heading", "# Friendly Title", "Friendly Title"],
+    ["metadata fallback", "Plain introduction", "Guide"],
+  ])(
+    "keeps the %s separate from the selected command identity",
+    async (_label, heading, displayName) => {
+      const { options, alice, stateDir } = fixture();
+      await saveSkillLibrary(
+        alice,
+        { ...draft("long---skill---name"), content: content.replace("# Guide", heading) },
+        options,
+      );
+      const pins = seedSkillLibrarySelection(alice, options);
+      const entries = loadSkillLibrarySelection(pins, options);
+      const { buildSkillSnapshot } = await import("../loading/workspace-skill-prompt.js");
+      const { buildWorkspaceSkillCommandSpecs } = await import("../discovery/command-specs.js");
+      const snapshot = buildSkillSnapshot(stateDir, { entries });
+      const commands = buildWorkspaceSkillCommandSpecs(stateDir, { entries });
+      expect(pins[0]!.name).toMatch(/^s_long_skil_[a-f0-9]{20}$/);
+      expect(commands[0]).toMatchObject({
+        name: pins[0]!.name,
+        skillName: pins[0]!.name,
+        displayName,
+      });
+      expect(snapshot.prompt).toContain(`<name>${pins[0]!.name}</name>`);
+      const copied = {
+        ...entries[0]!,
+        skill: { ...entries[0]!.skill, source: "openclaw-workspace" },
+      };
+      expect(() => buildSkillSnapshot(stateDir, { entries: [copied, ...entries] })).toThrow(
+        "ambiguous",
+      );
+      expect(() =>
+        buildWorkspaceSkillCommandSpecs(stateDir, { entries: [copied, ...entries] }),
+      ).toThrow("ambiguous");
+    },
+  );
   it("discovers pinned commands through the loader without leaking them into workspace state", async () => {
     const { alice, options, stateDir } = fixture();
     const saved = await saveSkillLibrary(alice, draft(), options);
@@ -539,11 +554,23 @@ describe("library admission and imports", () => {
       await expect(
         uploadSkillLibrary(bob, { action: "commit", uploadId: begun.uploadId }, options),
       ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      const archiveReads = trackSqliteStatementExecutions(
+        openOpenClawStateDatabase(options).db,
+        ["archive"],
+        (sql) =>
+          sql.startsWith("select ") &&
+          sql.includes('from "skill_library_uploads"') &&
+          /\*|"archive_blob"/u.test(sql)
+            ? "archive"
+            : null,
+      );
       const saved = await uploadSkillLibrary(
         alice,
         { action: "commit", uploadId: begun.uploadId },
         options,
-      );
+      ).finally(archiveReads.restore);
+      // Publication guards must not reload the archive after the extraction snapshot.
+      expect(archiveReads.rowCounts.archive).toBe(1);
       if (!("entry" in saved)) {
         throw new Error("Expected publication receipt");
       }

@@ -24,31 +24,12 @@ export type CronDeliveryPlan = {
 };
 
 /** Returns whether a delivery plan names a concrete channel, recipient, thread, or account. */
-export function hasExplicitCronDeliveryTarget(plan: CronDeliveryPlan): boolean {
+export function hasExplicitCronDeliveryTarget(
+  plan: Pick<CronDeliveryPlan, "channel" | "to" | "threadId" | "accountId">,
+): boolean {
   return Boolean(
     (plan.channel && plan.channel !== "last") || plan.to || plan.threadId != null || plan.accountId,
   );
-}
-
-/**
- * Recognizes the `all` fan-out wildcard recipient. `to: "all"` broadcasts to
- * every recipient on the channel; `to: "<prefix>:all"` (e.g. "user:all",
- * "c2c:all") restricts the broadcast to recipients whose target starts with
- * that addressing prefix. Returns the prefix (without the `:all` suffix) so the
- * expander can filter; isAll is false for any concrete recipient.
- */
-export function parseAllTarget(to: string | undefined): { isAll: boolean; prefix?: string } {
-  const trimmed = typeof to === "string" ? to.trim().toLowerCase() : undefined;
-  if (!trimmed) {
-    return { isAll: false };
-  }
-  if (trimmed === "all") {
-    return { isAll: true };
-  }
-  if (trimmed.endsWith(":all")) {
-    return { isAll: true, prefix: trimmed.slice(0, -":all".length) };
-  }
-  return { isAll: false };
 }
 
 function normalizeChannel(value: unknown): CronMessageChannel | undefined {
@@ -149,32 +130,6 @@ export function resolveCronDeliveryPlan(
     source: "delivery",
     requested: resolvedMode === "announce",
   };
-}
-
-/**
- * Resolves every announce destination for a job. When delivery.targets is set
- * (announce mode), returns one plan per target so callers fan out the same
- * payload; otherwise returns the single primary plan. Webhook/none jobs always
- * return just the primary plan.
- */
-export function resolveCronDeliveryPlans(job: CronJob): CronDeliveryPlan[] {
-  const primary = resolveCronDeliveryPlan(job);
-  const targets = job.delivery?.targets;
-  if (primary.mode !== "announce" || !targets || targets.length === 0) {
-    return [primary];
-  }
-  return targets.map((target) => {
-    const to = normalizeOptionalString(target.to);
-    return {
-      mode: "announce" as const,
-      channel: resolveAnnounceChannel({ channel: normalizeChannel(target.channel), to }),
-      to,
-      threadId: normalizeOptionalThreadValue(target.threadId),
-      accountId: normalizeOptionalString(target.accountId),
-      source: "delivery" as const,
-      requested: true,
-    };
-  });
 }
 
 /** Normalized destination for notifying about cron execution failures. */

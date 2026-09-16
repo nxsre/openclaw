@@ -71,14 +71,6 @@ export function isDeliveredMessagingToolResult(params: {
   if (args.dryRun === true || results.some((result) => pluginEnvelopeHas(result, "dryRun"))) {
     return false;
   }
-  // xcph: 回执明确表示「未送达 / no-op」时直接判否,避免后续正向 OK/partial 误判为已送达。
-  if (
-    results.some(
-      (result) => pluginEnvelopeHas(result, "nonDelivery") || pluginEnvelopeHas(result, "noOp"),
-    )
-  ) {
-    return false;
-  }
   if (results.some((result) => pluginEnvelopeHas(result, "partial"))) {
     return true;
   }

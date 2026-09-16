@@ -9,8 +9,8 @@ import {
   normalizeChannelId,
 } from "../channels/plugins/index.js";
 import { resolveInstallableChannelPlugin } from "../commands/channel-setup/channel-plugin-resolution.js";
-import { assertAccountSelectorForMutation } from "../commands/channels/account-selector.js";
-import { requireValidConfigFileSnapshot } from "../commands/config-validation.js";
+import { parseAccountSelector } from "../commands/channels/account-selector.js";
+import { requireValidConfigForWrite } from "../commands/config-validation.js";
 import { getRuntimeConfig, type OpenClawConfig } from "../config/config.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
 import { callGateway } from "../gateway/call.js";
@@ -104,13 +104,16 @@ async function resolveChannelPluginForMode(
   channelId: string;
   plugin: ChannelPlugin;
 } | null> {
-  assertAccountSelectorForMutation(opts.account);
-  const snapshot = await requireValidConfigFileSnapshot(runtime);
-  if (!snapshot) {
+  parseAccountSelector(opts.account);
+  const writeSnapshot = await requireValidConfigForWrite(runtime);
+  if (!writeSnapshot) {
     return null;
   }
   // Runtime defaults are not authored plugin enablement intent.
-  const autoEnabled = applyPluginAutoEnable({ config: snapshot.sourceConfig, env: process.env });
+  const autoEnabled = applyPluginAutoEnable({
+    config: writeSnapshot.snapshot.sourceConfig,
+    env: process.env,
+  });
   const cfg = autoEnabled.config;
   const explicitChannel = opts.channel?.trim();
   const channelInput = explicitChannel || resolveConfiguredAuthChannelInput(mode);
@@ -143,8 +146,9 @@ async function resolveChannelPluginForMode(
   }
   if (autoEnabled.changes.length > 0 || resolved.configChanged) {
     await commitConfigWithPendingPluginInstalls({
-      nextConfig: resolved.cfg,
-      baseHash: snapshot.hash,
+      sourceConfig: resolved.cfg,
+      baseHash: writeSnapshot.snapshot.hash,
+      writeOptions: writeSnapshot.writeOptions,
     });
   }
   return {
@@ -194,11 +198,6 @@ async function reconcileGatewayRuntimeAfterLocalLogin(params: {
     return;
   }
   try {
-    // Weixin credentials are written under OPENCLAW_STATE_DIR as JSON; bind mounts / NFS
-    // can briefly hide updates from the gateway process that handles channels.start.
-    if (params.channelId === "openclaw-weixin") {
-      await new Promise((resolve) => setTimeout(resolve, 800));
-    }
     const result = await callGateway<{ outcome?: ChannelAccountStartOutcome }>({
       config: params.cfg,
       method: "channels.start",
@@ -294,25 +293,18 @@ export async function runChannelLogin(
   // Auth-only flow: do not mutate channel config here.
   setVerbose(Boolean(opts.verbose));
   const { accountId } = resolveAccountContext(plugin, opts, cfg);
-  const loginResult = await login({
+  await login({
     cfg,
     accountId,
     runtime,
     verbose: Boolean(opts.verbose),
     channelInput,
   });
-  const reconcileAccountId =
-    loginResult &&
-    typeof loginResult === "object" &&
-    typeof (loginResult as { reconcileAccountId?: unknown }).reconcileAccountId === "string" &&
-    (loginResult as { reconcileAccountId: string }).reconcileAccountId.trim()
-      ? (loginResult as { reconcileAccountId: string }).reconcileAccountId.trim()
-      : accountId;
   await reconcileGatewayRuntimeAfterLocalLogin({
     cfg,
     plugin,
     channelId: plugin.id,
-    accountId: reconcileAccountId,
+    accountId,
     runtime,
   });
 }

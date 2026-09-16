@@ -10,7 +10,6 @@ import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import {
   hasExplicitCronDeliveryTarget,
   resolveCronDeliveryPlan,
-  resolveCronDeliveryPlans,
   type CronDeliveryPlan,
 } from "../delivery-plan.js";
 import {
@@ -238,27 +237,7 @@ export async function resolveCronDeliveryContext(params: {
   job: CronJob;
   agentId: string;
 }) {
-  // With delivery.targets the first target is the primary route (message-tool
-  // source delivery, session identity); additional targets fan out after the
-  // run. `all` wildcards expand to concrete recipients first. Without targets,
-  // keep the single-plan path so callers/tests that depend on
-  // resolveCronDeliveryPlan see no behavior change.
-  let deliveryPlan: CronDeliveryPlan;
-  // Expand `all` wildcards / fan-out targets exactly once and carry the extra
-  // plans forward so finalizeCronRun reuses the same snapshot (no second
-  // directory/session enumeration, no cross-call dedup drift).
-  let additionalDeliveryPlans: CronDeliveryPlan[] = [];
-  if (params.job.delivery?.targets?.length) {
-    const { expandCronDeliveryPlans } = await loadCronDeliveryRuntime();
-    const expanded = await expandCronDeliveryPlans(resolveCronDeliveryPlans(params.job), {
-      cfg: params.cfg,
-      agentId: params.agentId,
-    });
-    deliveryPlan = expanded[0] ?? resolveCronDeliveryPlan(params.job);
-    additionalDeliveryPlans = expanded.slice(1);
-  } else {
-    deliveryPlan = resolveCronDeliveryPlan(params.job);
-  }
+  const deliveryPlan = resolveCronDeliveryPlan(params.job);
   if (deliveryPlan.mode === "webhook") {
     const resolvedDelivery = {
       ok: false as const,
@@ -271,7 +250,6 @@ export async function resolveCronDeliveryContext(params: {
     };
     return {
       deliveryPlan,
-      additionalDeliveryPlans,
       deliveryRequested: deliveryPlan.requested,
       resolvedDelivery,
       sourceDelivery: resolveCronSourceDeliveryPlan({ deliveryPlan, resolvedDelivery }),
@@ -289,7 +267,6 @@ export async function resolveCronDeliveryContext(params: {
     };
     return {
       deliveryPlan,
-      additionalDeliveryPlans,
       deliveryRequested: false,
       resolvedDelivery,
       sourceDelivery: resolveCronSourceDeliveryPlan({ deliveryPlan, resolvedDelivery }),
@@ -297,21 +274,14 @@ export async function resolveCronDeliveryContext(params: {
   }
   const { resolveDeliveryTarget } = await loadCronDeliveryRuntime();
   const resolvedDelivery = await resolveDeliveryTarget(params.cfg, params.agentId, {
-    channel: deliveryPlan.channel ?? "last",
-    to: deliveryPlan.to,
-    threadId: deliveryPlan.threadId,
-    accountId: deliveryPlan.accountId,
-    // Resolve the job's own session identity (sessionTarget takes precedence over sessionKey, the
-    // same as delivery preview) so a session-scoped cron is not misread as keyless by the #91613
-    // keyless-inherited refusal inside resolveDeliveryTarget. The refusal itself now lives in the
-    // resolver (returns ok:false), so the delivery dispatch !ok gate, the failure-notification
-    // path, and the delivery preview all honor it uniformly (the dispatch gate refuses the send and
-    // never enqueues, so a restart has nothing to replay; the agent turn still runs before that).
+    ...deliveryPlan,
+    sessionTarget: params.job.payload.kind === "agentTurn" ? params.job.sessionTarget : undefined,
+    // Match preview's sessionTarget precedence: custom jobs resolve their own
+    // delivery session rather than the creator's last conversation.
     sessionKey: resolveCronDeliverySessionKey(params.job),
   });
   return {
     deliveryPlan,
-    additionalDeliveryPlans,
     deliveryRequested: deliveryPlan.requested,
     resolvedDelivery,
     sourceDelivery: resolveCronSourceDeliveryPlan({ deliveryPlan, resolvedDelivery }),

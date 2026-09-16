@@ -23,7 +23,7 @@ import { chatRunBelongsToSelectedAgent } from "../chat-run-owner.js";
 import type { ChatRunTiming } from "../server-chat-state.js";
 import { tryResolveSessionCompatibilityOwnerAgentId } from "../session-request-agent.js";
 import { buildAbortedChatSendPayload } from "./chat-abort-authorization.js";
-import { broadcastChatError, broadcastChatFinal } from "./chat-broadcast.js";
+import { broadcastChatDelta, broadcastChatError, broadcastChatFinal } from "./chat-broadcast.js";
 import type { RestartSafeChatTerminalState } from "./chat-restart-recovery.js";
 import type { AdmittedChatSend } from "./chat-send-admission.js";
 import type { prepareChatSendAttachments } from "./chat-send-attachments.js";
@@ -173,13 +173,25 @@ export function startChatDispatch(params: StartChatDispatchParams): void {
 
   let agentRunStarted = false;
   let replyDispatchRun: ReplyDispatchRun | undefined;
+  const isRunCurrent = () =>
+    !activeRunAbort.controller.signal.aborted &&
+    context.chatAbortControllers.get(clientRunId) === activeRunAbort.entry;
   const replyDispatch = createChatSendReplyDispatch({
     accountId,
     prepareAssistantTranscriptMessage: params.prepareAssistantTranscriptMessage,
     isAgentRunStarted: () => agentRunStarted,
-    isRunCurrent: () =>
-      !activeRunAbort.controller.signal.aborted &&
-      context.chatAbortControllers.get(clientRunId) === activeRunAbort.entry,
+    isRunCurrent,
+    onCommandBlock: isInternalTextSlashCommandTurn
+      ? (text) =>
+          broadcastChatDelta({
+            context,
+            runId: clientRunId,
+            sessionKey,
+            agentId,
+            text,
+            isCurrent: isRunCurrent,
+          })
+      : undefined,
     getReplyDispatchRun: () => replyDispatchRun,
     logGateway: context.logGateway,
     session,
@@ -218,6 +230,7 @@ export function startChatDispatch(params: StartChatDispatchParams): void {
     admission,
     classifyFailure: classifyDispatchFailure,
     context,
+    isAgentRunStarted: () => agentRunStarted,
     isQueuedFollowupEnqueued: queuedFollowup.isEnqueued,
     persistUserTurnTranscript: persistGatewayUserTurnTranscript,
     session,
@@ -366,6 +379,7 @@ export function startChatDispatch(params: StartChatDispatchParams): void {
                 images: replyOptionImages,
                 imageOrder: imageOrder.length > 0 ? imageOrder : undefined,
                 media: replyOptionMedia,
+                ...(p.timeoutMs !== undefined ? { timeoutOverrideMs: p.timeoutMs } : {}),
                 thinkingLevelOverride: p.thinking,
                 fastModeOverride: p.fastMode,
                 queueModeOverride: p.queueMode,
@@ -395,10 +409,6 @@ export function startChatDispatch(params: StartChatDispatchParams): void {
                     client?.connect?.caps,
                     GATEWAY_CLIENT_CAPS.TOOL_EVENTS,
                   );
-                  const wantsThinkingEvents = hasGatewayClientCap(
-                    client?.connect?.caps,
-                    GATEWAY_CLIENT_CAPS.THINKING_EVENTS,
-                  );
                   if (connId && wantsToolEvents) {
                     context.registerToolEventRecipient(runId, connId);
                     // Register for any other active runs *in the same session* so
@@ -421,29 +431,6 @@ export function startChatDispatch(params: StartChatDispatchParams): void {
                       const sameSession = active.sessionKey === sessionKey && sameSelectedAgent;
                       if (activeRunId !== runId && sameSession) {
                         context.registerToolEventRecipient(activeRunId, connId);
-                      }
-                    }
-                  }
-                  const registerThinking = context.registerThinkingEventRecipient;
-                  if (connId && wantsThinkingEvents && registerThinking) {
-                    registerThinking(runId, connId);
-                    const compatibilityOwnerAgentId = tryResolveSessionCompatibilityOwnerAgentId(
-                      cfg,
-                      sessionKey,
-                    );
-                    const selectedSessionAgentId = selectedAgent.agentId;
-                    for (const [activeRunId, active] of context.chatAbortControllers) {
-                      const sameSelectedAgent =
-                        selectedSessionAgentId !== undefined &&
-                        chatRunBelongsToSelectedAgent({
-                          agentId: active.agentId,
-                          sessionKey: active.sessionKey,
-                          defaultAgentId: compatibilityOwnerAgentId,
-                          selectedAgentId: selectedSessionAgentId,
-                        });
-                      const sameSession = active.sessionKey === sessionKey && sameSelectedAgent;
-                      if (activeRunId !== runId && sameSession) {
-                        registerThinking(activeRunId, connId);
                       }
                     }
                   }

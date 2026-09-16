@@ -45,15 +45,6 @@ describe("WebLoginWaitParamsSchema", () => {
       }),
     ).toBe(true);
   });
-
-  it("accepts optional sessionKey for web.login.wait", () => {
-    expect(validate.Check({ sessionKey: "uuid-session-key" })).toBe(true);
-    expect(
-      validate.Check({
-        sessionKey: "x".repeat(513),
-      }),
-    ).toBe(false);
-  });
 });
 
 describe("WebLoginStartParamsSchema", () => {
@@ -125,6 +116,15 @@ describe("ChannelsStatusResultSchema", () => {
         channelDefaultAccountId: { discord: "default" },
         partial: true,
         warnings: ["discord:default probe timed out after 1000ms"],
+        statusIssues: [
+          {
+            channel: "discord",
+            accountId: "default",
+            kind: "config",
+            message: "No guilds are allowed.",
+            fix: "Add an allowed guild.",
+          },
+        ],
         eventLoop: {
           degraded: true,
           degradedSinceMs: 61_000,

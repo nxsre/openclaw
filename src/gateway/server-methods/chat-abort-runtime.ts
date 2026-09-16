@@ -15,7 +15,6 @@ import {
   isSubagentRunQueued,
   listSubagentRunsForController,
 } from "../../agents/subagents/registry/subagent-registry-read.js";
-import { abortSessionRunTargetWithOutcome } from "../../auto-reply/reply/abort.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { isAgentEventLifecycleGenerationCurrent } from "../../infra/agent-events.js";
 import { SUBAGENT_KILL_TASK_ERROR } from "../../tasks/detached-task-runtime-contract.js";
@@ -28,7 +27,6 @@ import {
 } from "../chat-abort.js";
 import { abortQueuedChatTurns, listQueuedChatTurnsForSession } from "../chat-queued-turns.js";
 // Cancellation orchestration across active, queued, pending, and worker runs.
-
 import { resolveChatRunOwnerAgentId } from "../chat-run-owner.js";
 import { errorShapeFromError } from "../error-shape.js";
 import { PENDING_CHAT_SEND_DEDUPE_PREFIX } from "../server-shared.js";
@@ -55,42 +53,6 @@ import {
 } from "./chat-transcript-persistence.js";
 import { emitSessionsChanged } from "./session-change-event.js";
 import type { GatewayRequestContext } from "./types.js";
-
-// Abort every in-flight chat/agent run owned by a given WS connection. Used by the
-// connection layer to cancel a disconnected caller's unfinished work (after a grace
-// window). Re-checks ownerConnId per run before aborting: during the grace window a run
-// may have finished (removed from the registry) or been taken over by a same-device
-// reconnect (ownerConnId rewritten) — both are skipped so we never abort the wrong run.
-export function abortChatRunsByConnId(
-  context: GatewayRequestContext,
-  connId: string,
-  stopReason: string,
-): string[] {
-  const ops = createChatAbortOps(context);
-  const targets: { runId: string; sessionKey: string }[] = [];
-  for (const [runId, entry] of context.chatAbortControllers) {
-    if (entry.ownerConnId === connId) {
-      targets.push({ runId, sessionKey: entry.sessionKey });
-    }
-  }
-  const aborted: string[] = [];
-  for (const target of targets) {
-    const current = context.chatAbortControllers.get(target.runId);
-    if (!current || current.ownerConnId !== connId) {
-      continue;
-    }
-    const res = abortChatRunById(ops, {
-      runId: target.runId,
-      sessionKey: current.sessionKey,
-      stopReason,
-    });
-    if (res.aborted) {
-      aborted.push(target.runId);
-    }
-  }
-  return aborted;
-}
-
 
 export async function abortControlledSubagents(params: {
   cfg: OpenClawConfig;
@@ -569,20 +531,7 @@ function prepareChatSessionAbort(params: ChatSessionAbortParams, selectedRunId?:
         !params.requester.isAdmin ||
         !canCancelWorkerSession
       ) {
-        // Channel inbound (e.g. XIM) registers in replyRunRegistry, not chatAbortControllers.
-        // Fall through so chat.abort can still stop those runs (same path as IM /stop).
-        let replyAborted = additionalAborted;
-        for (const sk of sessionKeys) {
-          const outcome = abortSessionRunTargetWithOutcome({
-            key: sk,
-            sessionId: params.sessionId,
-            agentId: params.agentId,
-          });
-          if (outcome.aborted) {
-            replyAborted = true;
-          }
-        }
-        return { aborted: replyAborted, runIds: [], unauthorized: false };
+        return { aborted: additionalAborted, runIds: [], unauthorized: false };
       }
       const workerRunIds = cancelWorkerInferenceForSession({
         context: params.context,

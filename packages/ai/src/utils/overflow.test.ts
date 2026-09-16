@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AssistantMessage } from "../types.js";
+import { createZeroUsage } from "../usage.test-support.js";
 import {
   isConfiguredContextSizeOverflowError,
   isContextOverflow,
@@ -13,14 +14,7 @@ function errorMessage(message: string): AssistantMessage {
     api: "test-api",
     provider: "test-provider",
     model: "test-model",
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
+    usage: createZeroUsage(),
     stopReason: "error",
     errorMessage: message,
     timestamp: 1,
@@ -117,18 +111,6 @@ describe("bodyless HTTP errors", () => {
 
   it("preserves Cerebras 413 overflow recovery", () => {
     expect(isContextOverflow(errorMessage("413 status code (no body)"), 262_144)).toBe(true);
-  });
-
-  it("does not treat bare 400 status code (no body) as overflow for non-cerebras providers", () => {
-    const msg = errorMessage("400 status code (no body)");
-    msg.provider = "cloudphone_unicom_manual";
-    expect(isContextOverflow(msg, 128_000)).toBe(false);
-  });
-
-  it("keeps bare 400 status code (no body) as overflow for cerebras only", () => {
-    const msg = errorMessage("400 status code (no body)");
-    msg.provider = "cerebras";
-    expect(isContextOverflow(msg, 128_000)).toBe(true);
   });
 });
 

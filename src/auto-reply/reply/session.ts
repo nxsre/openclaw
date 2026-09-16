@@ -69,7 +69,6 @@ import { isDiagnosticFlagEnabled } from "../../infra/diagnostic-flags.js";
 import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
 import { deliverSessionMaintenanceWarning } from "../../infra/session-maintenance-warning.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
-import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
 import { isPluginOwnedSessionBindingRecord } from "../../plugins/conversation-binding-metadata.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import type { PluginHookSessionEndReason } from "../../plugins/hook-types.js";
@@ -136,7 +135,11 @@ import {
   canReplaceRestartTombstoneFromParent,
   prepareReplySessionParentFork,
 } from "./session-parent-fork-prepare.js";
-import { clearSessionResetRuntimeState } from "./session-reset-cleanup.js";
+import {
+  clearSessionResetRuntimeState,
+  createSessionResetCleanupGuard,
+  stopSessionResetSubagents,
+} from "./session-reset-cleanup.js";
 import { resolveAuthorizedSessionResetCommand } from "./session-reset-command.js";
 import {
   stripThreadFromSessionRoute,
@@ -145,21 +148,6 @@ import {
 } from "./session-route-reset.js";
 
 const log = createSubsystemLogger("session-init");
-
-// XCPH: serialize reply-session init per conversation so optimistic commits
-// are never contended by a sibling init (xim rapid messages). Unrelated keys stay parallel.
-const replySessionInitQueue = new KeyedAsyncQueue();
-
-function replySessionInitQueueKey(params: InitSessionStateParams): string {
-  const ctx = params.ctx;
-  const key =
-    normalizeOptionalString(ctx.SessionKey) ??
-    normalizeOptionalString(ctx.From) ??
-    normalizeOptionalString(ctx.To) ??
-    "";
-  return `${normalizeOptionalString(ctx.AgentId) ?? ""}::${key}`;
-}
-
 
 type ReplySessionEndReason = Extract<
   PluginHookSessionEndReason,
@@ -253,7 +241,13 @@ type InitSessionStateAttemptContext = {
 
 type InitSessionStateAttemptOutcome =
   | { kind: "complete"; result: SessionInitResult }
-  | { kind: "lifecycle-mutation"; sessionId: string; sessionKey: string };
+  | {
+      kind: "lifecycle-mutation";
+      sessionId: string;
+      sessionKey: string;
+      lifecycleRevision?: string;
+      resetTriggered: boolean;
+    };
 
 function resolveSessionConversationBindingContext(
   cfg: OpenClawConfig,
@@ -437,6 +431,7 @@ function resolveReplySessionRolloverState(
     authProfileOverrideSource: preservedSelection.authProfileOverrideSource,
     authProfileOverrideCompactionCount: preservedSelection.authProfileOverrideCompactionCount,
     label: entry.label,
+    autoLabel: entry.autoLabel,
     displayName: entry.displayName,
     // Notice debt survives rollover: erasing it here would recreate the
     // silent ambiguous-loss outcome the debt exists to prevent.
@@ -464,21 +459,10 @@ function resolveReplySessionRolloverState(
 
 export async function initSessionState(params: InitSessionStateParams): Promise<SessionInitResult> {
   prepareChannelParticipantObservation(params.ctx);
-  // XCPH: chain same-conversation inits so the optimistic commit is never contended
-  // by a sibling init; unrelated keys stay fully parallel.
-  return await replySessionInitQueue.enqueue(replySessionInitQueueKey(params), async () => {
-    try {
-      return await runWithSessionInitConflictRetry(
-        async () => await initSessionStateAttempt(params, false),
-        { signal: params.signal },
-      );
-    } catch (error) {
-      if (error instanceof ReplySessionInitConflictError) {
-        throw new Error(`${error.message} after retries`);
-      }
-      throw error;
-    }
-  });
+  return await runWithSessionInitConflictRetry(
+    async () => await initSessionStateAttempt(params, false),
+    { signal: params.signal },
+  );
 }
 
 async function initSessionStateAttempt(
@@ -511,16 +495,24 @@ async function initSessionStateAttempt(
       prepare: async () => {
         // A queued rollover may change identity or become obsolete. Recheck
         // before interrupting, then reacquire any refreshed identity first.
-        const revalidated = await runExclusiveSessionStoreWrite(
-          attemptContext.storePath,
-          async () => await initSessionStateAttemptLocked(params, attemptContext, false, undefined),
-        );
-        if (
-          revalidated.kind === "complete" ||
-          revalidated.sessionKey !== candidate.sessionKey ||
-          revalidated.sessionId !== candidate.sessionId
-        ) {
-          preparedOutcome = revalidated;
+        const revalidate = async () => {
+          const revalidated = await runExclusiveSessionStoreWrite(
+            attemptContext.storePath,
+            async () =>
+              await initSessionStateAttemptLocked(params, attemptContext, false, undefined),
+          );
+          if (
+            revalidated.kind === "complete" ||
+            revalidated.sessionKey !== candidate.sessionKey ||
+            revalidated.sessionId !== candidate.sessionId ||
+            revalidated.lifecycleRevision !== candidate.lifecycleRevision
+          ) {
+            preparedOutcome = revalidated;
+            return undefined;
+          }
+          return revalidated;
+        };
+        if (!(await revalidate())) {
           return;
         }
         const drained = await interruptSessionWorkAdmissions({
@@ -532,6 +524,24 @@ async function initSessionStateAttempt(
           throw new Error(
             `timed out draining work before reply session rollover: ${candidate.sessionKey}`,
           );
+        }
+        // A draining owner can rebind the parent. Reacquire and drain that identity
+        // before selecting any child work associated with the session.
+        const afterDrain = await revalidate();
+        if (afterDrain?.resetTriggered) {
+          // Child finalizers may need the same store writer. Drain them here,
+          // outside that lane, before an explicit reset can commit or run its tail.
+          await stopSessionResetSubagents({
+            cfg: params.cfg,
+            sessionKey: candidate.sessionKey,
+            agentId: attemptContext.agentId,
+            assertCurrent: createSessionResetCleanupGuard({
+              sessionKey: candidate.sessionKey,
+              storePath: attemptContext.storePath,
+              expectedSession: afterDrain,
+              assertCurrent: () => params.signal?.throwIfAborted(),
+            }),
+          });
         }
       },
       run: async () => {
@@ -557,7 +567,9 @@ async function initSessionStateAttemptLocked(
   params: InitSessionStateParams,
   attemptContext: InitSessionStateAttemptContext,
   staleSnapshotRetried: boolean,
-  lifecycleMutationIdentity: { sessionId: string; sessionKey: string } | undefined,
+  lifecycleMutationIdentity:
+    | { sessionId: string; sessionKey: string; lifecycleRevision?: string }
+    | undefined,
 ): Promise<InitSessionStateAttemptOutcome> {
   const { ctx, cfg, commandAuthorized } = params;
   const {
@@ -817,13 +829,16 @@ async function initSessionStateAttemptLocked(
   const lifecycleMutationMatches = Boolean(
     previousSessionEntry &&
     lifecycleMutationIdentity?.sessionKey === sessionKey &&
-    lifecycleMutationIdentity.sessionId === previousSessionEntry.sessionId,
+    lifecycleMutationIdentity.sessionId === previousSessionEntry.sessionId &&
+    lifecycleMutationIdentity.lifecycleRevision === previousSessionEntry.lifecycleRevision,
   );
   if (previousSessionEntry && !lifecycleMutationMatches) {
     return {
       kind: "lifecycle-mutation",
       sessionId: previousSessionEntry.sessionId,
       sessionKey,
+      lifecycleRevision: previousSessionEntry.lifecycleRevision,
+      resetTriggered,
     };
   }
   const recoveredTerminalEntry =

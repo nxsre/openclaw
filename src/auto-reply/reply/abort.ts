@@ -4,6 +4,7 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { getAcpSessionManager } from "../../acp/control-plane/manager.js";
+import { retireSessionMcpRuntime } from "../../agents/agent-bundle-mcp-manager-api.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { resolveActiveEmbeddedRunSessionId } from "../../agents/embedded-agent-runner/active-run-projections.js";
 import { abortEmbeddedAgentRun } from "../../agents/embedded-agent-runner/runs.js";
@@ -25,11 +26,7 @@ import {
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { formatErrorMessage } from "../../infra/errors.js";
-import {
-  isAcpSessionKey,
-  isSubagentSessionKey,
-  parseAgentSessionKey,
-} from "../../routing/session-key.js";
+import { isAcpSessionKey, isSubagentSessionKey } from "../../routing/session-key.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
 import type { FinalizedRuntimeMsgContext } from "../templating.js";
 import {
@@ -42,92 +39,23 @@ import { resolveEffectiveResetTargetSessionKey } from "./acp-reset-target.js";
 import { resolveConversationBindingContextFromMessage } from "./conversation-binding-input.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import { clearSessionQueues } from "./queue.js";
-import { listActiveReplyRunSessionKeys, replyRunRegistry } from "./reply-run-registry.js";
+import { replyRunRegistry } from "./reply-run-registry.js";
 
 export { isAbortRequestText, isAbortTrigger, setAbortMemory };
 
-/**
- * Abort active channel reply runs whose sessionKey agent segment matches.
- * Used when chat.abort targets sessionKey "global" + agentId (Control UI / ③),
- * because XIM/inbound runs register under agent:<id>:<channel>:... not "global".
- */
-function isGlobalAbortSessionKey(key: string | undefined): boolean {
-  const normalized = normalizeOptionalLowercaseString(key);
-  return !normalized || normalized === "global" || normalized === "main";
-}
-
-/** Best-effort parse of "...:s:<sessionId>" from channel session keys (e.g. XIM). */
-function sessionIdFromSessionKey(key: string | undefined): string | undefined {
-  const normalized = normalizeOptionalString(key);
-  if (!normalized) {
-    return undefined;
-  }
-  const marker = ":s:";
-  const idx = normalized.lastIndexOf(marker);
-  if (idx < 0) {
-    return undefined;
-  }
-  return normalizeOptionalString(normalized.slice(idx + marker.length));
-}
-
-/**
- * Abort active channel reply runs whose sessionKey agent segment matches.
- * Used when chat.abort targets sessionKey "global" + agentId (Control UI / ③),
- * because XIM/inbound runs register under agent:<id>:<channel>:... not "global".
- */
-export function abortReplyRunsForAgentId(agentId?: string): {
-  aborted: boolean;
-  sessionKeys: string[];
-} {
-  const id = normalizeOptionalLowercaseString(agentId);
-  if (!id) {
-    return { aborted: false, sessionKeys: [] };
-  }
-  let aborted = false;
-  const sessionKeys: string[] = [];
-  for (const key of listActiveReplyRunSessionKeys()) {
-    const parsed = parseAgentSessionKey(key);
-    if (!parsed || normalizeOptionalLowercaseString(parsed.agentId) !== id) {
-      continue;
-    }
-    // Full session abort (registry + embedded), not registry.abort alone —
-    // freezeAbort / finalizing can make abort() return false while the run still lives.
-    const outcome = abortSessionRunTargetWithOutcome({ key });
-    if (outcome.aborted) {
-      aborted = true;
-      sessionKeys.push(key);
-    }
-  }
-  return { aborted, sessionKeys };
-}
-
-export function abortSessionRunTargetWithOutcome(params: {
-  key?: string;
-  sessionId?: string;
-  /** When key is global/main (or empty), also abort agent:<agentId>:* reply runs. */
-  agentId?: string;
-}): {
+export function abortSessionRunTargetWithOutcome(params: { key?: string; sessionId?: string }): {
   active: boolean;
   aborted: boolean;
+  retirement?: Promise<void>;
 } {
   const sessionIds = new Set<string>();
   const key = normalizeOptionalString(params.key);
   let active = key ? replyRunRegistry.isActive(key) : false;
   if (key) {
-    // Channel inbound (XIM) tracks sessionId on replyRunRegistry, not only embedded maps.
-    const replySessionId = replyRunRegistry.resolveSessionId(key);
-    if (replySessionId) {
-      active = true;
-      sessionIds.add(replySessionId);
-    }
     const activeSessionId = resolveActiveEmbeddedRunSessionId(key);
     if (activeSessionId) {
       active = true;
       sessionIds.add(activeSessionId);
-    }
-    const fromKey = sessionIdFromSessionKey(key);
-    if (fromKey) {
-      sessionIds.add(fromKey);
     }
   }
   const explicitSessionId = normalizeOptionalString(params.sessionId);
@@ -139,15 +67,19 @@ export function abortSessionRunTargetWithOutcome(params: {
   for (const sessionId of sessionIds) {
     aborted = abortEmbeddedAgentRun(sessionId) || aborted;
   }
-  // sessionKey "global"/"main" never matches XIM inbound keys; fan out by agentId.
-  if (!aborted && params.agentId && isGlobalAbortSessionKey(key)) {
-    const agentAbort = abortReplyRunsForAgentId(params.agentId);
-    if (agentAbort.aborted) {
-      active = true;
-      aborted = true;
-    }
-  }
-  return { active, aborted };
+  // Stop owns these captured IDs; a later turn may rebind the session key.
+  const retirement =
+    !active || aborted
+      ? Promise.all(
+          [...sessionIds].map((sessionId) =>
+            retireSessionMcpRuntime({
+              sessionId,
+              reason: "session-stop",
+            }),
+          ),
+        ).then(() => undefined)
+      : undefined;
+  return { active, aborted, retirement };
 }
 
 export function formatAbortReplyText(
@@ -284,19 +216,15 @@ export async function tryFastAbortFromMessage(params: {
   const commandSessionKey =
     normalizeOptionalString(ctx.SessionKey) ?? normalizeOptionalString(ctx.ParentSessionKey);
   const targetKey = normalizeOptionalString(ctx.CommandTargetSessionKey) ?? commandSessionKey;
+  const resolveTargetAgentId = () =>
+    resolveSessionAgentId({
+      sessionKey: targetKey ?? ctx.SessionKey ?? "",
+      config: cfg,
+      fallbackAgentId: ctx.AgentId,
+    });
   const raw = stripStructuralPrefixes(ctx.commandText);
   const isGroup = normalizeOptionalLowercaseString(ctx.ChatType) === "group";
-  const stripped = isGroup
-    ? stripMentions(
-        raw,
-        ctx,
-        cfg,
-        resolveSessionAgentId({
-          sessionKey: targetKey ?? ctx.SessionKey ?? "",
-          config: cfg,
-        }),
-      )
-    : raw;
+  const stripped = isGroup ? stripMentions(raw, ctx, cfg, resolveTargetAgentId()) : raw;
   const abortRequested = isAbortRequestText(stripped);
   if (!abortRequested) {
     return { handled: false, aborted: false };
@@ -312,11 +240,7 @@ export async function tryFastAbortFromMessage(params: {
     return { handled: false, aborted: false };
   }
 
-  const agentId = resolveSessionAgentId({
-    sessionKey: targetKey ?? ctx.SessionKey ?? "",
-    config: cfg,
-    fallbackAgentId: ctx.AgentId,
-  });
+  const agentId = resolveTargetAgentId();
   const abortKey = targetKey ?? auth.from ?? auth.to;
   const requesterSessionKey = targetKey ?? ctx.SessionKey ?? abortKey;
 
@@ -390,6 +314,9 @@ export async function tryFastAbortFromMessage(params: {
                 key: abortTargetKey,
                 sessionId: sessionIdsByKey.get(abortTargetKey),
               });
+              if (outcome.retirement) {
+                acpCancellations.push(outcome.retirement);
+              }
               activeAbortRejected ||= outcome.active && !outcome.aborted;
               aborted = outcome.aborted || aborted;
             }
@@ -402,6 +329,9 @@ export async function tryFastAbortFromMessage(params: {
                 key: sourceAbortKey,
                 sessionId: sourceSessionId,
               });
+              if (outcome.retirement) {
+                acpCancellations.push(outcome.retirement);
+              }
               activeAbortRejected ||= outcome.active && !outcome.aborted;
               aborted = outcome.aborted || aborted;
             }

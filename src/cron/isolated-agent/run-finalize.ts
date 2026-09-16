@@ -5,6 +5,10 @@ import {
 } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { hasAcceptedSessionSpawn } from "../../agents/accepted-session-spawn.js";
+import {
+  buildAgentRunTerminalReplySnapshot,
+  normalizeAgentRunTerminalReplySnapshot,
+} from "../../agents/agent-run-terminal-reply.js";
 import { resolveAuthoredModelContextTokens } from "../../agents/context-resolution.js";
 import { hasCommittedMessagingToolDeliveryEvidence } from "../../agents/embedded-agent-runner/delivery-evidence.js";
 import { hasIntentionalTerminalCompletion } from "../../agents/embedded-agent-runner/result-fallback-classifier.js";
@@ -31,7 +35,6 @@ import {
   createCronRunDiagnosticsFromError,
   mergeCronRunDiagnostics,
 } from "../run-diagnostics.js";
-import { resolveCronDeliverySessionKey } from "../session-target.js";
 import type { CronDeliveryTrace, CronRunTelemetry } from "../types.js";
 import { resolveCronChannelOutputPolicy } from "./channel-output-policy.js";
 import { resolveCronPayloadOutcome } from "./helpers.js";
@@ -65,6 +68,14 @@ export async function finalizeCronRun(params: {
 }): Promise<RunCronAgentTurnResult> {
   const { prepared, execution } = params;
   const finalRunResult = execution.runResult;
+  const replyDisposition = (
+    normalizeAgentRunTerminalReplySnapshot(finalRunResult.meta?.terminalReply) ??
+    buildAgentRunTerminalReplySnapshot({
+      visibleText: finalRunResult.meta?.finalAssistantVisibleText,
+      rawText: finalRunResult.meta?.finalAssistantRawText,
+      terminalReplyKind: finalRunResult.meta?.terminalReplyKind,
+    })
+  ).disposition;
   const payloads = finalRunResult.payloads ?? [];
   const cleanupRunSession = async (reason: string) => {
     await cleanupCronRunSessionAfterRun({
@@ -218,6 +229,7 @@ export async function finalizeCronRun(params: {
       provider: providerUsed,
       model: modelUsed,
       config: prepared.cfgWithAgentDefaults,
+      agentDir: prepared.agentDir,
     });
     if (hasBillableUsage(usage)) {
       // Monetary facts do not establish token/context counters; unknown cost clears old dollars.
@@ -286,6 +298,7 @@ export async function finalizeCronRun(params: {
     return prepared.withRunSession({
       status: "error",
       error: params.abortReason(),
+      replyDisposition,
       diagnostics: mergeCronRunDiagnostics(
         prepared.preflightDiagnostics,
         createCronRunDiagnosticsFromAgentResult(finalRunResult, { finalStatus: "error" }),
@@ -312,6 +325,7 @@ export async function finalizeCronRun(params: {
     return prepared.withRunSession({
       status: "error",
       error,
+      replyDisposition,
       diagnostics: mergeCronRunDiagnostics(
         prepared.preflightDiagnostics,
         createCronRunDiagnosticsFromAgentResult(finalRunResult, { finalStatus: "error" }),
@@ -358,6 +372,7 @@ export async function finalizeCronRun(params: {
         : {}),
       summary,
       outputText,
+      replyDisposition,
       deliveryState: result?.deliveryState,
       delivered: result?.delivered,
       deliveryAttempted: result?.deliveryAttempted,
@@ -451,6 +466,7 @@ export async function finalizeCronRun(params: {
       error,
       summary: error,
       outputText: error,
+      replyDisposition,
       delivered: false,
       deliveryAttempted: false,
       diagnostics: mergeCronRunDiagnostics(
@@ -499,6 +515,7 @@ export async function finalizeCronRun(params: {
     runEndedAt: execution.runEndedAt,
     timeoutMs: prepared.timeoutMs,
     resolvedDelivery: prepared.resolvedDelivery,
+    deliveryPlan: prepared.deliveryPlan,
     deliveryRequested: prepared.deliveryRequested,
     undeliveredRunStatus: hasFatalErrorPayload || pendingPresentationWarningError ? "error" : "ok",
     skipDelivery: skipHeartbeatDelivery
@@ -522,49 +539,6 @@ export async function finalizeCronRun(params: {
     abortReason: params.abortReason,
     withRunSession: prepared.withRunSession,
   });
-  // Broadcast the same delivered text to any additional delivery.targets
-  // (targets[1..], with `all` wildcards expanded to concrete recipients). The
-  // primary target (targets[0]) already went through the full dispatch above;
-  // extra targets are best-effort announces whose failures are logged and
-  // surfaced in diagnostics but do not flip the primary outcome.
-  const fanOutText = deliveryResult.outputText ?? outputText;
-  const additionalDeliveryPlans = prepared.additionalDeliveryPlans;
-  let fanOut: { attempted: boolean; delivered: number; failures: string[] } | undefined;
-  if (
-    additionalDeliveryPlans.length > 0 &&
-    prepared.deliveryRequested &&
-    // Heartbeat-only responses are suppressed for the primary target; do not
-    // broadcast that suppressed text to the additional targets either.
-    !skipHeartbeatDelivery &&
-    typeof fanOutText === "string" &&
-    fanOutText.trim().length > 0
-  ) {
-    const { fanOutAdditionalCronAnnounceTargets } = await loadCronDeliveryRuntime();
-    fanOut = await fanOutAdditionalCronAnnounceTargets({
-      deps: prepared.input.deps,
-      cfg: prepared.input.cfg,
-      agentId: prepared.agentId,
-      jobId: prepared.input.job.id,
-      sessionKey: resolveCronDeliverySessionKey(prepared.input.job),
-      message: fanOutText,
-      additionalPlans: additionalDeliveryPlans,
-      abortSignal:
-        prepared.input.abortSignal ?? prepared.input.signal ?? new AbortController().signal,
-    });
-  }
-  // Run-level delivered/presentation reflect ONLY the primary target. Fan-out to
-  // additional targets is best-effort: its failures surface via diagnostics and
-  // its successes never mark a failed primary delivery as delivered. Attempted is
-  // safe to aggregate (it only records that some send was tried).
-  const aggregateDeliveryAttempted =
-    (deliveryResult.deliveryAttempted ?? false) || (fanOut?.attempted ?? false);
-  const fanOutDiagnostics =
-    fanOut && fanOut.failures.length > 0
-      ? createCronRunDiagnosticsFromError(
-          "delivery",
-          new Error(`fan-out delivery failed: ${fanOut.failures.join("; ")}`),
-        )
-      : undefined;
   const deliveryTrace = buildCronDeliveryTrace({
     deliveryPlan: prepared.deliveryPlan,
     resolvedDelivery: prepared.resolvedDelivery,
@@ -582,10 +556,11 @@ export async function finalizeCronRun(params: {
       (deliveryResult.result.status === "error" ? deliveryResult.result.error : undefined);
     const resultWithDeliveryMeta: RunCronAgentTurnResult = {
       ...deliveryResult.result,
+      replyDisposition,
       deliveryState: deliveryResult.deliveryState,
       delivered: deliveryResult.result.delivered ?? deliveryResult.delivered,
       deliveryAttempted:
-        deliveryResult.result.deliveryAttempted ?? aggregateDeliveryAttempted,
+        deliveryResult.result.deliveryAttempted ?? deliveryResult.deliveryAttempted,
       deliveryError,
       delivery: deliveryTrace,
       diagnostics: mergeCronRunDiagnostics(
@@ -594,7 +569,6 @@ export async function finalizeCronRun(params: {
         deliveryDiagnosticError
           ? createCronRunDiagnosticsFromError("delivery", deliveryDiagnosticError)
           : undefined,
-        fanOutDiagnostics,
       ),
     };
     failPendingPresentationWarningUnlessDelivered(
@@ -620,7 +594,7 @@ export async function finalizeCronRun(params: {
   return resolveRunOutcome({
     deliveryState: deliveryResult.deliveryState,
     delivered: deliveryResult.delivered,
-    deliveryAttempted: aggregateDeliveryAttempted,
+    deliveryAttempted: deliveryResult.deliveryAttempted,
     deliveryError: deliveryResult.deliveryError,
     deliverySuppressionReason: deliveryResult.deliverySuppressionReason,
     delivery: deliveryTrace,
