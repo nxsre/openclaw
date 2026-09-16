@@ -37,11 +37,6 @@ import {
   type EmbeddedAttemptAbortStatePort,
 } from "./attempt-finalize.js";
 import { createEmbeddedAttemptPreparation } from "./attempt-preparation.js";
-import {
-  formatHttpErrorForLog,
-  resolveNonOkHttpStatusFromUnknown,
-  revertEmbeddedSessionToPrePromptLeaf,
-} from "./attempt.http400-revert.js";
 import { createPromptBuildToolPolicy } from "./attempt-prompt-support.js";
 import { prepareEmbeddedAttemptSessionRuntime } from "./attempt-session-runtime-prepare.js";
 import { cleanupEmbeddedAttemptSessionPhase } from "./attempt-session-settle.js";
@@ -60,6 +55,11 @@ import { prepareEmbeddedAttemptSystemPrompt } from "./attempt-system-prompt-prep
 import { prepareEmbeddedAttemptToolCatalog } from "./attempt-tool-catalog.js";
 import { prepareEmbeddedAttemptToolBase } from "./attempt-tool-prepare.js";
 import { prepareEmbeddedAttemptTranscriptLifecycle } from "./attempt-transcript-lifecycle-prepare.js";
+import {
+  formatHttpErrorForLog,
+  resolveNonOkHttpStatusFromUnknown,
+  revertEmbeddedSessionToPrePromptLeaf,
+} from "./attempt.http400-revert.js";
 import { measureEmbeddedAgentPreparation } from "./preparation-timing.js";
 import { clearToolActivityRun } from "./tool-activity-heartbeat.js";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
@@ -476,11 +476,14 @@ export async function runEmbeddedAttempt(
       });
       const prePromptMessageCount = preparedSessionRuntime.state.prePromptMessageCount;
       const runtimeSessionManager = preparedSessionRuntime.sessionManager;
+      const sessionManagerLeafAccess = runtimeSessionManager as unknown as {
+        getLeafId?: () => string | null;
+        leafId?: string | null;
+      };
       const prePromptSessionLeafId =
-        typeof (runtimeSessionManager as { getLeafId?: () => string | null }).getLeafId ===
-        "function"
-          ? (runtimeSessionManager as { getLeafId: () => string | null }).getLeafId()
-          : ((runtimeSessionManager as { leafId?: string | null }).leafId ?? null);
+        typeof sessionManagerLeafAccess.getLeafId === "function"
+          ? sessionManagerLeafAccess.getLeafId()
+          : (sessionManagerLeafAccess.leafId ?? null);
       const executionResult = await runEmbeddedAttemptExecutionPhase({
         attempt: params,
         ...(activeContextEngine ? { activeContextEngine } : {}),
