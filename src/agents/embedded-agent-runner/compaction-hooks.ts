@@ -49,9 +49,7 @@ async function runPostCompactionSessionMemorySync(params: PostCompactionSession)
     });
     // The memory backend owns provider resolution; an unavailable backend must
     // not cold-load embedding plugins just to decide whether to sync.
-    const resolvedMemory = resolveMemorySearchIndexConfig(params.config, agentId, {
-      sessionKey: params.sessionKey,
-    });
+    const resolvedMemory = resolveMemorySearchIndexConfig(params.config, agentId);
     if (!resolvedMemory || !resolvedMemory.sources.includes("sessions")) {
       return;
     }
@@ -62,7 +60,6 @@ async function runPostCompactionSessionMemorySync(params: PostCompactionSession)
     const { manager } = await getActiveMemorySearchManagerCore({
       cfg: params.config,
       agentId,
-      sessionKey: params.sessionKey,
     });
     params.assertActive?.();
     if (!manager?.sync) {

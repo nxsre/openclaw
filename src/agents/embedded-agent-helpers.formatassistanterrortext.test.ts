@@ -1,11 +1,7 @@
 // Covers user-facing formatting and sanitization of assistant/provider errors.
 import type { AssistantMessage } from "openclaw/plugin-sdk/llm";
 import { describe, expect, it } from "vitest";
-import {
-  extractHttpStatusFromErrorText,
-  MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE,
-  userFacingFallbackText,
-} from "../shared/assistant-error-format.js";
+import { MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE } from "../shared/assistant-error-format.js";
 import {
   classifyAssistantFailoverReason,
   formatBillingErrorMessage,
@@ -378,11 +374,6 @@ describe("formatAssistantErrorText", () => {
     const result = formatAssistantErrorText(msg);
     expect(result).toBe(BILLING_ERROR_USER_MESSAGE);
   });
-  it("returns a friendly billing message for insufficient credits", () => {
-    const msg = makeAssistantError("insufficient credits");
-    const result = formatAssistantErrorText(msg);
-    expect(result).toBe(BILLING_ERROR_USER_MESSAGE);
-  });
   it("includes provider and assistant model in billing message when provider is given", () => {
     const msg = makeAssistantError("insufficient credits");
     const result = formatAssistantErrorText(msg, { provider: "Anthropic" });
@@ -721,11 +712,7 @@ describe("formatAssistantErrorText", () => {
     });
     const friendly = formatAssistantErrorText(missingScope);
     expect(friendly).not.toBe(authInvalidTokenCopy);
-    // XCPH: 本 fork 故意把任意非 2xx 的 provider HTTP 错误（含 provider-less 的 401
-    // permission_error）统一收敛成面向用户的双语兜底文案，原始 permission_error 详情仅写到
-    // provider-http-error 日志。上游此处会保留 "permission_error" 字样，本 fork 不保留。
-    expect(friendly).toContain("Authentication failed while contacting the model provider");
-    expect(friendly).toContain("联系模型服务时鉴权失败");
+    expect(friendly).toContain("permission_error");
   });
 
   it("returns a proxy-specific message for proxy misroutes", () => {
@@ -799,52 +786,15 @@ describe("formatAssistantErrorText", () => {
   });
 });
 
-describe("extractHttpStatusFromErrorText / userFacingFallbackText", () => {
-  it("extracts OpenAI empty-body status codes even when Control UI prefixes the text", () => {
-    expect(extractHttpStatusFromErrorText("400 status code (no body)")).toBe(400);
-    expect(
-      extractHttpStatusFromErrorText(
-        "⚠️ Agent failed before reply: 400 status code (no body) | session file changed",
-      ),
-    ).toBe(400);
-    expect(
-      extractHttpStatusFromErrorText(
-        "400 status code (no body) | session file changed while embedded prompt lock was released",
-      ),
-    ).toBe(400);
-  });
-
-  it("resolves OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status> for prefixed Control UI errors", () => {
-    const key = "OPENCLAW_LLM_ERROR_FALLBACK_TEXT_400";
-    const previous = process.env[key];
-    process.env[key] = "刚出了点小状况,这条没处理成功";
-    try {
-      expect(
-        userFacingFallbackText(
-          "⚠️ Agent failed before reply: 400 status code (no body).\nLogs: openclaw logs --follow",
-        ),
-      ).toBe("刚出了点小状况,这条没处理成功");
-    } finally {
-      if (previous === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = previous;
-      }
-    }
-  });
-});
-
 describe("formatRawAssistantErrorForUi", () => {
   it("renders HTTP code + type + message from Anthropic payloads", () => {
     const text = formatRawAssistantErrorForUi(
       '429 {"type":"error","error":{"type":"rate_limit_error","message":"Rate limited."},"request_id":"req_123"}',
     );
 
-    expect(text).toContain("rate-limiting");
     expect(text).toContain("HTTP 429");
-    expect(text).toContain("Your message was not saved");
-    expect(text).toContain("限流");
-    expect(text).toContain("本条消息未保存");
+    expect(text).toContain("rate_limit_error");
+    expect(text).toContain("Rate limited.");
     expect(text).not.toContain("req_123");
   });
 
@@ -853,18 +803,13 @@ describe("formatRawAssistantErrorForUi", () => {
   });
 
   it("formats plain HTTP status lines", () => {
-    const formatted = formatRawAssistantErrorForUi("500 Internal Server Error");
-    expect(formatted).toContain("temporarily unavailable (HTTP 500)");
-    expect(formatted).toContain("Your message was not saved");
-    expect(formatted).toContain("模型服务暂时不可用");
-    expect(formatted).toContain("本条消息未保存");
+    expect(formatRawAssistantErrorForUi("500 Internal Server Error")).toBe(
+      "HTTP 500: Internal Server Error",
+    );
   });
 
   it("formats colon-delimited HTTP status lines", () => {
-    const formatted = formatRawAssistantErrorForUi("HTTP 410: No body");
-    expect(formatted).toContain("HTTP 410");
-    expect(formatted).toContain("Your message was not saved");
-    expect(formatted).toContain("本条消息未保存");
+    expect(formatRawAssistantErrorForUi("HTTP 410: No body")).toBe("HTTP 410: No body");
   });
 
   it("formats plain provider internal errors without request ids", () => {
@@ -882,10 +827,9 @@ describe("formatRawAssistantErrorForUi", () => {
   <body>Ray ID: abc123</body>
 </html>`;
 
-    expect(formatRawAssistantErrorForUi(htmlError)).toContain("temporarily unavailable (HTTP 521)");
-    expect(formatRawAssistantErrorForUi(htmlError)).toContain("Your message was not saved");
-    expect(formatRawAssistantErrorForUi(htmlError)).toContain("模型服务暂时不可用");
-    expect(formatRawAssistantErrorForUi(htmlError)).toContain("本条消息未保存");
+    expect(formatRawAssistantErrorForUi(htmlError)).toBe(
+      "The AI service is temporarily unavailable (HTTP 521). Please try again in a moment.",
+    );
   });
 
   it("formats standalone Cloudflare challenge HTML into a clean provider error", () => {

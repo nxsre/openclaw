@@ -4,7 +4,11 @@
  * Transport adapters use this module to turn provider-specific response bodies,
  * request ids, and binary payload guardrails into stable OpenClaw error shapes.
  */
-import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import { mediaKindFromMime } from "@openclaw/media-core/constants";
+import {
+  asOptionalObjectRecord,
+  asOptionalRecord,
+} from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { normalizeOptionalString as trimToUndefined } from "../../packages/normalization-core/src/string-coerce.js";
 import {
@@ -14,7 +18,6 @@ import {
 } from "../infra/http-body.js";
 import { parseRetryAfterHeaderSeconds } from "../infra/retry-after.js";
 import { redactSensitiveText, redactToolPayloadText } from "../logging/redact.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { ModelProviderRequestTransportOverrides } from "./provider-request-config.js";
 import { redactProviderResponseErrorText } from "./provider-request-header-redaction.js";
 export { asFiniteNumber } from "../../packages/normalization-core/src/number-coercion.js";
@@ -23,38 +26,6 @@ export { normalizeOptionalString as trimToUndefined } from "../../packages/norma
 
 const ERROR_BODY_METADATA_LIMIT = 500;
 const PROVIDER_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
-const DEFAULT_MODEL_HTTP_ERROR_BODY_DEBUG_LIMIT_BYTES = 4 * 1024 * 1024;
-const providerHttpErrorLog = createSubsystemLogger("provider-http-error");
-
-function normalizeDebugEnv(value: unknown): string {
-  return typeof value === "string" ? value.trim().toLowerCase() : "";
-}
-
-function isModelHttpErrorBodyDebugEnabled(): boolean {
-  const raw = process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-  if (typeof raw === "string" && raw.trim().length > 0) {
-    const normalized = normalizeDebugEnv(raw);
-    return (
-      normalized !== "0" && normalized !== "false" && normalized !== "off" && normalized !== "no"
-    );
-  }
-  return true;
-}
-
-function resolveModelHttpErrorBodyReadLimitBytes(): number {
-  const raw = normalizeDebugEnv(process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY_LIMIT_BYTES);
-  if (raw) {
-    const parsed = Number.parseInt(raw, 10);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return parsed;
-    }
-  }
-  return DEFAULT_MODEL_HTTP_ERROR_BODY_DEBUG_LIMIT_BYTES;
-}
-
-function shouldRedactModelHttpErrorBody(): boolean {
-  return normalizeDebugEnv(process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY) !== "raw";
-}
 const SHORT_BEARER_TOKEN_PATTERN =
   /\b(Bearer)\s+[-A-Za-z0-9._~+/=]{1,17}(?![-A-Za-z0-9._~+/=…])/giu;
 
@@ -169,6 +140,23 @@ class ProviderErrorBodyTimeout extends Error {
   }
 }
 
+/** Summarizes transport failures before the logger applies diagnostic redaction. */
+export function summarizeProviderTransportError(error: unknown): string {
+  const record = asOptionalObjectRecord(error);
+  if (!record) {
+    return `type=${typeof error}`;
+  }
+  const cause = asOptionalObjectRecord(record.cause);
+  const read = (value: unknown) => (typeof value === "string" ? value : typeof value);
+  return [
+    `name=${read(record.name)}`,
+    `code=${read(record.code)}`,
+    `causeName=${read(cause?.name)}`,
+    `causeCode=${read(cause?.code)}`,
+    `message=${error instanceof Error ? error.message : read(record.message)}`,
+  ].join(" ");
+}
+
 /** Trims provider error details to a log- and prompt-safe preview length. */
 export function truncateErrorDetail(detail: string, limit = 220): string {
   return detail.length <= limit ? detail : `${truncateUtf16Safe(detail, limit - 1)}…`;
@@ -177,86 +165,6 @@ export function truncateErrorDetail(detail: string, limit = 220): string {
 /** Redacts secrets before preserving a bounded provider error body preview. */
 function redactProviderErrorBody(body: string): string {
   return truncateErrorDetail(redactSensitiveText(body), ERROR_BODY_METADATA_LIMIT);
-}
-
-function formatProviderHttpErrorBodyForDebug(body: string, limitBytes: number): string {
-  const trimmed = body.trim();
-  if (!trimmed) {
-    return "";
-  }
-  const normalized = shouldRedactModelHttpErrorBody() ? redactSensitiveText(trimmed) : trimmed;
-  if (normalized.length <= limitBytes) {
-    return normalized;
-  }
-  return `${normalized.slice(0, Math.max(0, limitBytes - 14))}…[truncated]`;
-}
-
-export type ProviderHttpErrorLogContext = {
-  label: string;
-  status: number;
-  url?: string;
-  contentType?: string;
-  requestId?: string;
-};
-
-function emitProviderHttpErrorBodyLog(body: string, context: ProviderHttpErrorLogContext): void {
-  const limitBytes = resolveModelHttpErrorBodyReadLimitBytes();
-  const formatted = formatProviderHttpErrorBodyForDebug(body, limitBytes);
-  const parts = [
-    `[provider-http-error] ${context.label} status=${context.status}`,
-    context.url ? `url=${context.url}` : undefined,
-    context.contentType ? `contentType=${context.contentType}` : undefined,
-    context.requestId ? `requestId=${context.requestId}` : undefined,
-    `bodyBytes=${body.length}`,
-    formatted ? `body=${formatted}` : "body=<empty>",
-  ].filter((part): part is string => Boolean(part));
-  providerHttpErrorLog.info(parts.join(" "));
-}
-
-function isNonOkHttpStatus(status: number): boolean {
-  return status < 200 || status >= 300;
-}
-
-export async function maybeLogProviderHttpErrorResponse(
-  response: Response,
-  context: Omit<ProviderHttpErrorLogContext, "status" | "contentType" | "requestId"> & {
-    status?: number;
-  },
-): Promise<void> {
-  if (!isModelHttpErrorBodyDebugEnabled()) {
-    return;
-  }
-  const status = context.status ?? response.status;
-  if (!isNonOkHttpStatus(status)) {
-    return;
-  }
-  try {
-    const limitBytes = resolveModelHttpErrorBodyReadLimitBytes();
-    const rawBody = await readResponseTextLimited(response.clone(), limitBytes + 1);
-    emitProviderHttpErrorBodyLog(rawBody, {
-      label: context.label,
-      status,
-      url: context.url,
-      contentType: response.headers.get("content-type") ?? undefined,
-      requestId: extractProviderRequestId(response),
-    });
-  } catch {
-    providerHttpErrorLog.info(
-      `[provider-http-error] ${context.label} status=${status} body=<read_failed>`,
-    );
-  }
-}
-
-export function maybeLogProviderHttpErrorBodyText(
-  context: ProviderHttpErrorLogContext & { body: string },
-): void {
-  if (!isModelHttpErrorBodyDebugEnabled()) {
-    return;
-  }
-  if (!isNonOkHttpStatus(context.status)) {
-    return;
-  }
-  emitProviderHttpErrorBodyLog(context.body, context);
 }
 
 /** Reads at most `limitBytes` from a response body without buffering provider-sized failures. */
@@ -582,25 +490,41 @@ export async function readProviderJsonArrayFieldResponse(
   return value;
 }
 
-function normalizeContentType(response: Response): string | undefined {
-  const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-  return contentType || undefined;
-}
+// One HTTP media type, with token or quoted parameters (including escaped codec
+// commas) and empty parameter slots. Fetch combines repeated headers with commas
+// outside those quotes.
+const providerMediaContentTypePattern =
+  /^[!#$%&'*+.^_`|~\da-z-]+\/[!#$%&'*+.^_`|~\da-z-]+(?:[ \t]*;(?:[ \t]*[!#$%&'*+.^_`|~\da-z-]+[ \t]*=[ \t]*(?:[!#$%&'*+.^_`|~\da-z-]+|"(?:[\t !#-[\]-~\x80-\xff]|\\[\t !-~\x80-\xff])*"))?)*[ \t]*$/iu;
 
-/** Rejects text or JSON responses on provider endpoints that should return binary bytes. */
+/** Rejects non-binary responses and mismatched provider-owned audio/video families. */
 export function assertProviderBinaryResponseContent(
   response: Response,
   label: string,
   kind = "binary",
 ): void {
-  const contentType = normalizeContentType(response);
-  if (!contentType) {
+  const rawContentType = response.headers.get("content-type");
+  if (rawContentType === null) {
+    return;
+  }
+  const contentType = rawContentType.split(";")[0]?.trim().toLowerCase();
+  const requiresMediaFamily = kind === "audio" || kind === "video";
+  // Ogg may be declared without an audio family; generic binary aliases also
+  // leave the media family to the provider endpoint's existing contract.
+  const unspecifiedMedia =
+    contentType === "application/octet-stream" ||
+    contentType === "binary/octet-stream" ||
+    (kind === "audio" && contentType === "application/ogg");
+  if (!contentType && !requiresMediaFamily) {
     return;
   }
   if (
+    !contentType ||
     contentType === "application/json" ||
     contentType.endsWith("+json") ||
-    contentType.startsWith("text/")
+    contentType.startsWith("text/") ||
+    (requiresMediaFamily &&
+      (!providerMediaContentTypePattern.test(rawContentType.trim()) ||
+        (!unspecifiedMedia && mediaKindFromMime(contentType) !== kind)))
   ) {
     throw new Error(`${label}: malformed ${kind} response`);
   }

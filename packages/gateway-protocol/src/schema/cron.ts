@@ -144,7 +144,7 @@ const CronCommonOptionalFields = {
   deleteAfterRun: Type.Optional(Type.Boolean()),
 };
 
-function cronIdOrJobIdParams(extraFields: Record<string, TSchema>) {
+function cronIdOrJobIdParams<const Fields extends Record<string, TSchema>>(extraFields: Fields) {
   return Type.Union([
     closedObject({
       id: NonEmptyString,
@@ -233,13 +233,16 @@ const CronAgentTurnPayloadSchema = cronAgentTurnPayloadSchema({
   fallbacks: Type.Array(Type.String()),
   toolsAllow: Type.Array(Type.String()),
   thinking: Type.String(),
+  timeoutSeconds: Type.Number({ minimum: 0 }),
 });
 const CronCommandPayloadSchema = cronCommandPayloadSchema({
   argv: Type.Array(NonEmptyString, { minItems: 1 }),
+  timeoutSeconds: Type.Number({ minimum: 0 }),
   toolsAllow: Type.Array(Type.String()),
 });
 const CronScriptPayloadSchema = cronScriptPayloadSchema({
   script: Type.String({ minLength: 1, maxLength: 65_536 }),
+  timeoutSeconds: Type.Number({ minimum: 1 }),
   toolsAllow: Type.Array(Type.String()),
 });
 
@@ -274,13 +277,16 @@ const CronPayloadPatchSchema = Type.Union([
     fallbacks: Type.Union([Type.Array(Type.String()), Type.Null()]),
     toolsAllow: Type.Union([Type.Array(Type.String()), Type.Null()]),
     thinking: Type.Union([Type.String(), Type.Null()]),
+    timeoutSeconds: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
   }),
   cronCommandPayloadSchema({
     argv: Type.Optional(Type.Array(NonEmptyString, { minItems: 1 })),
+    timeoutSeconds: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
     toolsAllow: Type.Union([Type.Array(Type.String()), Type.Null()]),
   }),
   cronScriptPayloadSchema({
     script: Type.Optional(Type.String({ minLength: 1, maxLength: 65_536 })),
+    timeoutSeconds: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
     toolsAllow: Type.Union([Type.Array(Type.String()), Type.Null()]),
   }),
 ]);
@@ -326,14 +332,6 @@ const CronCompletionDestinationSchema = closedObject({
   to: NonBlankString,
 });
 
-/** One announce fan-out destination (announce delivery only). */
-const CronDeliveryTargetSchema = closedObject({
-  channel: Type.Optional(CronAnnounceChannelSchema),
-  to: Type.Optional(NonBlankString),
-  threadId: Type.Optional(Type.Union([Type.String(), Type.Number()])),
-  accountId: Type.Optional(NonEmptyString),
-});
-
 const CronDeliverySharedProperties = {
   channel: Type.Optional(CronAnnounceChannelSchema),
   threadId: Type.Optional(Type.Union([Type.String(), Type.Number()])),
@@ -361,7 +359,6 @@ const CronDeliveryAnnounceSchema = closedObject({
   ...CronDeliverySharedProperties,
   completionDestination: Type.Optional(CronCompletionDestinationSchema),
   to: Type.Optional(NonBlankString),
-  targets: Type.Optional(Type.Array(CronDeliveryTargetSchema)),
 });
 
 const CronDeliveryWebhookSchema = closedObject({
@@ -385,7 +382,6 @@ const CronDeliveryPatchSchema = closedObject({
   ...CronDeliveryPatchSharedProperties,
   completionDestination: Type.Optional(Type.Union([CronCompletionDestinationSchema, Type.Null()])),
   to: Type.Optional(Type.Union([NonBlankString, Type.Null()])),
-  targets: Type.Optional(Type.Union([Type.Array(CronDeliveryTargetSchema), Type.Null()])),
 });
 
 const CronFailureNotificationDeliverySchema = closedObject({
@@ -549,6 +545,8 @@ export const CronJobSchema = closedObject({
 
 /** Query params for listing cron jobs with filters and pagination. */
 export const CronListParamsSchema = closedObject({
+  sessionKey: Type.Optional(NonEmptyString),
+  sessionAgentId: Type.Optional(NonEmptyString),
   includeDisabled: Type.Optional(Type.Boolean()),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
   offset: Type.Optional(Type.Integer({ minimum: 0 })),

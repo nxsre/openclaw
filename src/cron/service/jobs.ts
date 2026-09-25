@@ -27,6 +27,7 @@ import type {
   CronToolsAllowProvenance,
 } from "../types.js";
 import { resolveInitialCronDelivery } from "./initial-delivery.js";
+import { normalizeDeclarativeLabel } from "./jobs-declarative.js";
 import {
   computeJobNextRunAtMs,
   normalizeStreamScheduleBounds,
@@ -49,8 +50,18 @@ import { normalizeOptionalAgentId, normalizeRequiredName } from "./normalize.js"
 import { mergeCronPayload } from "./payload-merge.js";
 import type { CronServiceState } from "./state.js";
 
-const CRON_DECLARATIVE_LABEL_MAX_LENGTH = 200;
 type DeliveryValidationOptions = { configuredChannels?: readonly string[] };
+
+function resetJobFailureState(job: CronStoredJob): void {
+  delete job.state.autoDisabled;
+  job.state.consecutiveErrors = 0;
+  job.state.scheduleErrorCount = 0;
+  if (job.schedule.kind === "stream") {
+    job.state.streamRestartExhausted = undefined;
+    job.state.streamConsecutiveFailures = 0;
+    job.state.streamError = undefined;
+  }
+}
 
 type ScheduleNormalizationContext =
   | { kind: "create"; nowMs: number }
@@ -106,23 +117,6 @@ function normalizeJobSchedule(
   }
   const input = context.kind === "declarative" ? structuredClone(schedule) : schedule;
   return normalizeStreamScheduleBounds(input);
-}
-
-function normalizeDeclarativeLabel(
-  value: unknown,
-  field: "declarationKey" | "displayName",
-  nullable = false,
-): string | undefined {
-  const normalized = normalizeOptionalString(value);
-  if (!(nullable && value == null) && value !== undefined && !normalized) {
-    throw new Error(`cron ${field} must not be blank`);
-  }
-  if (normalized && normalized.length > CRON_DECLARATIVE_LABEL_MAX_LENGTH) {
-    throw new Error(
-      `cron ${field} must be at most ${CRON_DECLARATIVE_LABEL_MAX_LENGTH} characters`,
-    );
-  }
-  return normalized;
 }
 
 type JobValidationContext =
@@ -233,6 +227,7 @@ export function createJob(
   // Schedule activation is stamped only by committed scheduling mutations.
   // Accepting caller state here would let imports spoof restart catch-up ownership.
   delete initialState.scheduleActivatedAtMs;
+  delete initialState.runningScheduleChangeId;
   delete initialState.autoDisabled;
   assertCronJobStateTimestamps(initialState);
   const job: CronStoredJob = {
@@ -264,7 +259,7 @@ export function createJob(
       input.payload.kind === "script"
         ? normalizeCronScriptPayload(structuredClone(input.payload))
         : structuredClone(input.payload),
-    delivery: resolveInitialCronDelivery(input, state.deps.cronConfig?.defaultDelivery),
+    delivery: resolveInitialCronDelivery(input),
     failureAlert: input.failureAlert,
     ...(input.trigger ? { trigger: structuredClone(input.trigger) } : {}),
     state: {
@@ -307,7 +302,7 @@ export function applyJobPatch(
     defaultAgentId?: string;
     scheduleValidationNowMs?: number;
     cronConfig?: CronConfig;
-    scheduledToolPolicy?: CronScheduledToolPolicy;
+    scheduledToolPolicy?: CronScheduledToolPolicy | null;
     toolsAllowProvenance?: CronToolsAllowProvenance;
     toolsAllowExecTarget?: CronToolsAllowExecTarget;
   } & DeliveryValidationOptions,
@@ -424,25 +419,19 @@ export function applyJobPatch(
     // Runtime state patches may report execution progress, but the scheduler
     // alone owns the boundary that decides whether restart catch-up can run.
     delete statePatch.scheduleActivatedAtMs;
+    delete statePatch.runningScheduleChangeId;
     delete statePatch.autoDisabled;
     assertCronJobStateTimestamps(statePatch);
     job.state = { ...job.state, ...statePatch };
   }
   if (patch.enabled === true) {
-    delete job.state.autoDisabled;
-    job.state.consecutiveErrors = 0;
-    job.state.scheduleErrorCount = 0;
+    resetJobFailureState(job);
   }
   if ("agentId" in patch) {
     job.agentId = normalizeOptionalAgentId((patch as { agentId?: unknown }).agentId);
   }
   if ("sessionKey" in patch) {
     job.sessionKey = normalizeOptionalString((patch as { sessionKey?: unknown }).sessionKey);
-  }
-  if (job.schedule.kind === "stream" && patch.enabled === true) {
-    job.state.streamRestartExhausted = undefined;
-    job.state.streamConsecutiveFailures = 0;
-    job.state.streamError = undefined;
   }
   if (previousScheduleKind === "stream" && job.schedule.kind !== "stream") {
     job.state.streamStatus = undefined;
@@ -536,13 +525,21 @@ export function applyDeclarativeJobSpec(
     toolsAllowProvenance: opts.toolsAllowProvenance,
     toolsAllowExecTarget: opts.toolsAllowExecTarget,
   });
-  const delivery = resolveInitialCronDelivery(input, opts.cronConfig?.defaultDelivery);
+  const delivery = resolveInitialCronDelivery(input);
   if (delivery) {
     job.delivery = structuredClone(delivery);
   } else {
     delete job.delivery;
   }
   if (opts.enabledExplicit) {
+    // Reconciliation preserves an enabled job's failure streak; explicit recovery
+    // of a stopped job uses the same reset as the enable command.
+    if (
+      input.enabled &&
+      (!job.enabled || job.state.autoDisabled || job.state.streamRestartExhausted)
+    ) {
+      resetJobFailureState(job);
+    }
     job.enabled = input.enabled;
   }
   assertCronJobStateTimestamps(input.state ?? {});
@@ -571,7 +568,6 @@ function mergeCronDelivery(
     to: existing?.to,
     threadId: existing?.threadId,
     accountId: existing?.accountId,
-    targets: existing?.targets,
     bestEffort: existing?.bestEffort,
     completionDestination: existing?.completionDestination,
     failureDestination: existing?.failureDestination,
@@ -589,8 +585,6 @@ function mergeCronDelivery(
       next.channel = undefined;
       next.threadId = undefined;
       next.accountId = undefined;
-      // Announce fan-out targets are meaningless for webhook delivery.
-      next.targets = undefined;
     }
     if (!hasCompletionDestinationPatch && (next.mode === "none" || next.mode === "webhook")) {
       next.completionDestination = undefined;
@@ -607,10 +601,6 @@ function mergeCronDelivery(
   }
   if ("accountId" in patch) {
     next.accountId = normalizeOptionalString(patch.accountId);
-  }
-  if ("targets" in patch) {
-    // null (or an emptied list) clears fan-out back to single-target delivery.
-    next.targets = patch.targets && patch.targets.length > 0 ? patch.targets : undefined;
   }
   if (typeof patch.bestEffort === "boolean") {
     next.bestEffort = patch.bestEffort;
@@ -674,13 +664,6 @@ function mergeCronDelivery(
     }
   }
 
-  // Fan-out targets are announce-only. Drop them for none/webhook so a patch that
-  // sets targets without an announce mode never persists as dead config that
-  // resolveCronDeliveryPlans silently ignores.
-  if (next.mode !== "announce") {
-    next.targets = undefined;
-  }
-
   if (
     existing === undefined &&
     !("mode" in patch) &&
@@ -688,7 +671,6 @@ function mergeCronDelivery(
     next.to === undefined &&
     next.threadId === undefined &&
     next.accountId === undefined &&
-    next.targets === undefined &&
     next.bestEffort === undefined &&
     next.completionDestination === undefined &&
     next.failureDestination === undefined

@@ -50,7 +50,7 @@ import {
   recordControlUiPerformanceEvent,
   roundedControlUiDurationMs,
 } from "./performance.ts";
-import { consumeChatRouteStartup } from "./route-startup.ts";
+import type { ChatHistoryRunObservation } from "./run-lifecycle.ts";
 import { applySessionMessagePayload } from "./session-message-apply.ts";
 import { rolloverChatStream } from "./stream-causal-boundary.ts";
 import {
@@ -102,6 +102,22 @@ export async function hydrateChatHistory(
 ): Promise<ObservedChatHistoryResult | undefined> {
   const ownership = beginHistoryRequest(state, client, connectionEpoch, sessionKey, requestAgentId);
   const isCurrent = () => state.sessions === sessions && acceptsHistoryResult(state, ownership);
+  const captureRun = (): ChatHistoryRunObservation | undefined => {
+    const runId = state.chatRunId;
+    const sessionId = state.currentSessionId;
+    const generation = state.chatRunLifecycleGeneration ?? 0;
+    return isCurrent() && runId && sessionId
+      ? {
+          runId,
+          sessionId,
+          isCurrent: () =>
+            isCurrent() &&
+            state.chatRunId === runId &&
+            (state.chatRunLifecycleGeneration ?? 0) === generation &&
+            state.currentSessionId === sessionId,
+        }
+      : undefined;
+  };
   const startedAtMs = controlUiNowMs();
   const previousMessages = state.chatMessages;
   const previousRunProjections = readRunProjections(state, sessionKey, requestAgentId);
@@ -122,22 +138,18 @@ export async function hydrateChatHistory(
   try {
     const requestModeKey = deltaCursor === undefined ? "page" : `cursor:${deltaCursor}`;
     const requestKey = `${requestKeyPrefix}${requestModeKey}`;
-    const startup =
-      method === "chat.startup" ? consumeChatRouteStartup(client, sessionKey, sessions) : undefined;
-    let response =
-      (inputRunIds.length === 0 ? startup : undefined) ??
-      (await requestSharedHistory(
-        sessions,
-        client,
-        requestKey,
-        method,
-        sessionKey,
-        requestAgentId,
-        state,
-        isCurrent,
-        deltaCursor,
-        inputRunIds,
-      ));
+    let response = await requestSharedHistory(
+      sessions,
+      client,
+      requestKey,
+      method,
+      sessionKey,
+      requestAgentId,
+      state,
+      { isCurrent, captureRun },
+      deltaCursor,
+      inputRunIds,
+    );
     if (!isCurrent()) {
       recordChatHistoryTiming(state, "stale", startedAtMs, {
         requestSessionKey: sessionKey,
@@ -158,7 +170,7 @@ export async function hydrateChatHistory(
         sessionKey,
         requestAgentId,
         state,
-        isCurrent,
+        { isCurrent, captureRun },
         undefined,
         inputRunIds,
       );
@@ -270,6 +282,7 @@ export async function hydrateChatHistory(
         ? { activeLeafEntryId: nextDisplayedLeafEntryId }
         : {}),
     });
+    state.chatSubmissions?.observeInitialSession(sessionKey, client, nextSessionId);
     // Only the pane-owned reducer proves which live and pending rows survive;
     // terminal-renderer cleanup must not reclassify them as history. A new
     // session or leaf starts empty.

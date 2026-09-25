@@ -17,7 +17,6 @@ import { parseAbsoluteTimeMs } from "./parse.js";
 import { normalizeCronRuntimeAuthority } from "./runtime-authority.js";
 import { coerceFiniteScheduleNumber } from "./schedule-number.js";
 import {
-  normalizeCronScheduledToolCallerOrigin,
   normalizeCronScheduledToolPolicy,
   normalizeCronToolsAllowExecTarget,
   normalizeCronToolsAllowExecTargetRequirement,
@@ -29,6 +28,7 @@ import {
 } from "./session-target.js";
 import { normalizeCronStaggerMs, resolveDefaultCronStaggerMs } from "./stagger.js";
 import { normalizeCronStreamBatching } from "./stream-schedule.js";
+import { normalizeCronToolsAllowProvenance } from "./tools-allow-provenance.js";
 import { isSystemOwnedCronPayloadKind, type CronJobCreate, type CronJobPatch } from "./types.js";
 
 type UnknownRecord = Record<string, unknown>;
@@ -122,6 +122,10 @@ function coerceSchedule(schedule: UnknownRecord) {
   const staggerMs = normalizeCronStaggerMs(next.staggerMs);
   if (staggerMs !== undefined) {
     next.staggerMs = staggerMs;
+  } else if (next.kind === "cron" && next.staggerMs !== undefined) {
+    // Dropping an authored invalid value would silently apply a default on create
+    // or retain the previous stagger on update before request validation runs.
+    throw new TypeError("schedule.staggerMs must be a valid number or non-negative integer string");
   } else if ("staggerMs" in next) {
     delete next.staggerMs;
   }
@@ -224,15 +228,6 @@ function coerceDelivery(delivery: UnknownRecord) {
     next.accountId = parsed.accountId;
   } else if ("accountId" in next) {
     delete next.accountId;
-  }
-  if ("targets" in delivery && delivery.targets === null) {
-    // Null is an explicit patch clear back to single-target delivery.
-    next.targets = null;
-  } else if (parsed.targets !== undefined && parsed.targets.length > 0) {
-    next.targets = parsed.targets;
-  } else if ("targets" in next) {
-    // Non-array input or a list whose entries were all unusable: drop the field.
-    delete next.targets;
   }
   if ("failureDestination" in next) {
     // Null is an explicit clear signal in patches; invalid objects are dropped.
@@ -415,19 +410,9 @@ export function normalizeCronJobInput(
   }
 
   if ("toolsAllowProvenance" in base) {
-    const provenance = isRecord(base.toolsAllowProvenance)
-      ? snapshotOwnCronRecord(base.toolsAllowProvenance)
-      : undefined;
-    if (
-      isRecord(provenance) &&
-      provenance.version === 1 &&
-      provenance.source === "final-executable-surface"
-    ) {
-      next.toolsAllowProvenance = {
-        version: 1,
-        source: "final-executable-surface",
-        callerOrigin: normalizeCronScheduledToolCallerOrigin(provenance.callerOrigin),
-      };
+    const provenance = normalizeCronToolsAllowProvenance(base.toolsAllowProvenance);
+    if (provenance) {
+      next.toolsAllowProvenance = provenance;
     } else {
       delete next.toolsAllowProvenance;
     }

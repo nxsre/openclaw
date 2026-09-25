@@ -1,3 +1,4 @@
+import type { ModelCatalogContextWindowOption } from "@openclaw/model-catalog-core/model-catalog-types";
 /**
  * Merges generated model-provider config with explicit user config and
  * preserved secret fields. Setup and doctor flows use this boundary to update
@@ -12,7 +13,10 @@ import type {
   ModelProviderConfig as ProviderConfig,
 } from "../config/types.models.js";
 import { isNonSecretApiKeyMarker } from "./model-auth-markers.js";
-import { resolveCatalogOwnedModelCompat } from "./model-compat-catalog.js";
+import {
+  modelTransportRoutesMatch,
+  resolveCatalogOwnedModelCompat,
+} from "./model-compat-catalog.js";
 
 export function normalizeProviderMapKeys<T>(
   providers: Record<string, T> | null | undefined,
@@ -54,7 +58,7 @@ export type SourceModelFields = ReadonlyMap<
   { inputOmitted: boolean; cost: ProviderConfig["models"][number]["cost"] | undefined }
 >;
 
-type ProviderModelCatalog = {
+export type ProviderModelCatalog = {
   api?: string;
   baseUrl?: string;
   headers?: ProviderConfig["headers"];
@@ -64,6 +68,8 @@ type ProviderModelCatalog = {
       id: string;
       api?: string;
       maxTokensSource?: "configured" | "discovered";
+      contextWindows?: ModelCatalogContextWindowOption[];
+      contextWindowDefault?: string;
     }
   >;
 };
@@ -72,8 +78,23 @@ type ProviderModelMergeOptions = {
   providerId: string;
   modelIdMatching?: "exact";
   sourceModelFields?: SourceModelFields;
-  preserveConfiguredModelMembership?: boolean;
 };
+
+export function buildSourceModelFields(
+  sourceProviders: Record<string, ProviderConfig> | undefined,
+): SourceModelFields {
+  return new Map(
+    Object.entries(normalizeProviderMapKeys(sourceProviders)).flatMap(([providerId, provider]) =>
+      (provider.models ?? []).map(
+        (model) =>
+          [
+            JSON.stringify([providerId, model.id.trim()]),
+            { inputOmitted: !Object.hasOwn(model, "input"), cost: model.cost },
+          ] as const,
+      ),
+    ),
+  );
+}
 
 function getProviderModelId(model: unknown): string {
   if (!model || typeof model !== "object") {
@@ -153,14 +174,6 @@ export function mergeProviderModels(
         : "input" in explicitModel
           ? explicitModel.input
           : implicitModel.input;
-    if (options?.preserveConfiguredModelMembership) {
-      return Object.assign(
-        {},
-        explicitModel,
-        { cost },
-        sourceFields?.inputOmitted ? { input } : {},
-      );
-    }
 
     const contextWindow =
       asPositiveFiniteNumber(explicitModel.contextWindow) ??
@@ -187,6 +200,24 @@ export function mergeProviderModels(
       },
       configuredCompat: explicitModel.compat,
     });
+    const contextSelection = explicitModel.contextWindows
+      ? explicitModel
+      : modelTransportRoutesMatch(
+            {
+              api: implicitModel.api ?? implicit.api,
+              baseUrl: implicitModel.baseUrl ?? implicit.baseUrl,
+            },
+            {
+              api: explicitModel.api ?? explicit.api ?? implicitModel.api ?? implicit.api,
+              baseUrl:
+                explicitModel.baseUrl ??
+                explicit.baseUrl ??
+                implicitModel.baseUrl ??
+                implicit.baseUrl,
+            },
+          )
+        ? implicitModel
+        : undefined;
 
     const {
       api: _api,
@@ -209,18 +240,20 @@ export function mergeProviderModels(
       maxTokens === undefined ? {} : { maxTokens },
       maxTokensSource === undefined ? {} : { maxTokensSource },
       { compat },
+      {
+        contextWindows: contextSelection?.contextWindows,
+        contextWindowDefault: contextSelection?.contextWindowDefault,
+      },
     );
   });
 
-  if (!options?.preserveConfiguredModelMembership) {
-    for (const implicitModel of implicitModels) {
-      const id = getModelId(implicitModel);
-      if (!id || seen.has(id)) {
-        continue;
-      }
-      seen.add(id);
-      mergedModels.push(implicitModel);
+  for (const implicitModel of implicitModels) {
+    const id = getModelId(implicitModel);
+    if (!id || seen.has(id)) {
+      continue;
     }
+    seen.add(id);
+    mergedModels.push(implicitModel);
   }
 
   return {

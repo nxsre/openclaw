@@ -10,7 +10,6 @@ export const mediaExtensionTestRoots = [
   "extensions/talk-voice",
   "extensions/vydra",
   "extensions/xiaomi",
-  "extensions/xfyun",
 ];
 
 export function isMediaExtensionRoot(root) {

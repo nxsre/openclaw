@@ -1,120 +1,59 @@
-import path from "node:path";
 /**
  * Resolves memory-search source, sync, and ranking configuration.
  */
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import type { OpenClawConfig } from "../config/config.js";
-import type { SessionEntry } from "../config/sessions/types.js";
-import type { SecretInput } from "../config/types.secrets.js";
 import {
   normalizeConfiguredMemoryExtraPaths,
   resolveRememberAcrossConversations,
 } from "../memory-host-sdk/host/config-utils.js";
-import type { MemoryExtraPath } from "../memory-host-sdk/host/types.js";
 import {
   isMemoryMultimodalEnabled,
   normalizeMemoryMultimodalSettings,
-  type MemoryMultimodalSettings,
 } from "../memory-host-sdk/multimodal.js";
 import { getMemoryEmbeddingProvider } from "../plugins/memory-embedding-provider-runtime.js";
 import { assertSecretOwnerAvailable } from "../secrets/runtime-degraded-state.js";
 import { runtimeMemorySecretOwnerId } from "../secrets/runtime-memory-secret-owner.js";
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
 import { clampNumber } from "../utils.js";
-import { resolveAgentConfig, resolveSessionMemoryGroupSegment } from "./agent-scope.js";
+import { resolveAgentConfig } from "./agent-scope.js";
+import { resolveMemorySearchSourcePolicy } from "./memory-search-source-policy.js";
 
-// xcph: group-session memory isolation (group DBs live under <agentDir>/groups/<seg>/).
-type MemoryGroupOpts = {
-  sessionKey?: string | null;
-  sessionEntry?: Pick<SessionEntry, "chatType"> | null;
-};
+type ProducedMemorySearchConfig = NonNullable<ReturnType<typeof produceMemorySearchConfig>>;
 
-export type ResolvedMemorySearchConfig = {
-  enabled: boolean;
-  rememberAcrossConversations: boolean;
-  /** Sources indexed by the manager. */
-  sources: Array<"memory" | "sessions">;
-  /** Sources searched when memory_search omits an explicit corpus. */
-  searchSources: Array<"memory" | "sessions">;
-  extraPaths: MemoryExtraPath[];
-  multimodal: MemoryMultimodalSettings;
-  provider: string;
-  remote?: {
-    baseUrl?: string;
-    apiKey?: SecretInput;
-    headers?: Record<string, string>;
-    nonBatchConcurrency?: number;
-    batch?: {
-      enabled: boolean;
-      wait: boolean;
-      concurrency: number;
-      pollIntervalMs: number;
-      timeoutMinutes: number;
-    };
-  };
-  experimental: {
-    sessionMemory: boolean;
-  };
-  fallback: string;
-  model: string;
+export type ResolvedMemorySearchConfig = Omit<
+  ProducedMemorySearchConfig,
+  | "cache"
+  | "documentInputType"
+  | "inputType"
+  | "local"
+  | "outputDimensionality"
+  | "queryInputType"
+  | "remote"
+  | "store"
+  | "sync"
+> & {
   inputType?: string;
   queryInputType?: string;
   documentInputType?: string;
   outputDimensionality?: number;
-  local: {
+  cache: Omit<ProducedMemorySearchConfig["cache"], "maxEntries"> & { maxEntries?: number };
+  local: Omit<ProducedMemorySearchConfig["local"], "modelPath"> & {
     modelPath?: string;
     modelCacheDir?: string;
     contextSize?: number | "auto";
   };
-  store: {
-    driver: "sqlite";
-    databasePath: string;
-    fts: {
-      tokenizer: "unicode61" | "trigram";
-    };
-    vector: {
-      enabled: boolean;
+  remote?: Omit<Partial<NonNullable<ProducedMemorySearchConfig["remote"]>>, "batch"> & {
+    batch?: NonNullable<ProducedMemorySearchConfig["remote"]>["batch"];
+    nonBatchConcurrency?: number;
+  };
+  store: Omit<ProducedMemorySearchConfig["store"], "vector"> & {
+    vector: Omit<ProducedMemorySearchConfig["store"]["vector"], "extensionPath"> & {
       extensionPath?: string;
     };
   };
-  chunking: {
-    tokens: number;
-    overlap: number;
-  };
-  sync: {
-    onSessionStart: boolean;
-    onSearch: boolean;
-    watch: boolean;
-    watchDebounceMs: number;
-    intervalMinutes: number;
+  sync: Omit<ProducedMemorySearchConfig["sync"], "embeddingBatchTimeoutSeconds"> & {
     embeddingBatchTimeoutSeconds: number | undefined;
-    sessions: {
-      deltaBytes: number;
-      deltaMessages: number;
-      postCompactionForce: boolean;
-    };
-  };
-  query: {
-    maxResults: number;
-    minScore: number;
-    hybrid: {
-      enabled: boolean;
-      vectorWeight: number;
-      textWeight: number;
-      candidateMultiplier: number;
-      mmr: {
-        enabled: boolean;
-        lambda: number;
-      };
-      temporalDecay: {
-        enabled: boolean;
-        halfLifeDays: number;
-      };
-    };
-  };
-  cache: {
-    enabled: boolean;
-    maxEntries?: number;
   };
 };
 
@@ -141,30 +80,9 @@ const DEFAULT_CACHE_ENABLED = true;
 // without limit. Must stay above a typical live chunk count: a cap below the working set
 // evicts rows the next sync needs and forces paid re-embedding.
 const DEFAULT_CACHE_MAX_ENTRIES = 50_000;
-const DEFAULT_SOURCES: Array<"memory" | "sessions"> = ["memory"];
 const DEFAULT_MEMORY_EMBEDDING_PROVIDER = "openai";
 const DEFAULT_REMOTE_BATCH_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_REMOTE_BATCH_TIMEOUT_MINUTES = 60;
-
-function normalizeSources(
-  sources: Array<"memory" | "sessions"> | undefined,
-  sessionMemoryEnabled: boolean,
-): Array<"memory" | "sessions"> {
-  const normalized = new Set<"memory" | "sessions">();
-  const input = sources?.length ? sources : DEFAULT_SOURCES;
-  for (const source of input) {
-    if (source === "memory") {
-      normalized.add("memory");
-    }
-    if (source === "sessions" && sessionMemoryEnabled) {
-      normalized.add("sessions");
-    }
-  }
-  if (normalized.size === 0) {
-    normalized.add("memory");
-  }
-  return Array.from(normalized);
-}
 
 function getConfiguredMemoryEmbeddingProvider(providerId: string, cfg: OpenClawConfig) {
   // `none` is the built-in FTS-only sentinel, never a plugin capability.
@@ -176,11 +94,7 @@ function getConfiguredMemoryEmbeddingProvider(providerId: string, cfg: OpenClawC
 }
 
 /** Resolves source and query settings without loading an embedding provider runtime. */
-export function resolveMemorySearchIndexConfig(
-  cfg: OpenClawConfig,
-  agentId: string,
-  _groupOpts?: MemoryGroupOpts,
-) {
+export function resolveMemorySearchIndexConfig(cfg: OpenClawConfig, agentId: string) {
   const defaults = cfg.memory?.search;
   const overrides = resolveAgentConfig(cfg, agentId)?.memory?.search;
   const enabled = overrides?.enabled ?? defaults?.enabled ?? true;
@@ -191,17 +105,12 @@ export function resolveMemorySearchIndexConfig(
   const rememberAcrossConversations = resolveRememberAcrossConversations(cfg, agentId);
   const configuredSessionMemory =
     overrides?.experimental?.sessionMemory ?? defaults?.experimental?.sessionMemory ?? false;
-  const sessionMemory = rememberAcrossConversations || configuredSessionMemory;
   const configuredSources = overrides?.sources ?? defaults?.sources;
-  const searchSources = normalizeSources(
+  const { sessionMemory, searchSources, sources } = resolveMemorySearchSourcePolicy({
     configuredSources,
-    configuredSessionMemory ||
-      (rememberAcrossConversations && configuredSources?.includes("sessions") === true),
-  );
-  const sources = normalizeSources(
-    rememberAcrossConversations ? [...searchSources, "sessions"] : configuredSources,
-    sessionMemory,
-  );
+    rememberAcrossConversations,
+    configuredSessionMemory,
+  });
   return {
     enabled,
     rememberAcrossConversations,
@@ -239,12 +148,8 @@ export function resolveMemorySearchIndexConfig(
   };
 }
 
-export function resolveMemorySearchConfig(
-  cfg: OpenClawConfig,
-  agentId: string,
-  groupOpts?: MemoryGroupOpts,
-): ResolvedMemorySearchConfig | null {
-  const indexConfig = resolveMemorySearchIndexConfig(cfg, agentId, groupOpts);
+function produceMemorySearchConfig(cfg: OpenClawConfig, agentId: string) {
+  const indexConfig = resolveMemorySearchIndexConfig(cfg, agentId);
   if (!indexConfig) {
     return null;
   }
@@ -314,23 +219,9 @@ export function resolveMemorySearchConfig(
   const fts = {
     tokenizer: overrides?.store?.fts?.tokenizer ?? defaults?.store?.fts?.tokenizer ?? "unicode61",
   };
-  // xcph: isolate group recall — group DBs live under <agentDir>/groups/<seg>/.
-  const defaultDbPath = resolveOpenClawAgentSqlitePath({ agentId, env: process.env });
-  const groupSegment = resolveSessionMemoryGroupSegment(
-    groupOpts?.sessionKey,
-    groupOpts?.sessionEntry,
-  );
-  const databasePath = groupSegment
-    ? path.join(
-        path.dirname(path.dirname(defaultDbPath)),
-        "groups",
-        groupSegment,
-        "openclaw-agent.sqlite",
-      )
-    : defaultDbPath;
   const store = {
     driver: "sqlite" as const,
-    databasePath,
+    databasePath: resolveOpenClawAgentSqlitePath({ agentId, env: process.env }),
     fts,
     vector,
   };
@@ -343,7 +234,7 @@ export function resolveMemorySearchConfig(
     maxEntries: DEFAULT_CACHE_MAX_ENTRIES,
   };
 
-  const resolved: ResolvedMemorySearchConfig = {
+  const resolved = {
     ...indexConfig,
     multimodal,
     provider,
@@ -379,7 +270,14 @@ export function resolveMemorySearchConfig(
   return resolved;
 }
 
-function resolveSyncConfig(): ResolvedMemorySearchSyncConfig {
+export function resolveMemorySearchConfig(
+  cfg: OpenClawConfig,
+  agentId: string,
+): ResolvedMemorySearchConfig | null {
+  return produceMemorySearchConfig(cfg, agentId);
+}
+
+function resolveSyncConfig() {
   return {
     onSessionStart: true,
     onSearch: true,

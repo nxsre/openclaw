@@ -6,7 +6,6 @@ import type { CronPacing } from "../../cron/types.js";
 import { CRON_MANAGEMENT_METHODS } from "../../gateway/cron-creator-authority-grant.js";
 import { isRecord } from "../../utils.js";
 import {
-  optionalFiniteNumberSchema,
   optionalNonNegativeIntegerSchema,
   optionalPositiveIntegerSchema,
   optionalStringEnum,
@@ -194,7 +193,12 @@ function createCronPayloadSchema(params: {
           : {}),
         model: nullableStringSchema("Model override, or null to clear"),
         thinking: Type.Optional(Type.String({ description: "Thinking override" })),
-        timeoutSeconds: optionalFiniteNumberSchema({ minimum: 0 }),
+        timeoutSeconds: Type.Optional(
+          Type.Union([Type.Number({ minimum: 0 }), Type.Null()], {
+            description:
+              "Timeout seconds; null restores the default on update (omission preserves it)",
+          }),
+        ),
         ...(params.triggersEnabled
           ? {
               toolBudget: optionalPositiveIntegerSchema({
@@ -270,29 +274,6 @@ function createCronDeliverySchema(): TSchema {
           }),
         ),
         accountId: deliveryStringSchema("Delivery account"),
-        targets: Type.Optional(
-          Type.Union(
-            [
-              Type.Array(
-                Type.Object(
-                  {
-                    channel: deliveryStringSchema("Target channel"),
-                    to: deliveryStringSchema("Target recipient"),
-                    threadId: Type.Optional(
-                      Type.Union([Type.String(), Type.Number()], {
-                        description: "Target thread/topic id",
-                      }),
-                    ),
-                    accountId: deliveryStringSchema("Target account"),
-                  },
-                  { additionalProperties: true },
-                ),
-              ),
-              Type.Null(),
-            ],
-            { description: "Announce fan-out targets, or null to clear" },
-          ),
-        ),
         failureDestination: Type.Optional(
           Type.Union([failureDestinationObject, Type.Null()], {
             description:

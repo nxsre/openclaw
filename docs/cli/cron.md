@@ -34,6 +34,12 @@ openclaw automations create "0 7 * * *" \
   --agent ops
 ```
 
+For agent or command jobs, `--timeout-seconds` accepts non-negative whole seconds.
+Set `--timeout-seconds 0` on `add`/`create` or `edit` to disable the scheduler's
+wall-clock ceiling. Omitting the flag on creation keeps the default timeout;
+omitting it on edit leaves the stored timeout unchanged. Agent/provider timeouts,
+startup watchdogs, and command-runner limits still apply.
+
 Use `--webhook <url>` when the job should POST the finished payload instead of delivering to a chat target:
 
 ```bash
@@ -94,6 +100,11 @@ flags is valid with exit or stream schedules. See
 [Automation schedules](/automation/cron-jobs/schedules#schedule-types) for stream lifecycle,
 batching limits, and trigger details.
 
+On creation, omit `--command-cwd`, `--on-exit-cwd`, or `--stream-cwd` to use
+the default working directory. An explicitly empty or whitespace-only path is
+an error. When editing a stream job, `--stream-cwd ""` still clears its configured
+working directory.
+
 ## Sessions
 
 `--session` accepts `main`, `isolated`, `current`, or `session:<id>`.
@@ -121,6 +132,8 @@ If session cleanup fails, the error is logged. A removal with no active run also
 
 `openclaw automations add`, `openclaw automations list`, and `openclaw automations show <job-id>` preview the resolved delivery route. For `channel: "last"`, the preview shows whether the route resolved from the main or current session, or will fail closed.
 
+If an existing session metadata store cannot be read or its schema is not ready, the preview keeps the requested destination and reports why it is unavailable without blocking job creation or listing. An absent database has no session routing history and uses the normal delivery fallback.
+
 Provider-prefixed targets can disambiguate unresolved announce channels. For example, `to: "telegram:123"` selects Telegram when `delivery.channel` is omitted or `last`. Only prefixes advertised by the loaded plugin are provider selectors. If `delivery.channel` is explicit, the prefix must match that channel. `channel: "whatsapp"` with `to: "telegram:123"` is rejected. Service prefixes such as `imessage:` and `sms:` remain channel-owned target syntax.
 
 <Note>
@@ -144,36 +157,6 @@ Use `automations add|create --webhook <url>` or `automations edit <job-id> --web
 
 Reminders created from an active chat preserve the live chat delivery target for fallback announce delivery. Internal session keys may be lowercase. Do not use them as a source of truth for case-sensitive provider IDs such as Matrix room IDs.
 
-### Multi-channel fan-out
-
-Announce delivery can fan one job out to several chat targets with `delivery.targets`, a list of `{ channel, to }` entries (each also accepts `accountId`). When the list is present, the job sends the same text to every target and the top-level `channel`/`to` are ignored. Each target must name a configured announce channel, so listing all of your channels delivers everywhere. Fan-out requires `mode: "announce"` and an isolated-style session target, the same as single-channel announce delivery.
-
-On the CLI, repeat `--target <channel>:<dest>` (the recipient is everything after the first colon, so values like `user:alice` are preserved):
-
-```sh
-openclaw cron add "take medication" \
-  --at "2026-06-24T22:16:00+08:00" \
-  --message "Remind me to take my medication" \
-  --session isolated \
-  --target "openclaw-weixin:o9cq80..." \
-  --target "openim:user:alice"
-```
-
-The first target is the primary route (it carries the agent `message` tool and session identity); the remaining targets are best-effort announces. A failed extra target is logged and recorded in run diagnostics but does not flip the primary outcome. Threaded delivery (`--thread-id`) applies only to the primary target. Use `cron edit <job-id> --target ...` to replace the list or `--clear-targets` to return to single-channel delivery.
-
-Use the recipient `all` to broadcast to everyone on a channel: `--target "slack:all"`. The recipient list comes from the channel directory roster when the channel supports it, falling back to recipients seen in this agent's session history (so for channels without a contact API, `all` means everyone who has messaged the bot). A prefixed form restricts by addressing kind: `--target "openim:user:all"` sends only to `user:` recipients on that channel. An `all` target needs an explicit channel (not `last`); if it resolves to zero recipients the broadcast is skipped and logged.
-
-To make every scheduled job broadcast by default without setting `--target` each time, configure `cron.defaultDelivery`. It applies to new isolated agent-turn/command jobs that are created without their own delivery config (jobs that set delivery always win):
-
-```json
-"cron": {
-  "defaultDelivery": {
-    "mode": "announce",
-    "targets": [{ "channel": "openclaw-weixin", "to": "all" }]
-  }
-}
-```
-
 ### Failure delivery
 
 Failure notifications resolve in this order:
@@ -183,6 +166,8 @@ Failure notifications resolve in this order:
 3. The job's primary announce target (when neither of the above resolves to a concrete destination).
 
 Jobs with one of those routes default to an execution-failure alert after 2 consecutive failures and a 1-hour cooldown. A per-job or global `failureAlert` object explicitly activates/tunes the policy even without an existing route. `failureAlert: false` disables execution and required-delivery failure alerts for the job, but not the auto-disable safety notification. Global `enabled: false` disables inheritance unless the job has its own `failureAlert` object. `delivery.bestEffort: true` suppresses inherited/default execution alerts, but not an explicit per-job policy.
+
+Repeated failures with the same cause stay grouped into one incident across Gateway restarts. A changed cause or destination can notify after the cooldown, and successful completion sends one recovery notice. Skipped runs and unknown delivery outcomes do not count as recovery. If script setup cannot refresh tools after a plugin reload, the alert explains that automatic recovery failed before the script ran.
 
 <Note>
 Main-session jobs may only use `delivery.failureDestination` when primary delivery mode is `webhook`. Isolated jobs accept it in all modes.
@@ -194,7 +179,7 @@ Isolated automation runs treat run-level agent failures as job errors, even when
 
 Command jobs do not start an isolated agent turn. A zero exit code records `ok`. Non-zero exit, signal, timeout, or no-output timeout records `error`, and can trigger the same failure notification path.
 
-Required completion delivery is separate: `status: "ok"` with `completionStatus: "failed"` does not increment the execution streak or backoff. Delivery-failure alerts use a resolved alternate failure destination without the `after` threshold. Every alert honors the shared job/global `failureAlert.cooldownMs` (default 1 hour). This includes the first delivery failure after an execution alert. An alert never retries the primary route that just failed.
+Required completion delivery is separate: `status: "ok"` with `completionStatus: "failed"` does not increment the execution streak or backoff. Delivery-failure alerts use a resolved alternate failure destination without the `after` threshold and group repeated failures into one incident. Alerts for changed failures honor the shared job/global `failureAlert.cooldownMs` (default 1 hour), including the first delivery failure after an execution alert. Recovery notices do not wait for the cooldown. An alert never retries the primary route that just failed.
 
 If an isolated run times out before the first model request, `openclaw automations show` and `openclaw automations runs` include a phase-specific error. Examples are `setup timed out before runner start`, or a stall message naming the last-known startup phase such as `context-engine`. For CLI-backed providers, the pre-model watchdog stays active until the external CLI turn starts. Session lookup, hook, auth, prompt, and CLI setup stalls are therefore reported as pre-model automation failures.
 
@@ -224,7 +209,7 @@ Automation jobs, pending runtime state, and run history live in the shared SQLit
 
 Manually running a disabled job does not enable its schedule or create automatic retries. Use `openclaw automations enable <job-id>` to resume scheduled runs.
 
-`openclaw automations run <job-id>` force-runs by default and returns as soon as the manual run is queued. Successful responses include `{ ok: true, enqueued: true, runId }`. Use the returned `runId` to inspect the later result:
+`openclaw automations run <job-id>` force-runs by default and returns after the Gateway durably reserves the run and accepts it into its execution lane. Successful responses include `{ ok: true, enqueued: true, runId }`; the job may still be waiting for a slot. If admission or caller checks fail before queue acceptance, the request fails without reporting a queued run. If the Gateway exits before dispatch, startup records an interrupted receipt for that exact request in the state database. Such pre-dispatch interruptions do not appear in task-backed run history. Use the returned `runId` to inspect an executed run's result:
 
 ```bash
 openclaw automations run <job-id>
@@ -388,10 +373,20 @@ openclaw automations run <job-id> --wait --wait-timeout 10m --poll-interval 2s
 openclaw automations runs <job-id> --limit 50
 openclaw automations runs <job-id> --limit 50 --json
 openclaw automations runs <job-id> --run-id <run-id>
+openclaw automations runs <job-id> --status error --query timeout
+openclaw automations runs <job-id> --delivery-status not-delivered
+openclaw automations runs <job-id> --sort asc --offset 200 --limit 50
 ```
 
 `automations runs` is the preferred spelling. `cron runs` and the leaf-local
 `--id <job-id>` form remain supported compatibility aliases.
+
+Run-history filters are applied by the Gateway before paging. Use `--status`
+with `all`, `ok`, `error`, or `skipped`; use `--delivery-status` with
+`delivered`, `not-delivered`, `unknown`, or `not-requested`. `--query <text>`
+searches run summaries and errors. `--sort asc|desc` selects oldest-first or
+newest-first order, and `--offset <n>` advances through the result set using the
+page metadata returned by the previous command.
 
 `openclaw automations list` shows enabled jobs across agents by default, including jobs whose owner cannot be resolved. Pass `--all` to include disabled jobs, or `--agent <id>` to filter by the effective normalized agent ID. Ownership resolves from the job's declared agent, its agent-scoped session key, then the configured system-agent owner. Unresolved jobs do not match an agent filter. The `cron list` alias has the same behavior.
 
@@ -404,6 +399,15 @@ An unresolved owner does not stop the scheduler: that job is skipped with an exp
 `--json` always requests JSON output. Commands whose product is already a machine-readable result emit JSON results by default: `add`/`create`, `status`, `enable`, `disable`, `rm`/`remove`/`delete`, `run`, `edit`, `get`, and `runs`. They accept `--json` as the explicit machine-output spelling. `openclaw automations get <job-id>` returns the stored job JSON directly. Use `automations show <job-id>` when you want the human-readable view with delivery-route preview.
 
 `list` and `show` use human-readable output by default and switch to JSON with `--json`. `scratch` reads raw scratch content by default. With `--json` it prints the scratch plus revision metadata. Scratch writes return the revision result as JSON by default, and accept `--json` as the explicit machine-output spelling.
+
+`automations show` also accepts an exact job name, matched without regard to case.
+Job IDs take precedence. When multiple jobs match the name, including disabled
+jobs, the command reports ambiguity and includes the matching jobs' full IDs,
+names, schedule summaries, enabled state, and status. Retry the same command
+with the intended job ID instead of the name.
+
+With `--json`, the failure envelope includes these summaries in `error.matches`.
+Event schedules appear as `on-exit` or `stream` without their command text.
 
 `automations list --json` and `automations show <job-id> --json` include a top-level `status` field on each job, computed from `enabled`, `state.runningAtMs`, and `state.lastRunStatus`. Values: `disabled`, `running`, `ok`, `error`, `skipped`, or `idle`. JSON status stays canonical and undecorated, so external tooling can read job state without re-deriving it. Human output may decorate repeated `error` statuses with a failure count.
 

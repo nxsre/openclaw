@@ -10,6 +10,7 @@ import {
 } from "../channels/plugins/index.js";
 import { resolveInstallableChannelPlugin } from "../commands/channel-setup/channel-plugin-resolution.js";
 import { parseAccountSelector } from "../commands/channels/account-selector.js";
+import { parseChannelSelector } from "../commands/channels/channel-selector.js";
 import { requireValidConfigForWrite } from "../commands/config-validation.js";
 import { getRuntimeConfig, type OpenClawConfig } from "../config/config.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
@@ -105,6 +106,7 @@ async function resolveChannelPluginForMode(
   plugin: ChannelPlugin;
 } | null> {
   parseAccountSelector(opts.account);
+  parseChannelSelector(opts.channel);
   const writeSnapshot = await requireValidConfigForWrite(runtime);
   if (!writeSnapshot) {
     return null;
@@ -198,11 +200,6 @@ async function reconcileGatewayRuntimeAfterLocalLogin(params: {
     return;
   }
   try {
-    // Weixin credentials are written under OPENCLAW_STATE_DIR as JSON; bind mounts / NFS
-    // can briefly hide updates from the gateway process that handles channels.start.
-    if (params.channelId === "openclaw-weixin") {
-      await new Promise((resolve) => setTimeout(resolve, 800));
-    }
     const result = await callGateway<{ outcome?: ChannelAccountStartOutcome }>({
       config: params.cfg,
       method: "channels.start",
@@ -298,25 +295,18 @@ export async function runChannelLogin(
   // Auth-only flow: do not mutate channel config here.
   setVerbose(Boolean(opts.verbose));
   const { accountId } = resolveAccountContext(plugin, opts, cfg);
-  const loginResult = await login({
+  await login({
     cfg,
     accountId,
     runtime,
     verbose: Boolean(opts.verbose),
     channelInput,
   });
-  const reconcileAccountId =
-    loginResult &&
-    typeof loginResult === "object" &&
-    typeof (loginResult as { reconcileAccountId?: unknown }).reconcileAccountId === "string" &&
-    (loginResult as { reconcileAccountId: string }).reconcileAccountId.trim()
-      ? (loginResult as { reconcileAccountId: string }).reconcileAccountId.trim()
-      : accountId;
   await reconcileGatewayRuntimeAfterLocalLogin({
     cfg,
     plugin,
     channelId: plugin.id,
-    accountId: reconcileAccountId,
+    accountId,
     runtime,
   });
 }

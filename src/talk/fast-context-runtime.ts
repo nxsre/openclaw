@@ -112,7 +112,6 @@ async function lookupFastContext(params: {
   const memory = await getActiveMemorySearchManagerCore({
     cfg: params.cfg,
     agentId: params.agentId,
-    sessionKey: params.sessionKey,
   });
   if (!memory.manager) {
     return {

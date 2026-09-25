@@ -11,8 +11,6 @@ const DEFAULT_CITATIONS: MemoryCitationsMode = "auto";
 export function resolveMemoryBackendConfig(params: {
   cfg: OpenClawConfig;
   agentId: string;
-  /** Kept so group/session callers can thread scope; 8.1 builtin backend ignores it. */
-  sessionKey?: string | null;
 }): ResolvedMemoryBackendConfig {
   return {
     backend: "builtin",

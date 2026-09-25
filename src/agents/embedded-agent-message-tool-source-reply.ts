@@ -10,6 +10,7 @@ import {
   isMessageToolConversationCreateActionName,
   isMessageToolSendActionName,
   isMessagingToolDeliveryAction,
+  isPluginNativeMessagingTool,
 } from "./embedded-agent-messaging.js";
 import { normalizeToolPolicyName } from "./tool-policy.js";
 import { isToolResultError, readToolResultDetails } from "./tool-result-error.js";
@@ -54,28 +55,37 @@ function normalizeStatus(value: unknown): string | undefined {
   return typeof value === "string" ? value.trim().toLowerCase() : undefined;
 }
 
-export function hasPluginMessagingDeliveryId(value: unknown): boolean {
-  return pluginEnvelopeHas(value, "deliveryId");
-}
-
 export function isDeliveredMessagingToolResult(params: {
   toolName?: string;
   args?: unknown;
   result?: unknown;
   hookResult?: unknown;
   isError?: boolean;
+  requirePluginDeliveryId?: boolean;
 }): boolean {
   const args = asOptionalRecord(params.args) ?? {};
-  const action = normalizeStatus(args.action);
-  const results = [params.result, params.hookResult];
-  if (args.dryRun === true || results.some((result) => pluginEnvelopeHas(result, "dryRun"))) {
+  if (args.dryRun === true) {
     return false;
   }
-  // xcph: 回执明确表示「未送达 / no-op」时直接判否,避免后续正向 OK/partial 误判为已送达。
+  const normalizedToolName = normalizeToolPolicyName(params.toolName ?? "message");
+  if (normalizedToolName === "conversations_send" || normalizedToolName === "conversations_turn") {
+    const status = readToolResultDetails(params.result)?.status;
+    // Waiting for a peer reply can fail after the channel send has succeeded.
+    return (
+      status === "sent" ||
+      (normalizedToolName === "conversations_turn" &&
+        (status === "replied" || status === "timeout"))
+    );
+  }
+  if (!isPluginNativeMessagingTool(normalizedToolName)) {
+    return false;
+  }
+  const action = normalizeStatus(args.action);
+  const results = [params.result, params.hookResult];
   if (
-    results.some(
-      (result) => pluginEnvelopeHas(result, "nonDelivery") || pluginEnvelopeHas(result, "noOp"),
-    )
+    results.some((result) => pluginEnvelopeHas(result, "dryRun")) ||
+    (params.requirePluginDeliveryId &&
+      !results.some((result) => pluginEnvelopeHas(result, "deliveryId")))
   ) {
     return false;
   }
@@ -92,10 +102,12 @@ export function isDeliveredMessagingToolResult(params: {
   if (action === "broadcast" && results.some(pluginBroadcastHasDelivery)) {
     return true;
   }
-  if (params.isError || results.some(isToolResultError)) {
+  if (
+    params.isError ||
+    results.some((result) => isToolResultError(result) || pluginEnvelopeHas(result, "failure"))
+  ) {
     return false;
   }
-  const normalizedToolName = normalizeToolPolicyName(params.toolName ?? "message");
   const nonDelivery = results.some((result) => pluginEnvelopeHas(result, "nonDelivery"));
   const noOp = results.some((result) => pluginEnvelopeHas(result, "noOp"));
   if (

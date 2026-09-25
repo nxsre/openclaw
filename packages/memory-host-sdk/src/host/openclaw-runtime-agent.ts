@@ -6,8 +6,6 @@ export {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
   resolveSessionAgentId,
-  resolveSessionMemoryGroupSegment,
-  resolveSessionWorkspaceDir,
 } from "../../../../src/agents/agent-scope.js";
 export { resolveCronStyleNow } from "../../../../src/agents/current-time.js";
 export { DEFAULT_AGENT_COMPACTION_RESERVE_TOKENS_FLOOR } from "../../../../src/agents/agent-settings.js";
@@ -25,3 +23,4 @@ export {
   type ResolvedMemorySearchSyncConfig,
 } from "../../../../src/agents/memory-search.js";
 export { parseAgentSessionKey } from "../../../../src/routing/session-key.js";
+export { getAgentWorkspaceAccess } from "../../../../src/agents/workspace-access.js";

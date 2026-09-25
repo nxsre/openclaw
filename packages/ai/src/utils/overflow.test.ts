@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AssistantMessage } from "../types.js";
 import { createZeroUsage } from "../usage.test-support.js";
-import {
-  isConfiguredContextSizeOverflowError,
-  isContextOverflow,
-  matchesContextOverflowMessage,
-} from "./overflow.js";
+import { isContextOverflow, matchesContextOverflowMessage } from "./overflow.js";
 
 function errorMessage(message: string): AssistantMessage {
   return {
@@ -45,7 +41,6 @@ describe("configured context size overflow", () => {
     "400 Prompt has 256468 tokens, but the configured context size is 256000 tokens",
     "Prompt has 5,958,968 tokens, but the configured context size is 256,000 tokens",
   ])("detects %s", (text) => {
-    expect(isConfiguredContextSizeOverflowError(text)).toBe(true);
     expect(isContextOverflow(errorMessage(text), 256_000)).toBe(true);
   });
 });
@@ -111,18 +106,6 @@ describe("bodyless HTTP errors", () => {
 
   it("preserves Cerebras 413 overflow recovery", () => {
     expect(isContextOverflow(errorMessage("413 status code (no body)"), 262_144)).toBe(true);
-  });
-
-  it("does not treat bare 400 status code (no body) as overflow for non-cerebras providers", () => {
-    const msg = errorMessage("400 status code (no body)");
-    msg.provider = "cloudphone_unicom_manual";
-    expect(isContextOverflow(msg, 128_000)).toBe(false);
-  });
-
-  it("keeps bare 400 status code (no body) as overflow for cerebras only", () => {
-    const msg = errorMessage("400 status code (no body)");
-    msg.provider = "cerebras";
-    expect(isContextOverflow(msg, 128_000)).toBe(true);
   });
 });
 

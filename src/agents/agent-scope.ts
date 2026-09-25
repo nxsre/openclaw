@@ -1,5 +1,4 @@
 /** Higher-level agent scope helpers for model selection, fallbacks, skills, and workspaces. */
-import path from "node:path";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -19,10 +18,11 @@ import type { AgentConfig } from "../config/types.agents.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { isPathInside } from "../infra/path-guards.js";
 import {
+  classifySessionKeyShape,
   isSubagentSessionKey,
   normalizeAgentId,
+  normalizeAgentIdStrict,
   parseAgentSessionKey,
-  resolveAgentIdFromSessionKey,
 } from "../routing/session-key.js";
 import { resolveEffectiveAgentSkillFilter } from "../skills/discovery/agent-filter.js";
 import {
@@ -33,7 +33,8 @@ import {
   resolveAgentConfig,
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
-  tryResolveLegacyCompatibilityAgentId,
+  tryResolveLegacyDataOwnerAgentId,
+  withAgentRosterFactsBatch,
 } from "./agent-scope-config.js";
 import { resolveCanonicalWorkspacePath } from "./workspace-state-identity.js";
 export { hasSessionAutoModelFallbackProvenance } from "../config/sessions/model-override-provenance.js";
@@ -303,106 +304,6 @@ export function clearAutoFallbackPrimaryProbeSelection(
   entry.updatedAt = now;
 }
 
-export { resolveAgentIdFromSessionKey };
-
-/**
- * Sanitize one path segment so it cannot escape the workspace root.
- * Keeps only [A-Za-z0-9_.-]; returns empty string when nothing remains.
- */
-export function sanitizeSegment(value: string): string {
-  const cleaned = (value ?? "").replace(/[^A-Za-z0-9_.-]/g, "");
-  if (cleaned === "" || cleaned === "." || cleaned === "..") {
-    return "";
-  }
-  return cleaned;
-}
-
-/**
- * Extract a group id from a session key of the form
- * `agent:<agentId>:<channel>:group:<gid...>` or `<channel>:group:<gid...>`
- * (also handles the `:channel:` peer kind).
- */
-export function extractGroupId(sessionKey: string | undefined | null): string | undefined {
-  const raw = normalizeOptionalString(sessionKey);
-  if (!raw) {
-    return undefined;
-  }
-  const segments = raw.split(":");
-  for (let i = 0; i < segments.length - 1; i += 1) {
-    const marker = segments[i]?.toLowerCase();
-    if (marker === "group" || marker === "channel") {
-      const remainder = segments.slice(i + 1).join("_");
-      return remainder || undefined;
-    }
-  }
-  return undefined;
-}
-
-/** True when a session is a group/channel chat (by entry chatType or key shape). */
-function isGroupLikeSession(params: {
-  sessionKey?: string | null;
-  chatType?: SessionEntry["chatType"];
-}): boolean {
-  if (params.chatType === "group" || params.chatType === "channel") {
-    return true;
-  }
-  const raw = normalizeOptionalString(params.sessionKey);
-  if (!raw) {
-    return false;
-  }
-  const lowered = raw.toLowerCase();
-  return lowered.includes(":group:") || lowered.includes(":channel:");
-}
-
-/**
- * Resolve the filesystem-safe group token for a session key, or undefined for
- * direct/main/non-group sessions. Pure helper used to scope per-group memory
- * collections. Malformed input collapses to undefined. Never throws.
- */
-export function resolveSessionMemoryGroupSegment(
-  sessionKey?: string | null,
-  sessionEntry?: Pick<SessionEntry, "chatType"> | null,
-): string | undefined {
-  try {
-    if (!isGroupLikeSession({ sessionKey, chatType: sessionEntry?.chatType })) {
-      return undefined;
-    }
-    const gid = extractGroupId(sessionKey);
-    const safeGid = gid ? sanitizeSegment(gid) : "";
-    return safeGid || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Resolve the workspace directory for a session, isolating group/channel chats
- * into `<base>/groups/<gid>`. Direct/main/non-group sessions return the agent
- * base workspace. Pure: no filesystem side effects.
- */
-export function resolveSessionWorkspaceDir(
-  cfg: OpenClawConfig,
-  agentId: string,
-  sessionKey?: string | null,
-  sessionEntry?: Pick<SessionEntry, "chatType"> | null,
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  const base = resolveAgentWorkspaceDir(cfg, agentId, env);
-  try {
-    if (!isGroupLikeSession({ sessionKey, chatType: sessionEntry?.chatType })) {
-      return base;
-    }
-    const gid = extractGroupId(sessionKey);
-    const safeGid = gid ? sanitizeSegment(gid) : "";
-    if (!safeGid) {
-      return base;
-    }
-    return path.join(base, "groups", safeGid).replaceAll("\0", "");
-  } catch {
-    return base;
-  }
-}
-
 type SessionAgentResolutionParams = {
   sessionKey?: string;
   config?: OpenClawConfig;
@@ -416,13 +317,18 @@ const SESSION_AGENT_SELECTION_CONTEXT = {
 };
 
 function resolveSelectedSessionAgentId(params: SessionAgentResolutionParams): string | undefined {
-  const explicitAgentIdRaw = normalizeLowercaseStringOrEmpty(params.agentId);
-  const explicitAgentId = explicitAgentIdRaw ? normalizeAgentId(explicitAgentIdRaw) : null;
+  if (classifySessionKeyShape(params.sessionKey) === "malformed_agent") {
+    throw new Error("Malformed agent session key; refusing default-agent resolution.");
+  }
+  const explicit = params.agentId === undefined ? null : normalizeAgentIdStrict(params.agentId);
+  if (explicit && !explicit.ok) {
+    throw new Error("Invalid explicit agent id; refusing default-agent resolution.");
+  }
+  const explicitAgentId = explicit?.value;
   const fallbackAgentIdRaw = normalizeLowercaseStringOrEmpty(params.fallbackAgentId);
   const fallbackAgentId = fallbackAgentIdRaw ? normalizeAgentId(fallbackAgentIdRaw) : null;
   const sessionKey = params.sessionKey?.trim();
-  const normalizedSessionKey = sessionKey ? normalizeLowercaseStringOrEmpty(sessionKey) : undefined;
-  const parsed = normalizedSessionKey ? parseAgentSessionKey(normalizedSessionKey) : null;
+  const parsed = parseAgentSessionKey(sessionKey);
   const sessionKeyAgentId = parsed?.agentId ? normalizeAgentId(parsed.agentId) : null;
   const cfg = params.config ?? {};
   const persistedStoreOwner = resolvePersistedSessionStoreOwnerForKey(cfg, sessionKey);
@@ -458,13 +364,14 @@ function resolveSelectedSessionAgentId(params: SessionAgentResolutionParams): st
   );
 }
 
+/** Strict session selection uses explicit context and legacy data ownership. */
 export function resolveSessionAgentIdsStrict(params: SessionAgentResolutionParams): {
   defaultAgentId: string;
   sessionAgentId: string;
 } {
   const selectedAgentId = resolveSelectedSessionAgentId(params);
   const cfg = params.config ?? {};
-  const compatibilityAgentId = tryResolveLegacyCompatibilityAgentId(cfg);
+  const compatibilityAgentId = tryResolveLegacyDataOwnerAgentId(cfg);
   const sessionAgentId =
     selectedAgentId ??
     compatibilityAgentId ??
@@ -480,7 +387,7 @@ export function resolveSessionAgentIdStrict(params: SessionAgentResolutionParams
   const cfg = params.config ?? {};
   return (
     selectedAgentId ??
-    tryResolveLegacyCompatibilityAgentId(cfg) ??
+    tryResolveLegacyDataOwnerAgentId(cfg) ??
     resolveDefaultAgentId(cfg, SESSION_AGENT_SELECTION_CONTEXT)
   );
 }
@@ -751,6 +658,8 @@ export function resolveModelFallbackAvailability(params: {
   hasAutoFallbackProvenance?: boolean;
   modelSelectionLocked?: boolean;
   modelFallbacksOverride?: string[];
+  /** Declared child lineage includes visible sessions with dashboard keys. */
+  subagentSpawnLineage?: boolean;
 }): ModelFallbackAvailability {
   if (params.modelSelectionLocked) {
     return { kind: "disabled_by_model_selection_lock" };
@@ -758,34 +667,28 @@ export function resolveModelFallbackAvailability(params: {
   if (params.modelFallbacksOverride !== undefined) {
     return modelFallbackAvailabilityFromModels(params.modelFallbacksOverride, "explicit");
   }
-  const agentFallbacksOverride = resolveAgentModelFallbacksOverride(params.cfg, params.agentId);
-  if (!params.hasSessionModelOverride) {
-    if (agentFallbacksOverride !== undefined) {
-      return modelFallbackAvailabilityFromModels(agentFallbacksOverride, "explicit");
-    }
-    return modelFallbackAvailabilityFromModels(
-      resolveAgentModelFallbackValues(params.cfg.agents?.defaults?.model),
-      "inherited",
-    );
-  }
   const canUseConfiguredFallbacks =
     params.modelOverrideSource === "auto" ||
     (params.modelOverrideSource === undefined && params.hasAutoFallbackProvenance === true);
-  if (!canUseConfiguredFallbacks) {
+  if (params.hasSessionModelOverride && !canUseConfiguredFallbacks) {
     return { kind: "disabled_by_model_override" };
   }
-  const subagentFallbacksOverride = isSubagentSessionKey(params.sessionKey)
+  const hiddenSubagent = isSubagentSessionKey(params.sessionKey);
+  // Hidden children without an effective override retain their existing agent policy.
+  const useSubagentFallbacks = params.hasSessionModelOverride
+    ? hiddenSubagent || params.subagentSpawnLineage === true
+    : !hiddenSubagent &&
+      params.subagentSpawnLineage === true &&
+      params.modelOverrideSource !== "user";
+  const fallbacksOverride = useSubagentFallbacks
     ? resolveSubagentSpawnModelFallbacksOverride(params.cfg, params.agentId)
-    : undefined;
-  if (subagentFallbacksOverride !== undefined) {
-    return modelFallbackAvailabilityFromModels(subagentFallbacksOverride, "explicit");
-  }
-  // Auto-provenance routes have always consumed a resolved list (no configured-primary
-  // append), so inheriting from defaults still projects as an explicit ladder here.
-  const defaultFallbacks = resolveAgentModelFallbackValues(params.cfg.agents?.defaults?.model);
+    : resolveAgentModelFallbacksOverride(params.cfg, params.agentId);
+  // Auto overrides consume an explicit list, preventing a configured-primary append.
+  const source =
+    fallbacksOverride !== undefined || params.hasSessionModelOverride ? "explicit" : "inherited";
   return modelFallbackAvailabilityFromModels(
-    agentFallbacksOverride ?? defaultFallbacks,
-    "explicit",
+    fallbacksOverride ?? resolveAgentModelFallbackValues(params.cfg.agents?.defaults?.model),
+    source,
   );
 }
 
@@ -796,6 +699,7 @@ export function resolveEffectiveModelFallbacks(params: {
   hasSessionModelOverride: boolean;
   modelOverrideSource?: "auto" | "user";
   hasAutoFallbackProvenance?: boolean;
+  subagentSpawnLineage?: boolean;
 }): string[] | undefined {
   return modelFallbackOverrideFromAvailability(resolveModelFallbackAvailability(params));
 }
@@ -805,18 +709,20 @@ export function resolveAgentIdByWorkspacePath(
   workspacePath: string,
 ): string | undefined {
   const normalizedWorkspacePath = resolveCanonicalWorkspacePath(workspacePath.replaceAll("\0", ""));
-  let matchedAgentId: string | undefined;
-  let matchedWorkspaceLength = -1;
+  return withAgentRosterFactsBatch(cfg, () => {
+    let matchedAgentId: string | undefined;
+    let matchedWorkspaceLength = -1;
 
-  for (const id of listAgentIds(cfg)) {
-    const workspaceDir = resolveCanonicalWorkspacePath(resolveAgentWorkspaceDir(cfg, id));
-    if (!isPathInside(workspaceDir, normalizedWorkspacePath)) {
-      continue;
+    for (const id of listAgentIds(cfg)) {
+      const workspaceDir = resolveCanonicalWorkspacePath(resolveAgentWorkspaceDir(cfg, id));
+      if (!isPathInside(workspaceDir, normalizedWorkspacePath)) {
+        continue;
+      }
+      if (workspaceDir.length > matchedWorkspaceLength) {
+        matchedAgentId = id;
+        matchedWorkspaceLength = workspaceDir.length;
+      }
     }
-    if (workspaceDir.length > matchedWorkspaceLength) {
-      matchedAgentId = id;
-      matchedWorkspaceLength = workspaceDir.length;
-    }
-  }
-  return matchedAgentId;
+    return matchedAgentId;
+  });
 }

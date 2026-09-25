@@ -1,18 +1,5 @@
 // Verifies provider HTTP error parsing, redaction, and response-size limits.
 import { describe, expect, it, vi } from "vitest";
-
-const providerHttpErrorLogInfo = vi.hoisted(() => vi.fn());
-
-vi.mock("../logging/subsystem.js", () => ({
-  createSubsystemLogger: () => ({
-    info: providerHttpErrorLogInfo,
-    warn: vi.fn(),
-    debug: vi.fn(),
-    error: vi.fn(),
-    child: vi.fn(),
-  }),
-}));
-
 import {
   assertOkOrThrowProviderError,
   assertOkOrThrowHttpError,
@@ -20,7 +7,6 @@ import {
   extractProviderErrorDetail,
   extractProviderRequestId,
   formatProviderErrorPayload,
-  maybeLogProviderHttpErrorResponse,
   ProviderHttpError,
   readProviderBinaryResponse,
   readProviderJsonResponse,
@@ -694,6 +680,107 @@ describe("provider error utils", () => {
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    { kind: "audio", contentType: "audio/mpeg" },
+    { kind: "audio", contentType: "AUDIO/OGG; codecs=opus" },
+    { kind: "audio", contentType: 'audio/ogg; codecs="opus, vorbis"' },
+    { kind: "audio", contentType: 'audio/ogg; codecs="opus\\", vorbis"' },
+    { kind: "audio", contentType: 'audio/ogg; codecs="opus\\\\, vorbis"' },
+    { kind: "audio", contentType: "audio/opus" },
+    { kind: "audio", contentType: "application/ogg" },
+    { kind: "audio", contentType: 'application/ogg; codecs="opus"' },
+    { kind: "audio", contentType: "binary/octet-stream" },
+    { kind: "video", contentType: "binary/octet-stream" },
+    { kind: "audio", contentType: "audio/pcm" },
+    { kind: "audio", contentType: "audio/pcm;" },
+    { kind: "audio", contentType: "audio/pcm; ; " },
+    { kind: "video", contentType: 'video/mp4;; codecs="avc1"' },
+    { kind: "video", contentType: "application/octet-stream;" },
+    { kind: "audio", contentType: "audio/vnd.wave" },
+    { kind: "video", contentType: "video/mp4" },
+    { kind: "video", contentType: "VIDEO/WEBM; codecs=vp9" },
+    { kind: "video", contentType: 'video/mp4; codecs="avc1, mp4a.40.2"' },
+    { kind: "video", contentType: 'video/mp4; codecs="avc1, mp4a.40.2"; profile=main' },
+    { kind: "video", contentType: "video/x-matroska" },
+    { kind: "audio", contentType: "application/octet-stream" },
+    { kind: "video", contentType: "application/octet-stream" },
+    { kind: "audio", contentType: undefined },
+    { kind: "video", contentType: undefined },
+    { kind: "binary", contentType: "image/png" },
+    { kind: "binary", contentType: "image/png; charset=utf-8, text/html" },
+    { kind: "binary", contentType: "; text/html" },
+    { kind: "binary", contentType: "application/zip" },
+  ])("accepts $kind response content type $contentType", async ({ kind, contentType }) => {
+    const response = new Response(
+      new Uint8Array([1]),
+      contentType ? { headers: { "content-type": contentType } } : undefined,
+    );
+
+    await expect(readProviderBinaryResponse(response, "Provider failed", kind)).resolves.toEqual(
+      Buffer.from([1]),
+    );
+  });
+
+  it.each([
+    { kind: "audio", contentType: "image/png" },
+    { kind: "audio", contentType: "" },
+    { kind: "audio", contentType: "; text/html" },
+    { kind: "audio", contentType: "; audio/mpeg, text/html" },
+    { kind: "audio", contentType: "audio/" },
+    { kind: "audio", contentType: "audio/ogg;;, text/html" },
+    { kind: "audio", contentType: 'audio/ogg; codecs="opus"; ;, text/html' },
+    { kind: "audio", contentType: "audio/ogg; codecs" },
+    { kind: "audio", contentType: 'audio/ogg; codecs="opus"garbage' },
+    { kind: "audio", contentType: "audio/mpeg image/png" },
+    { kind: "audio", contentType: "video/mp4" },
+    { kind: "audio", contentType: "audio/mpeg, video/mp4" },
+    { kind: "audio", contentType: "audio/mpeg; charset=utf-8, text/html" },
+    { kind: "audio", contentType: "audio/mpeg; charset=utf-8; profile=voice, text/html" },
+    { kind: "audio", contentType: 'audio/ogg; codecs="opus, vorbis", text/html' },
+    { kind: "audio", contentType: 'audio/ogg; codecs="opus\\", vorbis", text/html' },
+    { kind: "audio", contentType: 'audio/ogg; codecs="opus, vorbis' },
+    { kind: "audio", contentType: 'audio/ogg; codecs="opus\\' },
+    { kind: "video", contentType: "audio/ogg" },
+    { kind: "video", contentType: "application/ogg" },
+    { kind: "audio", contentType: "application/ogg; codecs=opus, text/html" },
+    { kind: "video", contentType: "binary/octet-stream; charset=utf-8, text/html" },
+    { kind: "video", contentType: "" },
+    { kind: "video", contentType: "; video/mp4, application/json" },
+    { kind: "video", contentType: "video/" },
+    { kind: "video", contentType: "video/mp4 image/png" },
+    { kind: "video", contentType: "video/mp4, image/png" },
+    { kind: "video", contentType: "video/mp4; codecs=avc1, application/json" },
+    { kind: "video", contentType: 'video/mp4; codecs="avc1, mp4a"; profile=main, text/html' },
+    { kind: "video", contentType: "image/png" },
+    { kind: "video", contentType: "application/pdf" },
+    { kind: "audio", contentType: "application/json" },
+    { kind: "video", contentType: "application/problem+json" },
+    { kind: "binary", contentType: "text/html; charset=utf-8" },
+    { kind: "binary", contentType: "application/problem+json" },
+  ])("rejects $contentType for $kind responses", async ({ kind, contentType }) => {
+    const response = new Response(new Uint8Array([1]), {
+      headers: { "content-type": contentType },
+    });
+
+    await expect(readProviderBinaryResponse(response, "Provider failed", kind)).rejects.toThrow(
+      `Provider failed: malformed ${kind} response`,
+    );
+  });
+
+  it.each([
+    { kind: "audio", first: "audio/mpeg; charset=utf-8", second: "text/html" },
+    { kind: "video", first: "video/mp4; codecs=avc1", second: "application/json" },
+  ])("rejects repeated Fetch Content-Type headers for $kind", async ({ kind, first, second }) => {
+    const headers = new Headers();
+    headers.append("content-type", first);
+    headers.append("content-type", second);
+    const response = new Response(new Uint8Array([1]), { headers });
+
+    await expect(readProviderBinaryResponse(response, "Provider failed", kind)).rejects.toThrow(
+      `Provider failed: malformed ${kind} response`,
+    );
+  });
+
   it("rejects stalled JSON response body after chunk idle timeout", async () => {
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -778,48 +865,6 @@ describe("provider error utils", () => {
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
       });
-    }
-  });
-
-  it("logs full non-ok response bodies by default", async () => {
-    const previous = process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-    delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-    providerHttpErrorLogInfo.mockClear();
-    try {
-      const body = "x".repeat(900);
-      const response = new Response(body, {
-        status: 502,
-        headers: { "content-type": "text/plain" },
-      });
-      await maybeLogProviderHttpErrorResponse(response, { label: "test-fetch" });
-      expect(providerHttpErrorLogInfo).toHaveBeenCalledTimes(1);
-      const message = String(providerHttpErrorLogInfo.mock.calls[0]?.[0] ?? "");
-      expect(message).toContain("[provider-http-error] test-fetch status=502");
-      expect(message).toContain(body);
-      await expect(response.text()).resolves.toBe(body);
-    } finally {
-      if (previous === undefined) {
-        delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-      } else {
-        process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY = previous;
-      }
-    }
-  });
-
-  it("does not log non-ok response bodies when explicitly disabled", async () => {
-    const previous = process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-    process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY = "off";
-    providerHttpErrorLogInfo.mockClear();
-    try {
-      const response = new Response("secret-body", { status: 500 });
-      await maybeLogProviderHttpErrorResponse(response, { label: "test-fetch" });
-      expect(providerHttpErrorLogInfo).not.toHaveBeenCalled();
-    } finally {
-      if (previous === undefined) {
-        delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-      } else {
-        process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY = previous;
-      }
     }
   });
 });

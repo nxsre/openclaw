@@ -1,18 +1,21 @@
 /** Strips internal scaffolding from text before user-facing delivery. */
-import { CURRENT_MESSAGE_MARKER, HISTORY_CONTEXT_MARKER } from "../../auto-reply/reply/history.js";
+import {
+  CURRENT_MESSAGE_MARKER,
+  HISTORY_CONTEXT_MARKER,
+  RECENT_HISTORY_CONTEXT_MARKER,
+} from "../../auto-reply/reply/history.js";
 import {
   INBOUND_METADATA_MARKERS,
   stripInboundMetadata,
 } from "../../auto-reply/reply/strip-inbound-meta.js";
-import { applyFallbackVars, userFacingFallbackText } from "../../shared/assistant-error-format.js";
 import { coerceChatContentText } from "../../shared/chat-content.js";
 import { escapeRegExp } from "../../shared/regexp.js";
 import {
   assistantTraceTextFilter,
+  legacyBracketToolCallTextFilter,
+  minimaxToolCallTextFilter,
   plainToolCallTextFilter,
-  stripLegacyBracketToolCallBlocks,
-  stripMinimaxToolCallXml,
-  stripToolCallXmlTags,
+  toolCallXmlTextFilter,
 } from "../../shared/text/assistant-visible-text.js";
 import {
   findCodeRegions,
@@ -27,7 +30,6 @@ import {
   type TextFilter,
 } from "../../shared/text/text-projection.js";
 import { EXEC_NO_OUTPUT_PLACEHOLDER } from "../bash-tools.exec-output.js";
-import { isRateLimitErrorMessage } from "../failover/message-patterns.js";
 import {
   INTERNAL_RUNTIME_CONTEXT_BEGIN,
   INTERNAL_RUNTIME_CONTEXT_END,
@@ -65,7 +67,11 @@ type VerifiedConversationContext = {
 };
 
 function hasConversationContextMarker(text: string): boolean {
-  return text.includes(HISTORY_CONTEXT_MARKER) || text.includes(CURRENT_MESSAGE_MARKER);
+  return (
+    text.includes(HISTORY_CONTEXT_MARKER) ||
+    text.includes(RECENT_HISTORY_CONTEXT_MARKER) ||
+    text.includes(CURRENT_MESSAGE_MARKER)
+  );
 }
 
 function prepareVerifiedConversationContext(
@@ -75,22 +81,24 @@ function prepareVerifiedConversationContext(
     return undefined;
   }
   const sourceCodeRegions = findCodeRegions(source);
-  const ownsConversationContext = [HISTORY_CONTEXT_MARKER, CURRENT_MESSAGE_MARKER].some(
-    (marker) => {
-      let markerOffset = source.indexOf(marker);
-      while (markerOffset !== -1) {
-        const markerEnd = markerOffset + marker.length;
-        const startsLine = markerOffset === 0 || source[markerOffset - 1] === "\n";
-        const endsLine =
-          markerEnd === source.length || source[markerEnd] === "\n" || source[markerEnd] === "\r";
-        if (startsLine && endsLine && !isInsideCode(markerOffset, sourceCodeRegions)) {
-          return true;
-        }
-        markerOffset = source.indexOf(marker, markerEnd);
+  const ownsConversationContext = [
+    HISTORY_CONTEXT_MARKER,
+    RECENT_HISTORY_CONTEXT_MARKER,
+    CURRENT_MESSAGE_MARKER,
+  ].some((marker) => {
+    let markerOffset = source.indexOf(marker);
+    while (markerOffset !== -1) {
+      const markerEnd = markerOffset + marker.length;
+      const startsLine = markerOffset === 0 || source[markerOffset - 1] === "\n";
+      const endsLine =
+        markerEnd === source.length || source[markerEnd] === "\n" || source[markerEnd] === "\r";
+      if (startsLine && endsLine && !isInsideCode(markerOffset, sourceCodeRegions)) {
+        return true;
       }
-      return false;
-    },
-  );
+      markerOffset = source.indexOf(marker, markerEnd);
+    }
+    return false;
+  });
   if (!ownsConversationContext) {
     return undefined;
   }
@@ -247,17 +255,14 @@ export function userFacingTextFilters(
       ],
     },
     { transform: stripInboundMetadata, activationTokens: INBOUND_METADATA_MARKERS },
-    { transform: stripMinimaxToolCallXml, activationTokens: ["<"] },
-    {
-      transform: (text) => stripToolCallXmlTags(text, { stripFunctionCallsXmlPayloads: true }),
-      activationTokens: ["<"],
-    },
+    minimaxToolCallTextFilter,
+    toolCallXmlTextFilter({ stripFunctionCallsXmlPayloads: true }),
     {
       transform: stripInternalPlaceholderLines,
       activationTokens: [EXEC_NO_OUTPUT_PLACEHOLDER, "[tool calls omitted]"],
     },
     ...(errorContext ? [assistantTraceTextFilter] : []),
-    { transform: stripLegacyBracketToolCallBlocks, activationTokens: ["["] },
+    legacyBracketToolCallTextFilter,
     plainToolCallTextFilter,
     leadingEmptyLinesTextFilter,
     duplicateParagraphTextFilter,
@@ -281,21 +286,8 @@ export function sanitizeUserFacingText(
           opts?.streaming,
         )
       : raw;
-  const collapsed = applyTextFilters(
+  return applyTextFilters(
     withoutConversationContext,
     userFacingTextFilters(opts?.errorContext, opts?.streaming),
   );
-  if (!opts?.errorContext) {
-    return collapsed;
-  }
-  // XCPH: OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status> (含 429) 优先于英文模板 / provider 原文。
-  const fallbackSource =
-    isRateLimitErrorMessage(collapsed) && !/\b429\b/.test(collapsed)
-      ? `429 ${collapsed}`
-      : collapsed;
-  const fallback = userFacingFallbackText(fallbackSource);
-  if (fallback !== null) {
-    return applyFallbackVars(fallback, fallbackSource);
-  }
-  return collapsed;
 }
