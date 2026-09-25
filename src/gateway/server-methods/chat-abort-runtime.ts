@@ -15,6 +15,7 @@ import {
   isSubagentRunQueued,
   listSubagentRunsForController,
 } from "../../agents/subagents/registry/subagent-registry-read.js";
+import { abortSessionRunTargetWithOutcome } from "../../auto-reply/reply/abort-operation.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { isAgentEventLifecycleGenerationCurrent } from "../../infra/agent-events.js";
 import { SUBAGENT_KILL_TASK_ERROR } from "../../tasks/detached-task-runtime-contract.js";
@@ -58,6 +59,41 @@ import {
 import { persistAbortedPartials } from "./chat-transcript-persistence.js";
 import { emitSessionsChanged } from "./session-change-event.js";
 import type { GatewayRequestContext } from "./types.js";
+
+// Abort every in-flight chat/agent run owned by a given WS connection. Used by the
+// connection layer to cancel a disconnected caller's unfinished work (after a grace
+// window). Re-checks ownerConnId per run before aborting: during the grace window a run
+// may have finished (removed from the registry) or been taken over by a same-device
+// reconnect (ownerConnId rewritten) — both are skipped so we never abort the wrong run.
+export function abortChatRunsByConnId(
+  context: GatewayRequestContext,
+  connId: string,
+  stopReason: string,
+): string[] {
+  const ops = createChatAbortOps(context);
+  const targets: { runId: string; sessionKey: string }[] = [];
+  for (const [runId, entry] of context.chatAbortControllers) {
+    if (entry.ownerConnId === connId) {
+      targets.push({ runId, sessionKey: entry.sessionKey });
+    }
+  }
+  const aborted: string[] = [];
+  for (const target of targets) {
+    const current = context.chatAbortControllers.get(target.runId);
+    if (!current || current.ownerConnId !== connId) {
+      continue;
+    }
+    const res = abortChatRunById(ops, {
+      runId: target.runId,
+      sessionKey: current.sessionKey,
+      stopReason,
+    });
+    if (res.aborted) {
+      aborted.push(target.runId);
+    }
+  }
+  return aborted;
+}
 
 export async function abortControlledSubagents(params: {
   cfg: OpenClawConfig;
@@ -515,6 +551,17 @@ function prepareChatSessionAbort(
       // matching sessions.steer's operator.write behavior for ownerless work.
       abortAdditional();
       if (!hasWorkerRun || !params.requester.isAdmin || !canCancelWorkerSession) {
+        // Channel inbound (e.g. XIM) registers in replyRunRegistry, not chatAbortControllers.
+        for (const sk of sessionKeys) {
+          const outcome = abortSessionRunTargetWithOutcome({
+            key: sk,
+            sessionId: params.sessionId,
+            agentId: params.agentId,
+          });
+          if (outcome.aborted) {
+            result.aborted = true;
+          }
+        }
         return result;
       }
       params.assertCurrent?.();

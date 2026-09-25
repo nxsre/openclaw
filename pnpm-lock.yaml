@@ -2458,6 +2458,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
 
+  extensions/xfyun:
+    devDependencies:
+      '@openclaw/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+
   extensions/xiaomi:
     devDependencies:
       '@openclaw/plugin-sdk':

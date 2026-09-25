@@ -283,6 +283,7 @@ describe("createCronToolSchema", () => {
         "completionDestination",
         "failureDestination",
         "mode",
+        "targets",
         "threadId",
         "to",
       ].toSorted(),

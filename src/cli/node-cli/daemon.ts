@@ -178,7 +178,7 @@ export async function runNodeDaemonInstall(opts: NodeDaemonInstallOptions) {
   let pinnedRuntimePath = opts.runtimePath ?? (opts.runtime ? undefined : pinSnapshot.pin?.path);
   const runtimeRaw = opts.runtime || resolveGatewayDaemonRuntime([pinnedRuntimePath ?? ""]);
   if (!isGatewayDaemonRuntime(runtimeRaw)) {
-    fail('Invalid --runtime (use "node" or "bun")');
+    fail('Invalid --runtime (use "node"; Bun lacks the required node:sqlite API)');
     return;
   }
 

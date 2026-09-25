@@ -75,6 +75,7 @@ import {
 } from "../../infra/outbound/session-binding-service.js";
 import { deliverSessionMaintenanceWarning } from "../../infra/session-maintenance-warning.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
 import { isPluginOwnedSessionBindingRecord } from "../../plugins/conversation-binding-metadata.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { runWithGatewayIndependentRootWorkContinuation } from "../../process/gateway-work-admission.js";
@@ -163,6 +164,20 @@ import {
 } from "./session-route-reset.js";
 
 const log = createSubsystemLogger("session-init");
+
+// XCPH: serialize reply-session init per conversation so optimistic commits
+// are never contended by a sibling init (xim rapid messages). Unrelated keys stay parallel.
+const replySessionInitQueue = new KeyedAsyncQueue();
+
+function replySessionInitQueueKey(params: InitSessionStateParams): string {
+  const ctx = params.ctx;
+  const key =
+    normalizeOptionalString(ctx.SessionKey) ??
+    normalizeOptionalString(ctx.From) ??
+    normalizeOptionalString(ctx.To) ??
+    "";
+  return `${normalizeOptionalString(ctx.AgentId) ?? ""}::${key}`;
+}
 
 function hasProviderOwnedSession(entry: SessionEntry | undefined): boolean {
   const provider = normalizeOptionalString(entry?.providerOverride ?? entry?.modelProvider);
@@ -365,10 +380,21 @@ function resolveReplySessionRolloverState(
 /** Initializes or reuses the reply session state for one inbound turn. */
 export async function initSessionState(params: InitSessionStateParams): Promise<SessionInitResult> {
   prepareChannelParticipantObservation(params.ctx);
-  return await runWithSessionInitConflictRetry(
-    async () => await initSessionStateAttempt(params, false),
-    { signal: params.signal },
-  );
+  // XCPH: chain same-conversation inits so the optimistic commit is never contended
+  // by a sibling init; unrelated keys stay fully parallel.
+  return await replySessionInitQueue.enqueue(replySessionInitQueueKey(params), async () => {
+    try {
+      return await runWithSessionInitConflictRetry(
+        async () => await initSessionStateAttempt(params, false),
+        { signal: params.signal },
+      );
+    } catch (error) {
+      if (error instanceof ReplySessionInitConflictError) {
+        throw new Error(`${error.message} after retries`);
+      }
+      throw error;
+    }
+  });
 }
 
 async function initSessionStateAttempt(

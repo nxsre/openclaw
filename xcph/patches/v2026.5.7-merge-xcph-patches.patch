@@ -1,0 +1,954 @@
+From: xcph fork export
+Subject: xcph patches on OpenClaw v2026.5.7
+
+Base: tag v2026.5.7 → commit eeef4864494f859838fec1586bedbab1f8fa5702
+Tip: branch xcph/v2026.5.7-merge-xcph-patches → commit be1043e91c03aba10ce7a8b0e584a463261723de
+
+Apply (from repo root at the base commit above):
+  git apply --3way xcph/patches/v2026.5.7-merge-xcph-patches.patch
+
+---
+
+diff --git a/extensions/moonshot/src/kimi-web-search-provider.runtime.ts b/extensions/moonshot/src/kimi-web-search-provider.runtime.ts
+index 789963591e..ae77a0fcd4 100644
+--- a/extensions/moonshot/src/kimi-web-search-provider.runtime.ts
++++ b/extensions/moonshot/src/kimi-web-search-provider.runtime.ts
+@@ -17,10 +17,17 @@ import {
+   setProviderWebSearchPluginConfigValue,
+   type SearchConfigRecord,
+   type WebSearchProviderSetupContext,
++  withSelfHostedWebSearchEndpoint,
+   withTrustedWebSearchEndpoint,
+   wrapWebContent,
+   writeCachedSearchPayload,
+ } from "openclaw/plugin-sdk/provider-web-search";
++import {
++  assertHttpUrlTargetsPrivateNetwork,
++  isBlockedHostnameOrIp,
++  isPrivateIpAddress,
++  resolvePinnedHostnameWithPolicy,
++} from "openclaw/plugin-sdk/ssrf-runtime";
+ import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
+ import {
+   isNativeMoonshotBaseUrl,
+@@ -41,6 +48,8 @@ const KIMI_WEB_SEARCH_TOOL = {
+   function: { name: "$web_search" },
+ } as const;
+ 
++type KimiEndpointMode = "selfHosted" | "strict";
++
+ type KimiConfig = {
+   apiKey?: string;
+   baseUrl?: string;
+@@ -102,6 +111,48 @@ function trimTrailingSlashes(url: string): string {
+   return url.replace(/\/+$/, "");
+ }
+ 
++async function kimiEndpointTargetsPrivateNetwork(url: URL): Promise<boolean> {
++  if (isBlockedHostnameOrIp(url.hostname)) {
++    return true;
++  }
++  try {
++    const pinned = await resolvePinnedHostnameWithPolicy(url.hostname, {
++      policy: {
++        allowPrivateNetwork: true,
++        allowRfc2544BenchmarkRange: true,
++      },
++    });
++    return pinned.addresses.every((address: string) => isPrivateIpAddress(address));
++  } catch {
++    return false;
++  }
++}
++
++export async function resolveKimiSearchEndpointMode(baseUrl: string): Promise<KimiEndpointMode> {
++  const trimmed = baseUrl.trim();
++  let parsed: URL;
++  try {
++    parsed = new URL(trimmed);
++  } catch {
++    throw new Error("Kimi Search base URL must be a valid http:// or https:// URL.");
++  }
++
++  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
++    throw new Error("Kimi Search base URL must use http:// or https://.");
++  }
++
++  if (parsed.protocol === "http:") {
++    await assertHttpUrlTargetsPrivateNetwork(parsed.toString(), {
++      dangerouslyAllowPrivateNetwork: true,
++      errorMessage:
++        "Kimi Search HTTP base URL must target a trusted private or loopback host. Use https:// for public hosts.",
++    });
++    return "selfHosted";
++  }
++
++  return (await kimiEndpointTargetsPrivateNetwork(parsed)) ? "selfHosted" : "strict";
++}
++
+ function resolveKimiBaseUrl(kimi?: KimiConfig, openClawConfig?: OpenClawConfig): string {
+   const explicitBaseUrl = normalizeOptionalString(kimi?.baseUrl) ?? "";
+   if (explicitBaseUrl) {
+@@ -184,14 +235,20 @@ async function runKimiSearch(params: {
+   baseUrl: string;
+   model: string;
+   timeoutSeconds: number;
++  endpointMode: KimiEndpointMode;
+ }): Promise<KimiSearchResult> {
+   const endpoint = `${params.baseUrl.trim().replace(/\/$/, "")}/chat/completions`;
+   const messages: Array<Record<string, unknown>> = [{ role: "user", content: params.query }];
+   const collectedCitations = new Set<string>();
+   let hasGroundingEvidence = false;
+ 
++  const withEndpoint =
++    params.endpointMode === "selfHosted"
++      ? withSelfHostedWebSearchEndpoint
++      : withTrustedWebSearchEndpoint;
++
+   for (let round = 0; round < 3; round += 1) {
+-    const next = await withTrustedWebSearchEndpoint(
++    const next = await withEndpoint(
+       {
+         url: endpoint,
+         timeoutSeconds: params.timeoutSeconds,
+@@ -210,7 +267,7 @@ async function runKimiSearch(params: {
+         },
+       },
+       async (
+-        res,
++        res: Response,
+       ): Promise<{ done: true; content: string; citations: string[] } | { done: false }> => {
+         if (!res.ok) {
+           throw await createProviderHttpError(res, "Kimi API error");
+@@ -318,11 +375,28 @@ export async function executeKimiWebSearchProviderTool(
+     readNumberParam(args, "count", { integer: true }) ?? searchConfig?.maxResults ?? undefined;
+   const model = resolveKimiModel(kimiConfig);
+   const baseUrl = resolveKimiBaseUrl(kimiConfig, ctx.config);
++  let endpointMode: KimiEndpointMode;
++  try {
++    endpointMode = await resolveKimiSearchEndpointMode(baseUrl);
++  } catch (err) {
++    const message =
++      err instanceof Error
++        ? err.message
++        : "Kimi Search base URL is invalid. Expected http:// or https:// with a resolvable hostname.";
++    return {
++      error: "invalid_kimi_search_base_url",
++      message,
++      baseUrl,
++      docs: "https://docs.openclaw.ai/tools/kimi-search",
++    };
++  }
++
+   const cacheKey = buildSearchCacheKey([
+     "kimi",
+     query,
+     resolveSearchCount(count, DEFAULT_SEARCH_COUNT),
+     baseUrl,
++    endpointMode,
+     model,
+   ]);
+   const cached = readCachedSearchPayload(cacheKey);
+@@ -337,6 +411,7 @@ export async function executeKimiWebSearchProviderTool(
+     baseUrl,
+     model,
+     timeoutSeconds: resolveSearchTimeoutSeconds(searchConfig),
++    endpointMode,
+   });
+   if (!result.grounded) {
+     return {
+@@ -455,6 +530,7 @@ export const __testing = {
+   resolveKimiApiKey,
+   resolveKimiModel,
+   resolveKimiBaseUrl,
++  resolveKimiSearchEndpointMode,
+   extractKimiCitations,
+   hasKimiSearchResults,
+   extractKimiToolResultContent,
+diff --git a/extensions/moonshot/src/kimi-web-search-provider.test.ts b/extensions/moonshot/src/kimi-web-search-provider.test.ts
+index 490ae0ddbc..ad1dc4a38d 100644
+--- a/extensions/moonshot/src/kimi-web-search-provider.test.ts
++++ b/extensions/moonshot/src/kimi-web-search-provider.test.ts
+@@ -104,6 +104,30 @@ describe("kimi web search provider", () => {
+     ).toBe("https://api.moonshot.ai/v1");
+   });
+ 
++  it("classifies Moonshot endpoints for SSRF-safe web_search fetch routing", async () => {
++    expect(await __testing.resolveKimiSearchEndpointMode("https://api.moonshot.ai/v1")).toBe(
++      "strict",
++    );
++    expect(await __testing.resolveKimiSearchEndpointMode("https://10.0.0.1:3000/v1")).toBe(
++      "selfHosted",
++    );
++    expect(await __testing.resolveKimiSearchEndpointMode("http://10.0.0.1:3000/v1")).toBe(
++      "selfHosted",
++    );
++    expect(await __testing.resolveKimiSearchEndpointMode("http://127.0.0.1:8080/v1")).toBe(
++      "selfHosted",
++    );
++  });
++
++  it("rejects invalid Kimi Search base URLs during endpoint classification", async () => {
++    await expect(
++      __testing.resolveKimiSearchEndpointMode("ftp://moonshot.invalid/v1"),
++    ).rejects.toThrow("must use http:// or https://");
++    await expect(__testing.resolveKimiSearchEndpointMode("not-a-url")).rejects.toThrow(
++      "must be a valid http:// or https://",
++    );
++  });
++
+   it("extracts unique citations from search results and tool call arguments", () => {
+     expect(
+       __testing.extractKimiCitations({
+diff --git a/src/channels/plugins/types.adapters.ts b/src/channels/plugins/types.adapters.ts
+index 477f16a54f..75d8737b69 100644
+--- a/src/channels/plugins/types.adapters.ts
++++ b/src/channels/plugins/types.adapters.ts
+@@ -352,6 +352,7 @@ export type ChannelGatewayAdapter<ResolvedAccount = unknown> = {
+   loginWithQrWait?: (params: {
+     accountId?: string;
+     timeoutMs?: number;
++    sessionKey?: string;
+     currentQrDataUrl?: string;
+   }) => Promise<ChannelLoginWithQrWaitResult>;
+   logoutAccount?: (ctx: ChannelLogoutContext<ResolvedAccount>) => Promise<ChannelLogoutResult>;
+@@ -364,7 +365,10 @@ export type ChannelAuthAdapter = {
+     runtime: RuntimeEnv;
+     verbose?: boolean;
+     channelInput?: string | null;
+-  }) => Promise<void>;
++  }) => Promise<void | {
++    /** Override `channels.start` account after CLI login when credentials key differs from CLI default (Weixin ilink id vs `default`). */
++    reconcileAccountId?: string;
++  }>;
+ };
+ 
+ export type ChannelHeartbeatAdapter = {
+diff --git a/src/cli/channel-auth.ts b/src/cli/channel-auth.ts
+index 5ab295129d..ad2e8be997 100644
+--- a/src/cli/channel-auth.ts
++++ b/src/cli/channel-auth.ts
+@@ -150,6 +150,11 @@ async function reconcileGatewayRuntimeAfterLocalLogin(params: {
+     return;
+   }
+   try {
++    // Weixin credentials are written under OPENCLAW_STATE_DIR as plain JSON; bind mounts / NFS
++    // can briefly hide updates from the gateway process that handles channels.start.
++    if (params.channelId === "openclaw-weixin") {
++      await new Promise((resolve) => setTimeout(resolve, 800));
++    }
+     await callGateway({
+       config: params.cfg,
+       method: "channels.start",
+@@ -225,18 +230,25 @@ export async function runChannelLogin(
+   // Auth-only flow: do not mutate channel config here.
+   setVerbose(Boolean(opts.verbose));
+   const { accountId } = resolveAccountContext(plugin, opts, cfg);
+-  await login({
++  const loginResult = await login({
+     cfg,
+     accountId,
+     runtime,
+     verbose: Boolean(opts.verbose),
+     channelInput,
+   });
++  const reconcileAccountId =
++    loginResult &&
++    typeof loginResult === "object" &&
++    typeof loginResult.reconcileAccountId === "string" &&
++    loginResult.reconcileAccountId.trim()
++      ? loginResult.reconcileAccountId.trim()
++      : accountId;
+   await reconcileGatewayRuntimeAfterLocalLogin({
+     cfg,
+     plugin,
+     channelId: plugin.id,
+-    accountId,
++    accountId: reconcileAccountId,
+     runtime,
+   });
+ }
+diff --git a/src/gateway/protocol/channels.schema.test.ts b/src/gateway/protocol/channels.schema.test.ts
+index 6d415afddb..0ef8d04a5e 100644
+--- a/src/gateway/protocol/channels.schema.test.ts
++++ b/src/gateway/protocol/channels.schema.test.ts
+@@ -25,6 +25,15 @@ describe("WebLoginWaitParamsSchema", () => {
+       }),
+     ).toBe(false);
+   });
++
++  it("accepts optional sessionKey for web.login.wait", () => {
++    expect(validate({ sessionKey: "uuid-session-key" })).toBe(true);
++    expect(
++      validate({
++        sessionKey: "x".repeat(513),
++      }),
++    ).toBe(false);
++  });
+ });
+ 
+ describe("ChannelsStatusResultSchema", () => {
+diff --git a/src/gateway/protocol/client-info.ts b/src/gateway/protocol/client-info.ts
+index fe6576c13c..423c947f1c 100644
+--- a/src/gateway/protocol/client-info.ts
++++ b/src/gateway/protocol/client-info.ts
+@@ -47,6 +47,8 @@ export type GatewayClientInfo = {
+ 
+ export const GATEWAY_CLIENT_CAPS = {
+   TOOL_EVENTS: "tool-events",
++  /** Control UI / gateway clients that want `agent` WS events with `stream: "thinking"`. */
++  THINKING_EVENTS: "thinking-events",
+ } as const;
+ 
+ export type GatewayClientCap = (typeof GATEWAY_CLIENT_CAPS)[keyof typeof GATEWAY_CLIENT_CAPS];
+diff --git a/src/gateway/protocol/schema/channels.ts b/src/gateway/protocol/schema/channels.ts
+index 87d95f609c..5df51fbea3 100644
+--- a/src/gateway/protocol/schema/channels.ts
++++ b/src/gateway/protocol/schema/channels.ts
+@@ -365,6 +365,8 @@ export const WebLoginWaitParamsSchema = Type.Object(
+   {
+     timeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
+     accountId: Type.Optional(Type.String()),
++    /** Forwarded to channels that key QR sessions by UUID (e.g. openclaw-weixin bind-new). */
++    sessionKey: Type.Optional(Type.String({ maxLength: 512 })),
+     currentQrDataUrl: Type.Optional(QrDataUrlSchema),
+   },
+   { additionalProperties: false },
+diff --git a/src/gateway/server-channels.test.ts b/src/gateway/server-channels.test.ts
+index 9a6f0e34fc..3aebb385b3 100644
+--- a/src/gateway/server-channels.test.ts
++++ b/src/gateway/server-channels.test.ts
+@@ -767,6 +767,35 @@ describe("server-channels auto restart", () => {
+     await manager.stopChannel("discord");
+   });
+ 
++  it("aborts running accounts dropped from listAccountIds without an explicit stopChannel", async () => {
++    let accountIds = ["ghost-acc"];
++    const startAccount = vi.fn(
++      async ({ abortSignal }: { abortSignal: AbortSignal }) =>
++        await new Promise<void>((resolve) => {
++          abortSignal.addEventListener("abort", () => resolve(), { once: true });
++        }),
++    );
++    installTestRegistry(
++      createTestPlugin({
++        startAccount,
++        listAccountIds: () => accountIds,
++      }),
++    );
++    const manager = createManager();
++
++    await manager.startChannel("discord");
++    expect(startAccount).toHaveBeenCalledTimes(1);
++    expect(startAccount.mock.calls[0]?.[0]?.accountId).toBe("ghost-acc");
++
++    accountIds = ["kept-acc"];
++    await manager.startChannel("discord");
++
++    expect(startAccount).toHaveBeenCalledTimes(2);
++    expect(startAccount.mock.calls[1]?.[0]?.accountId).toBe("kept-acc");
++
++    await manager.stopChannel("discord");
++  });
++
+   it("reuses plugin account resolution for health monitor overrides", () => {
+     installTestRegistry(
+       createTestPlugin({
+diff --git a/src/gateway/server-channels.ts b/src/gateway/server-channels.ts
+index 4c5d019e82..21ed78ca65 100644
+--- a/src/gateway/server-channels.ts
++++ b/src/gateway/server-channels.ts
+@@ -36,6 +36,10 @@ const CHANNEL_RESTART_POLICY: BackoffPolicy = {
+   jitter: 0.1,
+ };
+ const MAX_RESTART_ATTEMPTS = 10;
++/**
++ * Max wait after `abort()` for the channel task promise to settle.
++ * Long-poll channels must wire `AbortSignal` into in-flight I/O so shutdown does not block on server hold times.
++ */
+ const CHANNEL_STOP_ABORT_TIMEOUT_MS = 5_000;
+ const CHANNEL_STARTUP_CONCURRENCY = 4;
+ 
+@@ -352,6 +356,95 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
+     }
+   };
+ 
++  /**
++   * Abort channel tasks whose accountIds disappeared from `listAccountIds` (e.g. Weixin QR login
++   * removed stale entries). Without this, long-poll monitors keep running with fallback tokens and
++   * spam APIs / logs even though credentials were deleted from disk.
++   */
++  const stopRemovedChannelAccounts = async (
++    channelId: ChannelId,
++    store: ChannelRuntimeStore,
++    activeAccountIds: readonly string[],
++  ): Promise<void> => {
++    const plugin = getChannelPlugin(channelId);
++    if (!plugin?.gateway?.startAccount) {
++      return;
++    }
++    const active = new Set(activeAccountIds);
++    const staleIds = [
++      ...new Set([...store.tasks.keys(), ...store.aborts.keys(), ...store.starting.keys()]),
++    ].filter((id) => !active.has(id));
++    if (staleIds.length === 0) {
++      return;
++    }
++
++    const cfg = getRuntimeConfig();
++    const log = ensureChannelLog(channelId);
++    log.info?.(
++      `[${channelId}] stopping ${staleIds.length} removed account task(s): ${staleIds.join(", ")}`,
++    );
++
++    await Promise.all(
++      staleIds.map(async (id) => {
++        const rKey = restartKey(channelId, id);
++        manuallyStopped.add(rKey);
++        const abort = store.aborts.get(id);
++        const task = store.tasks.get(id);
++        abort?.abort();
++        const runtime = ensureChannelRuntime(channelId);
++        if (plugin.gateway?.stopAccount) {
++          try {
++            const account = plugin.config.resolveAccount(cfg, id);
++            await plugin.gateway.stopAccount({
++              cfg,
++              accountId: id,
++              account,
++              runtime,
++              abortSignal: abort?.signal ?? new AbortController().signal,
++              log,
++              getStatus: () => getRuntime(channelId, id),
++              setStatus: (next) => setRuntime(channelId, id, next),
++            });
++          } catch (err) {
++            log.warn?.(
++              `[${id}] stopAccount while stopping removed account failed: ${formatErrorMessage(err)}`,
++            );
++          }
++        }
++        const stoppedCleanly = await waitForChannelStopGracefully(
++          task,
++          CHANNEL_STOP_ABORT_TIMEOUT_MS,
++        );
++        if (!stoppedCleanly) {
++          log.warn?.(
++            `[${id}] removed-account stop exceeded ${CHANNEL_STOP_ABORT_TIMEOUT_MS}ms after abort`,
++          );
++          store.aborts.delete(id);
++          store.tasks.delete(id);
++          store.starting.delete(id);
++          setRuntime(channelId, id, {
++            accountId: id,
++            running: false,
++            restartPending: false,
++            lastStopAt: Date.now(),
++            lastError: `channel stop timed out after ${CHANNEL_STOP_ABORT_TIMEOUT_MS}ms`,
++          });
++        } else {
++          store.aborts.delete(id);
++          store.tasks.delete(id);
++          store.starting.delete(id);
++          setRuntime(channelId, id, {
++            accountId: id,
++            running: false,
++            restartPending: false,
++            lastStopAt: Date.now(),
++          });
++        }
++        restartAttempts.delete(rKey);
++      }),
++    );
++  };
++
+   const startChannelInternal = async (
+     channelId: ChannelId,
+     accountId?: string,
+@@ -366,14 +459,15 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
+     const cfg = getRuntimeConfig();
+     resetDirectoryCache({ channel: channelId, accountId });
+     const store = getStore(channelId);
+-    const accountIds = accountId
+-      ? [accountId]
+-      : await measureStartup(`channels.${channelId}.list-accounts`, () =>
+-          plugin.config.listAccountIds(cfg),
+-        );
++    const listedIds = await measureStartup(`channels.${channelId}.list-accounts`, async () => {
++      const raw = plugin.config.listAccountIds(cfg);
++      return await Promise.resolve(raw);
++    });
++    await stopRemovedChannelAccounts(channelId, store, listedIds);
+     if (!accountId) {
+-      evictStaleChannelAccountState(channelId, store, accountIds);
++      evictStaleChannelAccountState(channelId, store, listedIds);
+     }
++    const accountIds = accountId ? [accountId] : listedIds;
+     if (accountIds.length === 0) {
+       return;
+     }
+@@ -472,11 +566,21 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
+             return;
+           }
+ 
+-          scopedChannelRuntime = await measureStartup(`channels.${channelId}.runtime`, async () =>
+-            createTaskScopedChannelRuntime({
+-              channelRuntime: await getChannelRuntime(channelId),
+-            }),
+-          );
++          scopedChannelRuntime = await measureStartup(`channels.${channelId}.runtime`, async () => {
++            const channelRuntimeSurface = await getChannelRuntime(channelId);
++            if (
++              getLoadedChannelPluginOrigin(channelId) !== "bundled" &&
++              plugin.gateway?.startAccount &&
++              !channelRuntimeSurface
++            ) {
++              throw new Error(
++                `${channelId}: gateway channel runtime unavailable (external channels require createChannelManager.resolveChannelRuntime); refusing to start`,
++              );
++            }
++            return createTaskScopedChannelRuntime({
++              channelRuntime: channelRuntimeSurface,
++            });
++          });
+           channelRuntimeForTask = scopedChannelRuntime.channelRuntime;
+ 
+           if (!preserveRestartAttempts) {
+@@ -548,6 +652,20 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
+               if (manuallyStopped.has(rKey)) {
+                 return;
+               }
++              const cfgNow = getRuntimeConfig();
++              let listedNow: string[] = [];
++              try {
++                listedNow = await Promise.resolve(plugin.config.listAccountIds(cfgNow));
++              } catch {
++                listedNow = [];
++              }
++              if (!listedNow.includes(id)) {
++                restartAttempts.delete(rKey);
++                log.info?.(
++                  `[${id}] skipping auto-restart (account no longer listed for ${channelId})`,
++                );
++                return;
++              }
+               const attempt = (restartAttempts.get(rKey) ?? 0) + 1;
+               restartAttempts.set(rKey, attempt);
+               if (attempt > MAX_RESTART_ATTEMPTS) {
+@@ -681,10 +799,15 @@ export function createChannelManager(opts: ChannelManagerOptions): ChannelManage
+           log.warn?.(
+             `[${id}] channel stop exceeded ${CHANNEL_STOP_ABORT_TIMEOUT_MS}ms after abort; continuing shutdown`,
+           );
++          // Drop bookkeeping so a subsequent restart can start a fresh task. The orphaned promise may
++          // still settle later; its `.finally` only deletes when ids still match this aborted generation.
++          store.aborts.delete(id);
++          store.tasks.delete(id);
+           setRuntime(channelId, id, {
+             accountId: id,
+-            running: true,
++            running: false,
+             restartPending: false,
++            lastStopAt: Date.now(),
+             lastError: `channel stop timed out after ${CHANNEL_STOP_ABORT_TIMEOUT_MS}ms`,
+           });
+           return;
+diff --git a/src/gateway/server-chat.agent-events.test.ts b/src/gateway/server-chat.agent-events.test.ts
+index 67e35b1bfb..570481e0bc 100644
+--- a/src/gateway/server-chat.agent-events.test.ts
++++ b/src/gateway/server-chat.agent-events.test.ts
+@@ -91,6 +91,7 @@ describe("agent event handler", () => {
+     const agentRunSeq = new Map<string, number>();
+     const chatRunState = createChatRunState();
+     const toolEventRecipients = createToolEventRecipientRegistry();
++    const thinkingEventRecipients = createToolEventRecipientRegistry();
+     const sessionEventSubscribers = createSessionEventSubscriberRegistry();
+ 
+     const handler = createAgentEventHandler({
+@@ -102,6 +103,7 @@ describe("agent event handler", () => {
+       resolveSessionKeyForRun: params?.resolveSessionKeyForRun ?? (() => undefined),
+       clearAgentRunContext,
+       toolEventRecipients,
++      thinkingEventRecipients,
+       sessionEventSubscribers,
+       loadGatewaySessionRowForSnapshot: loadGatewaySessionRow,
+       lifecycleErrorRetryGraceMs: params?.lifecycleErrorRetryGraceMs,
+@@ -117,6 +119,7 @@ describe("agent event handler", () => {
+       agentRunSeq,
+       chatRunState,
+       toolEventRecipients,
++      thinkingEventRecipients,
+       sessionEventSubscribers,
+       handler,
+     };
+@@ -735,6 +738,58 @@ describe("agent event handler", () => {
+     resetAgentRunContextForTest();
+   });
+ 
++  it("does not broadcast thinking events without registered recipients", () => {
++    const { broadcast, broadcastToConnIds, nodeSendToSession, handler } = createHarness({
++      resolveSessionKeyForRun: () => "session-1",
++    });
++
++    registerAgentRunContext("run-thinking-none", { sessionKey: "session-1", verboseLevel: "off" });
++
++    handler({
++      runId: "run-thinking-none",
++      seq: 1,
++      stream: "thinking",
++      ts: Date.now(),
++      data: { text: "step 1" },
++    });
++
++    expect(broadcast).not.toHaveBeenCalled();
++    expect(broadcastToConnIds).not.toHaveBeenCalled();
++    expect(nodeSendToSession).not.toHaveBeenCalled();
++    resetAgentRunContextForTest();
++  });
++
++  it("routes thinking events only to registered recipients", () => {
++    const { broadcastToConnIds, thinkingEventRecipients, handler } = createHarness({
++      resolveSessionKeyForRun: () => "session-1",
++    });
++
++    registerAgentRunContext("run-thinking", { sessionKey: "session-1", verboseLevel: "off" });
++    thinkingEventRecipients.add("run-thinking", "conn-think");
++
++    handler({
++      runId: "run-thinking",
++      seq: 1,
++      stream: "thinking",
++      ts: 1_234,
++      data: { text: "reasoning chunk" },
++    });
++
++    expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
++    expect(broadcastToConnIds).toHaveBeenCalledWith(
++      "agent",
++      expect.objectContaining({
++        runId: "run-thinking",
++        sessionKey: "session-1",
++        stream: "thinking",
++        ts: 1_234,
++        data: { text: "reasoning chunk" },
++      }),
++      new Set(["conn-think"]),
++    );
++    resetAgentRunContextForTest();
++  });
++
+   it("routes tool events only to registered recipients when verbose is enabled", () => {
+     const { broadcast, broadcastToConnIds, toolEventRecipients, handler } = createHarness({
+       resolveSessionKeyForRun: () => "session-1",
+diff --git a/src/gateway/server-chat.ts b/src/gateway/server-chat.ts
+index 0e707f2ba5..26a0b0befc 100644
+--- a/src/gateway/server-chat.ts
++++ b/src/gateway/server-chat.ts
+@@ -148,6 +148,7 @@ export type AgentEventHandlerOptions = {
+   resolveSessionKeyForRun: (runId: string) => string | undefined;
+   clearAgentRunContext: (runId: string) => void;
+   toolEventRecipients: ToolEventRecipientRegistry;
++  thinkingEventRecipients: ToolEventRecipientRegistry;
+   sessionEventSubscribers: SessionEventSubscriberRegistry;
+   loadGatewaySessionRowForSnapshot?: typeof loadGatewaySessionRow;
+   lifecycleErrorRetryGraceMs?: number;
+@@ -163,6 +164,7 @@ export function createAgentEventHandler({
+   resolveSessionKeyForRun,
+   clearAgentRunContext,
+   toolEventRecipients,
++  thinkingEventRecipients,
+   sessionEventSubscribers,
+   loadGatewaySessionRowForSnapshot = loadGatewaySessionRow,
+   lifecycleErrorRetryGraceMs = AGENT_LIFECYCLE_ERROR_RETRY_GRACE_MS,
+@@ -349,6 +351,7 @@ export function createAgentEventHandler({
+     }
+ 
+     toolEventRecipients.markFinal(evt.runId);
++    thinkingEventRecipients.markFinal(evt.runId);
+     clearAgentRunContext(evt.runId);
+     agentRunSeq.delete(evt.runId);
+     agentRunSeq.delete(clientRunId);
+@@ -611,6 +614,7 @@ export function createAgentEventHandler({
+       : eventForClients;
+     const last = agentRunSeq.get(evt.runId) ?? 0;
+     const isToolEvent = evt.stream === "tool";
++    const isThinkingEvent = evt.stream === "thinking";
+     const isItemEvent = evt.stream === "item";
+     const toolVerbose = isToolEvent ? resolveToolVerboseLevel(evt.runId, sessionKey) : "off";
+     // Channel/node subscribers respect verbose; authenticated Control UI
+@@ -676,6 +680,15 @@ export function createAgentEventHandler({
+           );
+         }
+       }
++    } else if (isThinkingEvent) {
++      const thinkingRecipients = thinkingEventRecipients.get(evt.runId);
++      if (isControlUiVisible && thinkingRecipients && thinkingRecipients.size > 0) {
++        broadcastToConnIds(
++          "agent",
++          sessionKey ? { ...agentPayload, ...buildSessionEventSnapshot(sessionKey) } : agentPayload,
++          thinkingRecipients,
++        );
++      }
+     } else {
+       const itemPhase = isItemEvent && typeof evt.data?.phase === "string" ? evt.data.phase : "";
+       if (itemPhase === "start" && isControlUiVisible && sessionKey && !isAborted) {
+@@ -686,7 +699,7 @@ export function createAgentEventHandler({
+       }
+     }
+ 
+-    if (isControlUiVisible && sessionKey) {
++    if (isControlUiVisible && sessionKey && !isThinkingEvent) {
+       // Send tool events to node/channel subscribers only when verbose is enabled;
+       // WS clients already received the event above via broadcastToConnIds.
+       if (!isToolEvent || toolVerbose !== "off") {
+diff --git a/src/gateway/server-methods-list.ts b/src/gateway/server-methods-list.ts
+index 48ade335a2..97c28bed4a 100644
+--- a/src/gateway/server-methods-list.ts
++++ b/src/gateway/server-methods-list.ts
+@@ -161,6 +161,9 @@ const BASE_METHODS = [
+   "chat.history",
+   "chat.abort",
+   "chat.send",
++  // Core handlers (always routed via server-methods/web.ts); channel plugins only supply providers.
++  "web.login.start",
++  "web.login.wait",
+ ];
+ 
+ export function listGatewayMethods(): string[] {
+diff --git a/src/gateway/server-methods/agent.create-event.test.ts b/src/gateway/server-methods/agent.create-event.test.ts
+index 38f4c2fff6..104a9986fc 100644
+--- a/src/gateway/server-methods/agent.create-event.test.ts
++++ b/src/gateway/server-methods/agent.create-event.test.ts
+@@ -80,6 +80,7 @@ describe("agent handler session create events", () => {
+         chatAbortControllers: new Map(),
+         addChatRun: vi.fn(),
+         registerToolEventRecipient: vi.fn(),
++        registerThinkingEventRecipient: vi.fn(),
+         getRuntimeConfig: configMocks.getRuntimeConfig,
+         getSessionEventSubscriberConnIds: () => new Set(["conn-1"]),
+         broadcastToConnIds,
+diff --git a/src/gateway/server-methods/agent.ts b/src/gateway/server-methods/agent.ts
+index eefbea283f..02393b9cbc 100644
+--- a/src/gateway/server-methods/agent.ts
++++ b/src/gateway/server-methods/agent.ts
+@@ -1147,6 +1147,19 @@ export const agentHandlers: GatewayRequestHandlers = {
+       }
+     }
+ 
++    const wantsThinkingEvents = hasGatewayClientCap(
++      client?.connect?.caps,
++      GATEWAY_CLIENT_CAPS.THINKING_EVENTS,
++    );
++    if (connId && wantsThinkingEvents) {
++      context.registerThinkingEventRecipient(runId, connId);
++      for (const [activeRunId, active] of context.chatAbortControllers) {
++        if (activeRunId !== runId && active.sessionKey === requestedSessionKey) {
++          context.registerThinkingEventRecipient(activeRunId, connId);
++        }
++      }
++    }
++
+     const wantsDelivery = request.deliver === true;
+     const explicitTo =
+       normalizeOptionalString(request.replyTo) ?? normalizeOptionalString(request.to);
+diff --git a/src/gateway/server-methods/chat.directive-tags.test.ts b/src/gateway/server-methods/chat.directive-tags.test.ts
+index 72b69c582d..439ff580f6 100644
+--- a/src/gateway/server-methods/chat.directive-tags.test.ts
++++ b/src/gateway/server-methods/chat.directive-tags.test.ts
+@@ -384,6 +384,7 @@ function createChatContext(): Pick<
+   | "dedupe"
+   | "loadGatewayModelCatalog"
+   | "registerToolEventRecipient"
++  | "registerThinkingEventRecipient"
+   | "logGateway"
+ > {
+   return {
+@@ -414,6 +415,7 @@ function createChatContext(): Pick<
+         },
+       ],
+     registerToolEventRecipient: vi.fn(),
++    registerThinkingEventRecipient: vi.fn(),
+     logGateway: {
+       warn: vi.fn(),
+       debug: vi.fn(),
+diff --git a/src/gateway/server-methods/chat.ts b/src/gateway/server-methods/chat.ts
+index b9f7d5a862..c71b6cd9e7 100644
+--- a/src/gateway/server-methods/chat.ts
++++ b/src/gateway/server-methods/chat.ts
+@@ -2458,6 +2458,23 @@ export const chatHandlers: GatewayRequestHandlers = {
+                 }
+               }
+             }
++            const wantsThinkingEvents = hasGatewayClientCap(
++              client?.connect?.caps,
++              GATEWAY_CLIENT_CAPS.THINKING_EVENTS,
++            );
++            if (connId && wantsThinkingEvents) {
++              context.registerThinkingEventRecipient(runId, connId);
++              for (const [activeRunId, active] of context.chatAbortControllers) {
++                if (activeRunId !== runId && active.sessionKey === p.sessionKey) {
++                  context.registerThinkingEventRecipient(activeRunId, connId);
++                }
++              }
++            }
++          },
++          // Embedded agent emits WS `agent` events with stream `thinking` when
++          // `onReasoningStream` is set (pi-embedded-subscribe.emitReasoningStream).
++          onReasoningStream: async () => {
++            // Intentionally empty: enables streamReasoning; thinking deltas ride agent bus.
+           },
+           onModelSelected,
+         },
+diff --git a/src/gateway/server-methods/shared-types.ts b/src/gateway/server-methods/shared-types.ts
+index 1bf326f3ca..07cb81edf9 100644
+--- a/src/gateway/server-methods/shared-types.ts
++++ b/src/gateway/server-methods/shared-types.ts
+@@ -87,6 +87,7 @@ export type GatewayRequestContext = {
+   unsubscribeAllSessionEvents: (connId: string) => void;
+   getSessionEventSubscriberConnIds: () => ReadonlySet<string>;
+   registerToolEventRecipient: (runId: string, connId: string) => void;
++  registerThinkingEventRecipient: (runId: string, connId: string) => void;
+   dedupe: Map<string, DedupeEntry>;
+   wizardSessions: Map<string, WizardSession>;
+   findRunningWizard: () => string | null;
+diff --git a/src/gateway/server-methods/web.ts b/src/gateway/server-methods/web.ts
+index 8f8df9582d..4dc8b37f18 100644
+--- a/src/gateway/server-methods/web.ts
++++ b/src/gateway/server-methods/web.ts
+@@ -130,12 +130,17 @@ export const webHandlers: GatewayRequestHandlers = {
+         respondProviderUnsupported(respond, provider.id);
+         return;
+       }
++      const sessionKey =
++        typeof (params as { sessionKey?: unknown }).sessionKey === "string"
++          ? (params as { sessionKey?: string }).sessionKey
++          : undefined;
+       const result = await provider.gateway.loginWithQrWait({
+         timeoutMs:
+           typeof (params as { timeoutMs?: unknown }).timeoutMs === "number"
+             ? (params as { timeoutMs?: number }).timeoutMs
+             : undefined,
+         accountId,
++        sessionKey,
+         currentQrDataUrl:
+           typeof (params as { currentQrDataUrl?: unknown }).currentQrDataUrl === "string"
+             ? (params as { currentQrDataUrl?: string }).currentQrDataUrl
+diff --git a/src/gateway/server-request-context.test.ts b/src/gateway/server-request-context.test.ts
+index 736b7d3b61..1262b72965 100644
+--- a/src/gateway/server-request-context.test.ts
++++ b/src/gateway/server-request-context.test.ts
+@@ -52,6 +52,7 @@ describe("createGatewayRequestContext", () => {
+       unsubscribeAllSessionEvents: vi.fn(),
+       getSessionEventSubscriberConnIds: vi.fn(() => new Set<string>()),
+       registerToolEventRecipient: vi.fn(),
++      registerThinkingEventRecipient: vi.fn(),
+       dedupe: new Map(),
+       wizardSessions: new Map(),
+       findRunningWizard: vi.fn(() => null),
+diff --git a/src/gateway/server-request-context.ts b/src/gateway/server-request-context.ts
+index 7fc674cc30..b2cfc13892 100644
+--- a/src/gateway/server-request-context.ts
++++ b/src/gateway/server-request-context.ts
+@@ -47,6 +47,7 @@ type GatewayRequestContextParams = {
+   unsubscribeAllSessionEvents: GatewayRequestContext["unsubscribeAllSessionEvents"];
+   getSessionEventSubscriberConnIds: GatewayRequestContext["getSessionEventSubscriberConnIds"];
+   registerToolEventRecipient: GatewayRequestContext["registerToolEventRecipient"];
++  registerThinkingEventRecipient: GatewayRequestContext["registerThinkingEventRecipient"];
+   dedupe: GatewayRequestContext["dedupe"];
+   wizardSessions: GatewayRequestContext["wizardSessions"];
+   findRunningWizard: GatewayRequestContext["findRunningWizard"];
+@@ -143,6 +144,7 @@ export function createGatewayRequestContext(
+     unsubscribeAllSessionEvents: params.unsubscribeAllSessionEvents,
+     getSessionEventSubscriberConnIds: params.getSessionEventSubscriberConnIds,
+     registerToolEventRecipient: params.registerToolEventRecipient,
++    registerThinkingEventRecipient: params.registerThinkingEventRecipient,
+     dedupe: params.dedupe,
+     wizardSessions: params.wizardSessions,
+     findRunningWizard: params.findRunningWizard,
+diff --git a/src/gateway/server-runtime-state.ts b/src/gateway/server-runtime-state.ts
+index 0b1b624c13..abe8adddf6 100644
+--- a/src/gateway/server-runtime-state.ts
++++ b/src/gateway/server-runtime-state.ts
+@@ -109,6 +109,7 @@ export async function createGatewayRuntimeState(params: {
+   ) => ChatRunEntry | undefined;
+   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
+   toolEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
++  thinkingEventRecipients: ReturnType<typeof createToolEventRecipientRegistry>;
+ }> {
+   pinActivePluginHttpRouteRegistry(params.pluginRegistry);
+   if (params.pinChannelRegistry !== false) {
+@@ -304,6 +305,7 @@ export async function createGatewayRuntimeState(params: {
+     const removeChatRun = chatRunRegistry.remove;
+     const chatAbortControllers = new Map<string, ChatAbortControllerEntry>();
+     const toolEventRecipients = createToolEventRecipientRegistry();
++    const thinkingEventRecipients = createToolEventRecipientRegistry();
+ 
+     return {
+       canvasHost,
+@@ -338,6 +340,7 @@ export async function createGatewayRuntimeState(params: {
+       removeChatRun,
+       chatAbortControllers,
+       toolEventRecipients,
++      thinkingEventRecipients,
+     };
+   } catch (err) {
+     releasePinnedPluginHttpRouteRegistry();
+diff --git a/src/gateway/server-runtime-subscriptions.ts b/src/gateway/server-runtime-subscriptions.ts
+index 23c84de8d6..0902d51737 100644
+--- a/src/gateway/server-runtime-subscriptions.ts
++++ b/src/gateway/server-runtime-subscriptions.ts
+@@ -22,6 +22,7 @@ export function startGatewayEventSubscriptions(params: {
+   agentRunSeq: Map<string, number>;
+   chatRunState: ChatRunState;
+   toolEventRecipients: ToolEventRecipientRegistry;
++  thinkingEventRecipients: ToolEventRecipientRegistry;
+   sessionEventSubscribers: SessionEventSubscriberRegistry;
+   sessionMessageSubscribers: SessionMessageSubscriberRegistry;
+   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
+@@ -43,6 +44,7 @@ export function startGatewayEventSubscriptions(params: {
+         resolveSessionKeyForRun,
+         clearAgentRunContext,
+         toolEventRecipients: params.toolEventRecipients,
++        thinkingEventRecipients: params.thinkingEventRecipients,
+         sessionEventSubscribers: params.sessionEventSubscribers,
+         isChatSendRunActive: (runId) => {
+           const entry = params.chatAbortControllers.get(runId);
+diff --git a/src/gateway/server.chat.gateway-server-chat-b.test.ts b/src/gateway/server.chat.gateway-server-chat-b.test.ts
+index 35af73e73c..3620e30932 100644
+--- a/src/gateway/server.chat.gateway-server-chat-b.test.ts
++++ b/src/gateway/server.chat.gateway-server-chat-b.test.ts
+@@ -256,6 +256,7 @@ describe("gateway server chat", () => {
+         broadcast: vi.fn(),
+         nodeSendToSession: vi.fn(),
+         registerToolEventRecipient: vi.fn(),
++        registerThinkingEventRecipient: vi.fn(),
+         dedupe: new Map(),
+       } as unknown as GatewayRequestContext;
+       dispatchInboundMessageMock.mockImplementation(async () => dispatchRelease.promise);
+diff --git a/src/gateway/server.impl.ts b/src/gateway/server.impl.ts
+index b8c870df5b..36fdeddefa 100644
+--- a/src/gateway/server.impl.ts
++++ b/src/gateway/server.impl.ts
+@@ -840,6 +840,7 @@ export async function startGatewayServer(
+     removeChatRun,
+     chatAbortControllers,
+     toolEventRecipients,
++    thinkingEventRecipients,
+   } = await startupTrace.measure("runtime.state", () =>
+     createGatewayRuntimeState({
+       cfg: cfgAtStart,
+@@ -1050,6 +1051,7 @@ export async function startGatewayServer(
+         agentRunSeq,
+         chatRunState,
+         toolEventRecipients,
++        thinkingEventRecipients,
+         sessionEventSubscribers,
+         sessionMessageSubscribers,
+         chatAbortControllers,
+@@ -1290,6 +1292,7 @@ export async function startGatewayServer(
+       },
+       getSessionEventSubscriberConnIds: sessionEventSubscribers.getAll,
+       registerToolEventRecipient: toolEventRecipients.add,
++      registerThinkingEventRecipient: thinkingEventRecipients.add,
+       dedupe,
+       wizardSessions,
+       findRunningWizard,

@@ -116,6 +116,8 @@ export type PreparedCronRunContext = {
   withRunSession: WithRunSession;
   agentPayload: Extract<CronJob["payload"], { kind: "agentTurn" }> | null;
   deliveryPlan: CronDeliveryPlan;
+  /** Fan-out plans beyond the primary (targets[1..], `all` already expanded). */
+  additionalDeliveryPlans: CronDeliveryPlan[];
   resolvedDelivery: ResolvedCronDeliveryTarget;
   deliveryRequested: boolean;
   sourceDelivery: SourceDeliveryPlan;
@@ -510,12 +512,17 @@ export async function prepareCronRunContext(params: {
       agentRuntime: effectiveAgentRuntime,
       toolsAllowProvenance: input.job.toolsAllowProvenance,
     });
-    const { deliveryPlan, deliveryRequested, resolvedDelivery, sourceDelivery } =
-      await resolveCronDeliveryContext({
-        cfg: cfgWithAgentDefaults,
-        job: input.job,
-        agentId,
-      });
+    const {
+      deliveryPlan,
+      additionalDeliveryPlans,
+      deliveryRequested,
+      resolvedDelivery,
+      sourceDelivery,
+    } = await resolveCronDeliveryContext({
+      cfg: cfgWithAgentDefaults,
+      job: input.job,
+      agentId,
+    });
 
     const { formattedTime, timeLine } = resolveCronStyleNow(runtimeCfg, now);
     // Current jobs stay detached; a bounded tail preserves context without transcript continuation.
@@ -690,6 +697,7 @@ export async function prepareCronRunContext(params: {
         withRunSession,
         agentPayload,
         deliveryPlan,
+        additionalDeliveryPlans,
         resolvedDelivery,
         deliveryRequested,
         sourceDelivery,

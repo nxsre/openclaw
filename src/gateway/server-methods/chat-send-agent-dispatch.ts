@@ -399,6 +399,10 @@ export function startChatDispatch(params: StartChatDispatchParams): void {
                     client?.connect?.caps,
                     GATEWAY_CLIENT_CAPS.TOOL_EVENTS,
                   );
+                  const wantsThinkingEvents = hasGatewayClientCap(
+                    client?.connect?.caps,
+                    GATEWAY_CLIENT_CAPS.THINKING_EVENTS,
+                  );
                   if (connId && wantsToolEvents) {
                     context.registerToolEventRecipient(runId, connId);
                     // Register for any other active runs *in the same session* so
@@ -421,6 +425,29 @@ export function startChatDispatch(params: StartChatDispatchParams): void {
                       const sameSession = active.sessionKey === sessionKey && sameSelectedAgent;
                       if (activeRunId !== runId && sameSession) {
                         context.registerToolEventRecipient(activeRunId, connId);
+                      }
+                    }
+                  }
+                  const registerThinking = context.registerThinkingEventRecipient;
+                  if (connId && wantsThinkingEvents && registerThinking) {
+                    registerThinking(runId, connId);
+                    const compatibilityOwnerAgentId = tryResolveSessionCompatibilityOwnerAgentId(
+                      cfg,
+                      sessionKey,
+                    );
+                    const selectedSessionAgentId = selectedAgent.agentId;
+                    for (const [activeRunId, active] of context.chatAbortControllers) {
+                      const sameSelectedAgent =
+                        selectedSessionAgentId !== undefined &&
+                        chatRunBelongsToSelectedAgent({
+                          agentId: active.agentId,
+                          sessionKey: active.sessionKey,
+                          defaultAgentId: compatibilityOwnerAgentId,
+                          selectedAgentId: selectedSessionAgentId,
+                        });
+                      const sameSession = active.sessionKey === sessionKey && sameSelectedAgent;
+                      if (activeRunId !== runId && sameSession) {
+                        registerThinking(activeRunId, connId);
                       }
                     }
                   }

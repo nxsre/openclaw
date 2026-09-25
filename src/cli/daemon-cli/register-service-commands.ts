@@ -94,7 +94,7 @@ export function addGatewayServiceCommands(parent: Command, opts?: { statusDescri
     .command("install")
     .description("Install and start the Gateway service (launchd/systemd/schtasks)")
     .option("--port <port>", "Gateway port")
-    .option("--runtime <runtime>", "Daemon runtime (node|bun). Default: node")
+    .option("--runtime <runtime>", "Daemon runtime (node). Default: node")
     .option("--runtime-path <path>", "Pin an absolute Node/Bun executable path")
     .option("--token <token>", "Gateway token (token auth)")
     .option("--wrapper <path>", "Executable wrapper for generated service ProgramArguments")

@@ -349,6 +349,26 @@ export const OpenClawSchemaShape = {
           to: z.string().optional(),
         })
         .optional(),
+      defaultDelivery: z
+        .strictObject({
+          mode: z.enum(["none", "announce", "webhook"]).optional(),
+          channel: z.string().optional(),
+          to: z.string().optional(),
+          threadId: z.union([z.string(), z.number()]).optional(),
+          accountId: z.string().optional(),
+          bestEffort: z.boolean().optional(),
+          targets: z
+            .array(
+              z.strictObject({
+                channel: z.string().optional(),
+                to: z.string().optional(),
+                threadId: z.union([z.string(), z.number()]).optional(),
+                accountId: z.string().optional(),
+              }),
+            )
+            .optional(),
+        })
+        .optional(),
     })
     .superRefine((val, ctx) => {
       if (val.sessionRetention !== undefined && val.sessionRetention !== false) {

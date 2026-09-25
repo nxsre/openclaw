@@ -9,8 +9,14 @@ import type { CronDelivery, CronJobCreate } from "../types.js";
  * only governs callers that reach `CronService.add`/declarative convergence directly.
  * The shared predicate keeps this contract consistent across write-time,
  * read-time, and service-bypass paths.
+ * An explicit per-job delivery always wins. For isolated-like output jobs the
+ * operator-configured `cron.defaultDelivery` applies when set, otherwise delivery
+ * falls back to plain announce.
  */
-export function resolveInitialCronDelivery(input: CronJobCreate): CronDelivery | undefined {
+export function resolveInitialCronDelivery(
+  input: CronJobCreate,
+  configDefault?: CronDelivery,
+): CronDelivery | undefined {
   if (input.delivery) {
     return input.delivery;
   }
@@ -20,7 +26,9 @@ export function resolveInitialCronDelivery(input: CronJobCreate): CronDelivery |
       sessionTarget: input.sessionTarget,
     })
   ) {
-    return { mode: "announce" };
+    // Clone so the persisted job owns its delivery and never aliases the shared
+    // live runtime config object (cfg.cron.defaultDelivery).
+    return configDefault ? structuredClone(configDefault) : { mode: "announce" };
   }
   return undefined;
 }

@@ -92,6 +92,8 @@ export const GATEWAY_CLIENT_CAPS = {
   TERMINAL_SESSION_METADATA: "terminal-session-metadata",
   TERMINAL_UPLOAD_PATH_STYLE: "terminal-upload-path-style",
   TOOL_EVENTS: "tool-events",
+  /** Control UI / gateway clients that want `agent` WS events with `stream: "thinking"`. */
+  THINKING_EVENTS: "thinking-events",
   UI_COMMANDS: "ui-commands",
   USAGE_REFRESHING: "usage-refreshing",
 } as const;
