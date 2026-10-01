@@ -23,6 +23,7 @@ import {
 } from "../plugins/hook-agent-context.js";
 import { resolveBlockMessage } from "../plugins/hook-decision-types.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
+import { bindOperatorModelExecution, readRunOperatorAuthority } from "./admitted-run-context.js";
 import {
   loadAuthProfileStoreForRuntime,
   markAuthProfileFailure,
@@ -230,20 +231,46 @@ async function runCliAgentInternal(
       },
     };
   }
-  const { prepareCliRunContext } = await import("./cli-runner/prepare.runtime.js");
-  let context: PreparedCliRunContext;
+  const modelExecution = bindOperatorModelExecution(
+    readRunOperatorAuthority(params),
+    params.requesterModel,
+    params.mapOperatorAuthorizationError,
+  );
+  const assertCallerCurrent = params.assertCurrent;
   try {
-    context = await prepareCliRunContext(params);
-  } catch (error) {
-    params.assertCurrent?.();
-    await settleCliPreparationError(error, params);
-    throw error;
+    const runParams = modelExecution
+      ? {
+          ...params,
+          abortSignal: params.abortSignal
+            ? AbortSignal.any([params.abortSignal, modelExecution.signal])
+            : modelExecution.signal,
+          assertCurrent: () => {
+            assertCallerCurrent?.();
+            modelExecution.assertCurrent();
+          },
+        }
+      : params;
+    const { prepareCliRunContext } = await import("./cli-runner/prepare.runtime.js");
+    let context: PreparedCliRunContext;
+    try {
+      context = await prepareCliRunContext(runParams);
+    } catch (error) {
+      await settleCliPreparationError(error, runParams);
+      throw error;
+    }
+    // Preparation resolves the execution owner and effective capture config;
+    // publish both before commentary can arrive from the prepared run.
+    diagnosticLifecycle?.setExecutionContext(context.params);
+    const result = await settlePreparedCliRun({
+      context,
+      diagnosticLifecycle,
+      run: async () => await runPreparedCliAgent(context, diagnosticLifecycle),
+    });
+    modelExecution?.assertCurrent();
+    return result;
+  } finally {
+    modelExecution?.release();
   }
-  return await settlePreparedCliRun({
-    context,
-    diagnosticLifecycle,
-    run: async () => await runPreparedCliAgent(context, diagnosticLifecycle),
-  });
 }
 
 /** Runs an already-prepared CLI agent context through hooks and execution. */
@@ -402,6 +429,7 @@ async function runPreparedCliAgentOwned(
       cliSessionIdToUse,
       diagnosticLifecycle ? { onPhase: diagnosticLifecycle.setPhase } : undefined,
     );
+    params.assertCurrent?.();
     // Test facades and non-instrumented executors may not signal the boundary.
     diagnosticLifecycle?.setPhase("resolve");
     const sourceReplyMirror = resolveCliSourceReplyMirror({
@@ -703,55 +731,4 @@ async function runPreparedCliAgentOwned(
     diagnosticLifecycle,
     failoverContext: cliFailoverContext,
   });
-}
-
-/** Legacy Claude-specific wrapper params for the generic CLI runner. */
-export type RunClaudeCliAgentParams = Omit<RunCliAgentParams, "provider" | "cliSessionId"> & {
-  provider?: string;
-  claudeSessionId?: string;
-};
-
-/** Converts legacy Claude CLI wrapper params into generic CLI runner params. */
-export function buildRunClaudeCliAgentParams(params: RunClaudeCliAgentParams): RunCliAgentParams {
-  return {
-    sessionId: params.sessionId,
-    sessionKey: params.sessionKey,
-    sessionEntry: params.sessionEntry,
-    agentId: params.agentId,
-    trigger: params.trigger,
-    sessionFile: params.sessionFile,
-    workspaceDir: params.workspaceDir,
-    cwd: params.cwd,
-    config: params.config,
-    prompt: params.prompt,
-    persistAssistantTranscript: params.persistAssistantTranscript,
-    storePath: params.storePath,
-    currentInboundEventKind: params.currentInboundEventKind,
-    provider: params.provider ?? "claude-cli",
-    model: params.model ?? "opus",
-    thinkLevel: params.thinkLevel,
-    timeoutMs: params.timeoutMs,
-    runTimeoutOverrideMs: params.runTimeoutOverrideMs,
-    runId: params.runId,
-    jobId: params.jobId,
-    extraSystemPrompt: params.extraSystemPrompt,
-    inputProvenance: params.inputProvenance,
-    sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
-    requireExplicitMessageTarget: params.requireExplicitMessageTarget,
-    silentReplyPromptMode: params.silentReplyPromptMode,
-    extraSystemPromptStatic: params.extraSystemPromptStatic,
-    ownerNumbers: params.ownerNumbers,
-    // Legacy `claudeSessionId` callers predate the shared CLI session contract.
-    // Ignore it here so the compatibility wrapper does not accidentally resume
-    // an incompatible Claude session on the generic runner path.
-    images: params.images,
-    messageChannel: params.messageChannel,
-    messageProvider: params.messageProvider,
-    currentChannelId: params.currentChannelId,
-    currentThreadTs: params.currentThreadTs,
-    currentMessageId: params.currentMessageId,
-    currentInboundAudio: params.currentInboundAudio,
-    senderId: params.senderId,
-    senderIsOwner: params.senderIsOwner,
-  };
 }

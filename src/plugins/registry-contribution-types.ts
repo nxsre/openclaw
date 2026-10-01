@@ -223,7 +223,6 @@ export type MemoryPluginRuntime = {
     purpose?: "default" | "status" | "cli";
     /** Request a read-only source freshness scan; runtimes may ignore unsupported diagnostics. */
     inspectSources?: boolean;
-    sessionKey?: string | null;
   }): Promise<{
     manager: RegisteredMemorySearchManager | null;
     debug?: {

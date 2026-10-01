@@ -64,24 +64,15 @@ it("keeps only recognized archive reasons on archived rows", () => {
 });
 
 it("preserves shipped pending key-as-session-id rows without a transcript id", () => {
-  expect(
-    normalizePersistedSessionEntryShape(
-      {
-        sessionId: "agent:child:main",
-        updatedAt: 42,
-      },
-      { sessionKey: "agent:child:main" },
-    ),
-  ).toMatchObject({ initializationPending: true, updatedAt: 42 });
-  expect(
-    normalizePersistedSessionEntryShape(
-      {
-        sessionId: "agent:child:main",
-        updatedAt: 42,
-      },
-      { sessionKey: "agent:child:main" },
-    ),
-  ).not.toHaveProperty("sessionId");
+  const entry = normalizePersistedSessionEntryShape(
+    {
+      sessionId: "agent:child:main",
+      updatedAt: 42,
+    },
+    { sessionKey: "agent:child:main" },
+  );
+  expect(entry).toMatchObject({ initializationPending: true, updatedAt: 42 });
+  expect(entry).not.toHaveProperty("sessionId");
 });
 
 it("rejects locked key-as-session-id rows instead of treating them as pending", () => {
@@ -464,30 +455,6 @@ describe("resolveSessionResetPolicy", () => {
 
     expect(freshness.fresh).toBe(false);
     expect(freshness.idleExpiresAt).toBe(5 * 60_000);
-  });
-
-  it('mode "never" reports fresh regardless of age (only manual /new can roll the session)', () => {
-    const now = Date.UTC(2026, 5, 1, 12, 0, 0);
-    const oneYearAgo = now - 365 * 24 * 60 * 60_000;
-    const freshness = evaluateSessionFreshness({
-      updatedAt: oneYearAgo,
-      sessionStartedAt: oneYearAgo,
-      lastInteractionAt: oneYearAgo,
-      now,
-      policy: { mode: "never", atHour: 4 },
-    });
-    expect(freshness.fresh).toBe(true);
-    expect(freshness.dailyResetAt).toBeUndefined();
-    expect(freshness.idleExpiresAt).toBeUndefined();
-  });
-
-  it('resolveSessionResetPolicy with mode "never" leaves idleMinutes unset', () => {
-    const policy = resolveSessionResetPolicy({
-      sessionCfg: { reset: { mode: "never" } },
-      resetType: "direct",
-    });
-    expect(policy.mode).toBe("never");
-    expect(policy.idleMinutes).toBeUndefined();
   });
 });
 

@@ -8,7 +8,6 @@ import {
   INBOUND_METADATA_MARKERS,
   stripInboundMetadata,
 } from "../../auto-reply/reply/strip-inbound-meta.js";
-import { applyFallbackVars, userFacingFallbackText } from "../../shared/assistant-error-format.js";
 import { coerceChatContentText } from "../../shared/chat-content.js";
 import { escapeRegExp } from "../../shared/regexp.js";
 import {
@@ -31,7 +30,6 @@ import {
   type TextFilter,
 } from "../../shared/text/text-projection.js";
 import { EXEC_NO_OUTPUT_PLACEHOLDER } from "../bash-tools.exec-output.js";
-import { isRateLimitErrorMessage } from "../failover/message-patterns.js";
 import {
   INTERNAL_RUNTIME_CONTEXT_BEGIN,
   INTERNAL_RUNTIME_CONTEXT_END,
@@ -288,21 +286,8 @@ export function sanitizeUserFacingText(
           opts?.streaming,
         )
       : raw;
-  const collapsed = applyTextFilters(
+  return applyTextFilters(
     withoutConversationContext,
     userFacingTextFilters(opts?.errorContext, opts?.streaming),
   );
-  if (!opts?.errorContext) {
-    return collapsed;
-  }
-  // XCPH: OPENCLAW_LLM_ERROR_FALLBACK_TEXT_<status> (含 429) 优先于英文模板 / provider 原文。
-  const fallbackSource =
-    isRateLimitErrorMessage(collapsed) && !/\b429\b/.test(collapsed)
-      ? `429 ${collapsed}`
-      : collapsed;
-  const fallback = userFacingFallbackText(fallbackSource);
-  if (fallback !== null) {
-    return applyFallbackVars(fallback, fallbackSource);
-  }
-  return collapsed;
 }

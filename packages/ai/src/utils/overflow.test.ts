@@ -63,8 +63,6 @@ describe("provider overflow messages", () => {
     'HTTP 400: {"type":"error","error":{"type":"invalid_request_error","message":"input length and `max_tokens` exceed context limit: 176312 + 32000 > 200000"}}',
     "code 1210: tokens in request more than max tokens allowed",
     "code 1261: Prompt exceeds max length",
-    "Context size has been exceeded.",
-    "400 Context size has been exceeded.",
     "500 Context size has been exceeded.",
   ])("detects %s", (text) => {
     expect(isContextOverflow(errorMessage(text), 262_144)).toBe(true);
@@ -72,14 +70,13 @@ describe("provider overflow messages", () => {
 });
 
 describe("scoped overflow messages", () => {
-  it.each([
-    "Context size has been exceeded.",
-    "400 Context size has been exceeded.",
-    "500 Context size has been exceeded.",
-  ])("recognizes llama.cpp wording through the provider fallback: %s", (message) => {
-    expect(matchesContextOverflowMessage(message, "provider-fallback")).toBe(true);
-    expect(matchesContextOverflowMessage(message, "failover-explicit")).toBe(false);
-  });
+  it.each(["500 Context size has been exceeded."])(
+    "recognizes llama.cpp wording through the provider fallback: %s",
+    (message) => {
+      expect(matchesContextOverflowMessage(message, "provider-fallback")).toBe(true);
+      expect(matchesContextOverflowMessage(message, "failover-explicit")).toBe(false);
+    },
+  );
 
   it("recognizes the provider input-length wording in the strict failover scope", () => {
     expect(
@@ -106,18 +103,6 @@ describe("bodyless HTTP errors", () => {
 
   it("preserves Cerebras 413 overflow recovery", () => {
     expect(isContextOverflow(errorMessage("413 status code (no body)"), 262_144)).toBe(true);
-  });
-
-  it("does not treat bare 400 status code (no body) as overflow for non-cerebras providers", () => {
-    const msg = errorMessage("400 status code (no body)");
-    msg.provider = "cloudphone_unicom_manual";
-    expect(isContextOverflow(msg, 128_000)).toBe(false);
-  });
-
-  it("keeps bare 400 status code (no body) as overflow for cerebras only", () => {
-    const msg = errorMessage("400 status code (no body)");
-    msg.provider = "cerebras";
-    expect(isContextOverflow(msg, 128_000)).toBe(true);
   });
 });
 

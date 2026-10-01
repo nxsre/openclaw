@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { projectProviderError } from "../../../packages/ai/src/utils/provider-error.js";
 import { failoverClassificationCorpus } from "../../agents/failover/failover-classification.corpus.cases.test-support.js";
-import { failoverRetryExpectations } from "../../agents/failover/failover-retry.expected.test-support.js";
-import { extractFailoverHttpStatus } from "../../agents/failover/retry-evidence.js";
 import { createZeroUsageFixture } from "../../agents/test-helpers/usage-fixtures.js";
-import { extractHttpStatusFromErrorText } from "../../shared/assistant-error-format.js";
 import {
   PROVIDER_FAILURE_WITH_OUTPUT_ERROR_CODE,
   PROVIDER_POST_DISPATCH_AMBIGUITY_ERROR_CODE,
@@ -39,33 +36,65 @@ describe("isRetryableAssistantError", () => {
       expect(isRetryableAssistantError(message)).toBe(false);
     },
   );
-  it("freezes one retry decision for every failover corpus row", () => {
-    expect(Object.keys(failoverRetryExpectations).toSorted()).toEqual(
-      failoverClassificationCorpus.map((row) => row.id).toSorted(),
-    );
+  // The classifier owns the full phrase corpus. Keep retry-specific evidence,
+  // replay windows, and incomplete-stream regressions at this adapter boundary.
+  it.each([
+    ["bedrock-incomplete-terminal-stream", true],
+    ["anthropic-incomplete-terminal-stream", true],
+    ["google-incomplete-terminal-stream", true],
+    ["mistral-incomplete-terminal-stream", true],
+    ["openai-completions-incomplete-terminal-stream", true],
+    ["openai-responses-incomplete-terminal-stream", true],
+    ["proxy-incomplete-terminal-stream", true],
+    ["retry-rate-limit-hyphen", true],
+    ["billing-rate-limit-too-many", true],
+    ["billing-service-capacity", true],
+    ["legacy-provider-matchers-012", true],
+    ["billing-openai-structured-server-error", true],
+    ["billing-econnrefused", true],
+    ["billing-connection-error", true],
+    ["retry-connection-refused", true],
+    ["retry-connection-lost", true],
+    ["retry-other-side-closed", true],
+    ["billing-fetch-failed", true],
+    ["retry-reset-before-headers", true],
+    ["retry-websocket-closed", true],
+    ["retry-websocket-error", true],
+    ["retry-http2-no-response", true],
+    ["retry-delay", true],
+    ["retry-ended-without-terminal-response", true],
+    ["http-provider-timeout", true],
+    ["billing-undici-connect-timeout", true],
+    ["legacy-billing-a-004", true],
+    ["patterns-context-llamacpp-exceeded-500", true],
+    ["billing-http402-rate-limit", true],
+    ["legacy-billing-a-055", true],
+    ["legacy-billing-a-059", true],
+    ["legacy-billing-a-082", true],
+    ["legacy-billing-b-036", true],
+    ["legacy-billing-a-021", false],
+    ["http-structured-insufficient-quota", false],
+    ["patterns-xai-spending-limit", false],
+  ] as const)("preserves retry policy for %s", (id, expected) => {
+    const row = failoverClassificationCorpus.find((entry) => entry.id === id);
+    if (!row) {
+      throw new Error(`Missing retry fixture: ${id}`);
+    }
+    const message = errorMessage(row.signal.message ?? "");
+    message.provider =
+      ("provider" in row.signal ? row.signal.provider : undefined) ?? "test-provider";
+    expect(isRetryableAssistantError(message)).toBe(expected);
   });
 
-  it.each(failoverClassificationCorpus)(
-    "applies the tighter xcph outer-retry gate for $id [$source]",
-    ({ id, signal }) => {
-      const message = signal.message
-        ? errorMessage(signal.message)
-        : ({ ...errorMessage(""), errorMessage: undefined } as AssistantMessage);
-      message.provider = ("provider" in signal ? signal.provider : undefined) ?? "test-provider";
-      const actual = isRetryableAssistantError(message);
-      const base = failoverRetryExpectations[id as keyof typeof failoverRetryExpectations];
-      const status =
-        extractFailoverHttpStatus(signal.message) ??
-        (signal.message ? extractHttpStatusFromErrorText(signal.message) : undefined);
-      if (status !== undefined && status !== 503 && status !== 504) {
-        expect(actual).toBe(false);
-        return;
-      }
-      if (!base) {
-        expect(actual).toBe(false);
-      }
-    },
-  );
+  it("does not retry a missing error message even with a transient code", () => {
+    expect(
+      isRetryableAssistantError({
+        ...errorMessage(""),
+        errorMessage: undefined,
+        errorCode: "UND_ERR_CONNECT_TIMEOUT",
+      }),
+    ).toBe(false);
+  });
 
   it.each([PROVIDER_FAILURE_WITH_OUTPUT_ERROR_CODE, PROVIDER_POST_DISPATCH_AMBIGUITY_ERROR_CODE])(
     "does not retry replay-unsafe provider outcome %s",
@@ -125,68 +154,12 @@ describe("isRetryableAssistantError", () => {
   });
 
   it.each([
-    "HTTP 503 Service Unavailable",
-    "503 billing service unavailable; please retry your request",
-    "gateway timeout (HTTP 504)",
-    "provider timeout while waiting for upstream",
-    "fetch failed: ECONNRESET",
-    "socket hang up",
-  ])("retries gateway-unavailable / timeout / network failures: %s", (text) => {
-    expect(isRetryableAssistantError(errorMessage(text))).toBe(true);
-  });
-
-  it.each([
-    "An error occurred while processing your request. You can retry your request.",
-    "The system encountered an unexpected error. Try your request again.",
-    "Temporary provider failure; please retry your request.",
-    "HTTP 400 Bad Request: content filtered",
-    "HTTP 429 too many requests",
-    "429 RESOURCE_EXHAUSTED: Quota exceeded for quota metric requests per minute; please retry your request",
-    "HTTP 500 Internal Server Error",
-    "HTTP 502 Bad Gateway",
-    "overloaded_error: The model is overloaded",
-  ])("does not retry non-gateway failures: %s", (text) => {
-    expect(isRetryableAssistantError(errorMessage(text))).toBe(false);
-  });
-
-  it("keeps concrete quota failures non-retryable", () => {
-    expect(isRetryableAssistantError(errorMessage("429 insufficient_quota"))).toBe(false);
-    expect(isRetryableAssistantError(errorMessage("Monthly usage limit reached"))).toBe(false);
-  });
-
-  it.each([
     "model gpt-5.5-preview-0429 not found",
     "model model-x-500-preview not found",
     "Image dimensions 1504x1504 exceed the maximum allowed size",
     "Image width 500 exceeds the maximum allowed size",
     "invalid api key sk-example502value",
   ])("does not retry permanent errors with status-code substrings: %s", (text) => {
-    expect(isRetryableAssistantError(errorMessage(text))).toBe(false);
-  });
-
-  it.each([
-    "503: temporary provider response",
-    "The socket connection was closed unexpectedly by fetch",
-  ])("retries gateway-unavailable / network statuses: %s", (text) => {
-    expect(isRetryableAssistantError(errorMessage(text))).toBe(true);
-  });
-
-  it.each([
-    "429 temporary provider response",
-    "HTTP 500 temporary provider response",
-    "524 status code (no body)",
-    "ResourceExhausted: Worker local total request limit reached",
-    "resource_exhausted: transient worker capacity exhausted",
-  ])("does not retry non-gateway transient statuses: %s", (text) => {
-    expect(isRetryableAssistantError(errorMessage(text))).toBe(false);
-  });
-
-  it.each([
-    "429 You exceeded your daily request limit. Please try again in 24 hours.",
-    "rate limit reached for requests. Retry after 6h.",
-    "429 RPM limit exceeded; Retry-After: 2 hours",
-    "rate limit reached; Retry-After: 90 minutes",
-  ])("does not retry rate limits that outlast session backoff: %s", (text) => {
     expect(isRetryableAssistantError(errorMessage(text))).toBe(false);
   });
 
@@ -207,42 +180,12 @@ describe("isRetryableAssistantError", () => {
     }
   });
 
-  it("retries transient billing-service failures", () => {
-    expect(
-      isRetryableAssistantError(
-        errorMessage("503 billing service unavailable; please retry your request"),
-      ),
-    ).toBe(true);
-  });
-
-  it("retries transient subscription-service failures", () => {
-    expect(
-      isRetryableAssistantError(
-        errorMessage("503 subscription service unavailable while checking quota"),
-      ),
-    ).toBe(true);
-  });
-
-  it("retries a 503 with a long Retry-After window", () => {
-    expect(
-      isRetryableAssistantError(errorMessage("503 Service Unavailable; Retry-After: 120 seconds")),
-    ).toBe(true);
-  });
-
-  it("does not retry short-window quota exhaustion", () => {
-    expect(
-      isRetryableAssistantError(
-        errorMessage(
-          "429 RESOURCE_EXHAUSTED: Quota exceeded for quota metric requests per minute; please retry your request",
-        ),
-      ),
-    ).toBe(false);
-  });
-
   it.each([
+    "OpenAI API error (500): 500 The server had an error while processing your request. Sorry about that!",
+    "Azure OpenAI API error (502): Bad gateway from upstream",
     "Mistral API error (503): service temporarily unavailable",
     "Provider API error (504): gateway timeout",
-  ])("retries built-in provider-wrapped 503/504: %s", (text) => {
+  ])("retries built-in provider-wrapped transient 5xx: %s", (text) => {
     expect(isRetryableAssistantError(errorMessage(text))).toBe(true);
   });
 
@@ -297,32 +240,18 @@ describe("isRetryableAssistantError", () => {
     ).toBe(false);
   });
 
-  it("keeps concrete 503 outage evidence ahead of a generic invalid-request type", () => {
+  it.each([
+    "500 request timed out",
+    "502 Bad gateway",
+    "503 service unavailable",
+    "529 Overloaded",
+  ])("keeps concrete outage evidence ahead of a generic invalid-request type: %s", (text) => {
     expect(
       isRetryableAssistantError({
-        ...errorMessage("503 service unavailable"),
+        ...errorMessage(text),
         errorType: "invalid_request_error",
       }),
     ).toBe(true);
-  });
-
-  it.each(["500 request timed out", "502 Bad gateway", "529 Overloaded"])(
-    "does not retry non-gateway outage statuses even with invalid-request type: %s",
-    (text) => {
-      expect(
-        isRetryableAssistantError({
-          ...errorMessage(text),
-          errorType: "invalid_request_error",
-        }),
-      ).toBe(false);
-    },
-  );
-
-  it.each([
-    "OpenAI API error (500): 500 The server had an error while processing your request. Sorry about that!",
-    "Azure OpenAI API error (502): Bad gateway from upstream",
-  ])("does not retry provider-wrapped 500/502: %s", (text) => {
-    expect(isRetryableAssistantError(errorMessage(text))).toBe(false);
   });
 
   it("does not treat permanent provider-wrapped 4xx as retryable", () => {
@@ -352,13 +281,13 @@ describe("isRetryableAssistantError", () => {
     expect(isRetryableAssistantError(errorMessage(text))).toBe(false);
   });
 
-  it("does not retry a provider-wrapped short-window rate limit", () => {
+  it("retries a provider-wrapped short-window rate limit", () => {
     expect(
       isRetryableAssistantError(
         errorMessage(
           "OpenAI API error (429): RESOURCE_EXHAUSTED: Quota exceeded for requests per minute; please retry your request",
         ),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 });

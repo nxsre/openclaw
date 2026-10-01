@@ -30,7 +30,6 @@ export async function getMemoryManagerContextWithPurpose(params: {
   agentId: string;
   purpose?: "default" | "status" | "cli";
   acquireLocalService?: MemoryCoreAcquireLocalService;
-  sessionKey?: string | null;
 }): Promise<
   | {
       manager: NonNullable<MemorySearchManagerResult["manager"]>;
@@ -47,7 +46,6 @@ export async function getMemoryManagerContextWithPurpose(params: {
     agentId: params.agentId,
     purpose: params.purpose,
     ...(params.acquireLocalService ? { acquireLocalService: params.acquireLocalService } : {}),
-    ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
   });
   return manager
     ? {
@@ -77,6 +75,7 @@ export function createMemoryTool(params: {
     name: params.contract.name,
     description: params.contract.describe(ctx.sources),
     parameters: params.contract.parameters,
+    prepareArguments: params.contract.prepareArguments,
     execute: async (toolCallId, toolParams, signal, onUpdate) => {
       const latestCtx = params.options.getConfig ? resolveMemoryToolContext(params.options) : ctx;
       // A live getter makes missing or disabled current config a revocation.

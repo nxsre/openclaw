@@ -119,22 +119,14 @@ function normalizeJobSchedule(
   return normalizeStreamScheduleBounds(input);
 }
 
-type JobValidationContext =
-  | { kind: "create"; cronConfig?: CronConfig; defaultAgentId?: string; nowMs: number }
-  | {
-      kind: "patch";
-      patch: CronJobPatch;
-      defaultAgentId?: string;
-      nowMs?: number;
-      cronConfig?: CronConfig;
-    }
-  | {
-      kind: "declarative";
-      input: CronJobCreate;
-      defaultAgentId?: string;
-      nowMs: number;
-      cronConfig?: CronConfig;
-    };
+type JobValidationContext = {
+  cronConfig?: CronConfig;
+  defaultAgentId?: string;
+} & (
+  | { kind: "create"; nowMs: number }
+  | { kind: "patch"; patch: CronJobPatch; nowMs?: number }
+  | { kind: "declarative"; input: CronJobCreate; nowMs: number }
+);
 
 function validateFullJob(
   job: CronStoredJob,
@@ -195,7 +187,7 @@ function validateFullJob(
     context.patch.schedule !== undefined ||
     context.patch.enabled === true;
   if (context.nowMs !== undefined && scheduleTouched) {
-    assertTimeScheduleSatisfiable(job, context.nowMs, computeJobNextRunAtMs);
+    assertTimeScheduleSatisfiable(job, context.nowMs);
   }
 }
 /** Creates a normalized cron job row from public add input and computes its initial schedule. */
@@ -259,7 +251,7 @@ export function createJob(
       input.payload.kind === "script"
         ? normalizeCronScriptPayload(structuredClone(input.payload))
         : structuredClone(input.payload),
-    delivery: resolveInitialCronDelivery(input, state.deps.cronConfig?.defaultDelivery),
+    delivery: resolveInitialCronDelivery(input),
     failureAlert: input.failureAlert,
     ...(input.trigger ? { trigger: structuredClone(input.trigger) } : {}),
     state: {
@@ -428,10 +420,10 @@ export function applyJobPatch(
     resetJobFailureState(job);
   }
   if ("agentId" in patch) {
-    job.agentId = normalizeOptionalAgentId((patch as { agentId?: unknown }).agentId);
+    job.agentId = normalizeOptionalAgentId(patch.agentId);
   }
   if ("sessionKey" in patch) {
-    job.sessionKey = normalizeOptionalString((patch as { sessionKey?: unknown }).sessionKey);
+    job.sessionKey = normalizeOptionalString(patch.sessionKey);
   }
   if (previousScheduleKind === "stream" && job.schedule.kind !== "stream") {
     job.state.streamStatus = undefined;
@@ -525,7 +517,7 @@ export function applyDeclarativeJobSpec(
     toolsAllowProvenance: opts.toolsAllowProvenance,
     toolsAllowExecTarget: opts.toolsAllowExecTarget,
   });
-  const delivery = resolveInitialCronDelivery(input, opts.cronConfig?.defaultDelivery);
+  const delivery = resolveInitialCronDelivery(input);
   if (delivery) {
     job.delivery = structuredClone(delivery);
   } else {
@@ -568,7 +560,6 @@ function mergeCronDelivery(
     to: existing?.to,
     threadId: existing?.threadId,
     accountId: existing?.accountId,
-    targets: existing?.targets,
     bestEffort: existing?.bestEffort,
     completionDestination: existing?.completionDestination,
     failureDestination: existing?.failureDestination,
@@ -586,8 +577,6 @@ function mergeCronDelivery(
       next.channel = undefined;
       next.threadId = undefined;
       next.accountId = undefined;
-      // Announce fan-out targets are meaningless for webhook delivery.
-      next.targets = undefined;
     }
     if (!hasCompletionDestinationPatch && (next.mode === "none" || next.mode === "webhook")) {
       next.completionDestination = undefined;
@@ -604,10 +593,6 @@ function mergeCronDelivery(
   }
   if ("accountId" in patch) {
     next.accountId = normalizeOptionalString(patch.accountId);
-  }
-  if ("targets" in patch) {
-    // null (or an emptied list) clears fan-out back to single-target delivery.
-    next.targets = patch.targets && patch.targets.length > 0 ? patch.targets : undefined;
   }
   if (typeof patch.bestEffort === "boolean") {
     next.bestEffort = patch.bestEffort;
@@ -631,34 +616,23 @@ function mergeCronDelivery(
       const patchFd = patch.failureDestination;
       const nextFd: typeof next.failureDestination = {};
       if (existingFd) {
-        if (Object.hasOwn(existingFd, "channel")) {
-          nextFd.channel = existingFd.channel;
-        }
-        if (Object.hasOwn(existingFd, "to")) {
-          nextFd.to = existingFd.to;
-        }
-        if (Object.hasOwn(existingFd, "accountId")) {
-          nextFd.accountId = existingFd.accountId;
+        for (const field of ["channel", "to", "accountId"] as const) {
+          if (Object.hasOwn(existingFd, field)) {
+            nextFd[field] = existingFd[field];
+          }
         }
         if (Object.hasOwn(existingFd, "mode")) {
           nextFd.mode = existingFd.mode;
         }
       }
       if (patchFd) {
-        if ("channel" in patchFd) {
-          const channel = normalizeOptionalString(patchFd.channel) ?? "";
-          nextFd.channel = channel ? channel : undefined;
-        }
-        if ("to" in patchFd) {
-          const to = normalizeOptionalString(patchFd.to) ?? "";
-          nextFd.to = to ? to : undefined;
-        }
-        if ("accountId" in patchFd) {
-          const accountId = normalizeOptionalString(patchFd.accountId) ?? "";
-          nextFd.accountId = accountId ? accountId : undefined;
+        for (const field of ["channel", "to", "accountId"] as const) {
+          if (field in patchFd) {
+            nextFd[field] = normalizeOptionalString(patchFd[field]);
+          }
         }
         if ("mode" in patchFd) {
-          const mode = normalizeOptionalString(patchFd.mode) ?? "";
+          const mode = normalizeOptionalString(patchFd.mode);
           nextFd.mode = mode === "announce" || mode === "webhook" ? mode : undefined;
         }
       }
@@ -671,13 +645,6 @@ function mergeCronDelivery(
     }
   }
 
-  // Fan-out targets are announce-only. Drop them for none/webhook so a patch that
-  // sets targets without an announce mode never persists as dead config that
-  // resolveCronDeliveryPlans silently ignores.
-  if (next.mode !== "announce") {
-    next.targets = undefined;
-  }
-
   if (
     existing === undefined &&
     !("mode" in patch) &&
@@ -685,7 +652,6 @@ function mergeCronDelivery(
     next.to === undefined &&
     next.threadId === undefined &&
     next.accountId === undefined &&
-    next.targets === undefined &&
     next.bestEffort === undefined &&
     next.completionDestination === undefined &&
     next.failureDestination === undefined
@@ -735,18 +701,12 @@ function mergeCronFailureAlert(
       typeof patch.includeSkipped === "boolean" ? patch.includeSkipped : undefined;
   }
   if ("mode" in patch) {
-    const mode = normalizeOptionalString(patch.mode) ?? "";
+    const mode = normalizeOptionalString(patch.mode);
     next.mode = mode === "announce" || mode === "webhook" ? mode : undefined;
   }
   if ("accountId" in patch) {
-    const accountId = normalizeOptionalString(patch.accountId) ?? "";
-    next.accountId = accountId ? accountId : undefined;
+    next.accountId = normalizeOptionalString(patch.accountId);
   }
 
   return next;
 }
-
-/**
- * Covers both durable reservations and the process marker that survives mutable job state.
- * Every timer/manual admission path must use this or disable/re-enable can duplicate a run.
- */

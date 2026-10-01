@@ -126,8 +126,6 @@ export function installProviderTransportFetchTestHooks() {
     delete process.env.OPENCLAW_DEBUG_PROXY_ENABLED;
     delete process.env.OPENCLAW_DEBUG_PROXY_URL;
     delete process.env.OPENCLAW_SDK_RETRY_MAX_WAIT_SECONDS;
-    delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-    delete process.env.OPENCLAW_DEBUG_MODEL_TRANSPORT;
   });
 
   afterEach(() => {

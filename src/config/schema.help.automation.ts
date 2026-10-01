@@ -119,8 +119,6 @@ export const AUTOMATION_FIELD_HELP: Record<string, string> = {
     "Allows automation webhooks to IPv6 Unique Local Addresses (fc00::/7). Use only with trusted fake-IP proxy environments.",
   "cron.sessionRetention":
     "Controls how long completed automation run sessions are kept before pruning (`24h`, `7d`, `1h30m`, or `false` to disable pruning; a zero duration such as `0h` also disables; default: `24h`). Use shorter retention to reduce storage growth on high-frequency schedules.",
-  "cron.defaultDelivery":
-    'Default completion delivery applied to new isolated-like output jobs that omit their own delivery config. Use this to broadcast scheduled output to a fixed destination (for example `{ mode: "announce", targets: [{ channel: "openclaw-weixin", to: "all" }] }`). Jobs that specify their own delivery always win.',
   transcripts:
     "Core transcript capture settings for meeting notes, recording-capable agent tools, and configured live meeting auto-start sources. Meeting plugins capture durable notes by default; set enabled to false to opt out globally.",
   "transcripts.enabled":

@@ -4,6 +4,7 @@ import { getEnvApiKey } from "../env-api-keys.js";
 import { clampThinkingLevel } from "../model-utils.js";
 import { reasoningTagTextPolicy, type OpenAICompletionsOptions } from "../provider-options.js";
 import { createAssistantOutput } from "../transports/assistant-output.js";
+import { prepareModelRequestBody } from "../transports/model-request-body.js";
 import {
   resolveOpenAICompletionsCompat,
   type ResolvedOpenAICompletionsCompat,
@@ -47,54 +48,6 @@ import { buildBaseOptions } from "./simple-options.js";
 export type { OpenAICompletionsOptions } from "../provider-options.js";
 export { convertMessages } from "../openai-completions-messages.js";
 
-// Absolute wall-clock cap for a single LLM stream call. Idle/first-event
-// timeouts reset on trickle bytes; this deadline does not. Default 10 minutes;
-// OPENCLAW_LLM_ABSOLUTE_TIMEOUT_MS<=0 disables it.
-const LLM_ABSOLUTE_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.OPENCLAW_LLM_ABSOLUTE_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : 600_000;
-})();
-
-function withAbsoluteTimeout<T>(
-  stream: AsyncIterable<T> & { controller?: { abort?: () => void } },
-  timeoutMs: number,
-  label: string,
-): AsyncIterable<T> & { controller?: { abort?: () => void } } {
-  if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) {
-    return stream;
-  }
-  return {
-    controller: stream.controller,
-    async *[Symbol.asyncIterator]() {
-      const it = stream[Symbol.asyncIterator]();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          try {
-            stream.controller?.abort?.();
-          } catch {
-            /* ignore abort errors */
-          }
-          reject(new Error(`LLM stream exceeded absolute timeout ${timeoutMs}ms (${label})`));
-        }, timeoutMs);
-      });
-      try {
-        for (;;) {
-          const next = await Promise.race([it.next(), deadline]);
-          if (next.done) {
-            return;
-          }
-          yield next.value;
-        }
-      } finally {
-        if (timer) {
-          clearTimeout(timer);
-        }
-      }
-    },
-  };
-}
-
 export const streamOpenAICompletions: StreamFunction<
   "openai-completions",
   OpenAICompletionsOptions
@@ -128,12 +81,14 @@ export const streamOpenAICompletions: StreamFunction<
         compat,
         cacheRetention,
       });
+      const encodeBody = prepareModelRequestBody(options);
       const nextParams = await options?.onPayload?.(params, model);
       if (nextParams !== undefined) {
         params = nextParams as typeof params;
       }
       firstEventAbort = createFirstStreamEventAbortController(options?.signal);
       const requestOptions = {
+        ...(await encodeBody(params)),
         signal: firstEventAbort.signal,
         ...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
         maxRetries: 0,
@@ -199,34 +154,24 @@ export const streamOpenAICompletions: StreamFunction<
         },
       };
       try {
-        await processCompletionsStream(
-          withAbsoluteTimeout(
-            hookedOpenAIStream,
-            LLM_ABSOLUTE_TIMEOUT_MS,
-            `${model.provider}/${model.id}`,
-          ),
-          output,
-          model,
-          directEventStream,
-          {
-            mode: "direct",
-            beforeContentBlock(nextType) {
-              if (openThinkingBlock) {
-                finishBlock(openThinkingBlock);
-              }
-              if (openTextBlock && nextType !== "toolCall") {
-                finishBlock(openTextBlock);
-              }
-            },
-            provisionalCommentaryTags,
-            signal: options?.signal,
-            emitReasoning: shouldEmitReasoning,
-            strictReasoningTags: reasoningTagTextPolicy.isStrict(options),
-            firstEventTimeoutMs: getFirstStreamEventTimeoutMs(options),
-            abortFirstEventStream: firstEventAbort.abort,
-            onFirstEventTimeout: getFirstStreamEventTimeoutHandler(options),
+        await processCompletionsStream(hookedOpenAIStream, output, model, directEventStream, {
+          mode: "direct",
+          beforeContentBlock(nextType) {
+            if (openThinkingBlock) {
+              finishBlock(openThinkingBlock);
+            }
+            if (openTextBlock && nextType !== "toolCall") {
+              finishBlock(openTextBlock);
+            }
           },
-        );
+          provisionalCommentaryTags,
+          signal: options?.signal,
+          emitReasoning: shouldEmitReasoning,
+          strictReasoningTags: reasoningTagTextPolicy.isStrict(options),
+          firstEventTimeoutMs: getFirstStreamEventTimeoutMs(options),
+          abortFirstEventStream: firstEventAbort.abort,
+          onFirstEventTimeout: getFirstStreamEventTimeoutHandler(options),
+        });
         if (options?.signal?.aborted) {
           throw transportAbortError(options.signal);
         }

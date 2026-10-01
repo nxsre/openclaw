@@ -1,19 +1,6 @@
-// Provider operation retry helpers run retryable provider operations with backoff.
 import { sleepWithAbort } from "../infra/backoff.js";
 import { formatErrorMessage, readErrorCause } from "../infra/errors.js";
 import { hasRetryableConnectionErrorCode } from "../infra/retryable-network-errors.js";
-import { redactSensitiveText } from "../logging/redact.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
-
-const log = createSubsystemLogger("provider/operation-retry");
-
-function formatRetryErrorForLog(message: string, limit = 300): string {
-  const redacted = redactSensitiveText(message).replace(/\s+/g, " ").trim();
-  if (!redacted) {
-    return "<empty>";
-  }
-  return redacted.length <= limit ? redacted : `${redacted.slice(0, limit - 1)}…`;
-}
 
 export type ProviderOperationRetryStage = "read" | "poll" | "download" | "create";
 
@@ -59,17 +46,11 @@ export function resolveTransientProviderRetryOptions(
   return options;
 }
 
-function defaultTransientProviderRetryForStage(
-  stage: ProviderOperationRetryStage,
-): TransientProviderRetryConfig | undefined {
-  return stage === "create" ? undefined : true;
-}
-
 export function providerOperationRetryConfig(
   stage: ProviderOperationRetryStage,
   options?: TransientProviderRetryConfig,
 ): TransientProviderRetryConfig | undefined {
-  return options ?? defaultTransientProviderRetryForStage(stage);
+  return options ?? (stage === "create" ? undefined : true);
 }
 
 function readErrorName(error: unknown): string | undefined {
@@ -166,34 +147,25 @@ export function isTransientProviderHttpStatus(status: number): boolean {
 }
 
 function isTransientProviderOperationError(error: unknown, message: string): boolean {
-  // Same-key retries are limited to gateway-unavailable / timeout / network
-  // failures. 4xx, 429, 500, and 502 fail closed so business/app errors are not
-  // re-submitted (for example sensitive-word 400 loops).
   const status = readErrorStatus(error);
   if (status !== undefined) {
-    return status === 503 || status === 504;
+    return isTransientProviderHttpStatus(status);
   }
   if (
-    /\b(?:HTTP\s*)?(?:400|401|403|404|429|500|502)\b/i.test(message) ||
+    /\b(?:HTTP\s*)?(?:400|401|403|404)\b/i.test(message) ||
     /\b(?:invalid api key|permission denied|model not found|validation|unsupported model)\b/i.test(
       message,
     )
   ) {
     return false;
   }
-  if (/\b(?:HTTP\s*)?(?:503|504)\b/i.test(message)) {
+  if (/\b(?:HTTP\s*)?(?:429|500|502|503|504)\b/i.test(message)) {
     return true;
   }
   if (hasTransientNetworkSignal(error, message)) {
     return true;
   }
-  if (hasTimeoutSignal(error, message)) {
-    return true;
-  }
-  if (/\bfetch failed\b/i.test(message)) {
-    return hasTransientNetworkSignal(error, message);
-  }
-  return false;
+  return hasTimeoutSignal(error, message);
 }
 
 export function resolveTransientProviderAttempts(options?: TransientProviderRetryOptions): number {
@@ -279,9 +251,9 @@ export async function executeProviderOperationWithRetry<T>(params: {
       retrySignal?.throwIfAborted();
       lastError = error;
       const message = formatErrorMessage(error);
-      const willRetry =
-        retryOptions !== undefined &&
-        shouldRetrySameKeyProviderOperation({
+      if (
+        !retryOptions ||
+        !shouldRetrySameKeyProviderOperation({
           options: retryOptions,
           error,
           message,
@@ -290,24 +262,12 @@ export async function executeProviderOperationWithRetry<T>(params: {
           attemptNumber,
           maxAttempts,
           stage: params.stage,
-        });
-      if (!willRetry || retryOptions === undefined) {
-        log.warn(
-          `[provider-operation-retry] not retrying ` +
-            `provider=${params.provider} stage=${params.stage} ` +
-            `attempt=${attemptNumber}/${maxAttempts} ` +
-            `error=${formatRetryErrorForLog(message)}`,
-        );
+        })
+      ) {
         throw error;
       }
 
       const delayMs = resolveTransientProviderDelayMs(retryOptions, attemptNumber);
-      log.info(
-        `[provider-operation-retry] retrying same-key operation ` +
-          `provider=${params.provider} stage=${params.stage} ` +
-          `attempt=${attemptNumber}/${maxAttempts} delayMs=${delayMs} ` +
-          `error=${formatRetryErrorForLog(message)}`,
-      );
       const sleep = retryOptions.sleep ?? sleepWithAbort;
       await sleep(delayMs, retryOptions.signal);
     }

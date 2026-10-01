@@ -36,7 +36,6 @@ import {
   type ThinkLevel,
   type VerboseLevel,
 } from "../thinking.js";
-import type { GetReplyOptions } from "../types.js";
 import { resolveBlockStreamingChunking } from "./block-streaming.js";
 import { buildCommandContext } from "./commands-context.js";
 import { resolveReplyDirectiveCommand } from "./directive-handling.parse.js";
@@ -48,6 +47,7 @@ import { applyInlineDirectiveOverrides } from "./get-reply-directives-apply.js";
 import { resolveReplyDirectiveRouting } from "./get-reply-directives-routing.js";
 import { resolveReplyExecOverrides } from "./get-reply-exec-overrides.js";
 import { shouldUseReplyFastTestRuntime } from "./get-reply-fast-path.js";
+import type { InternalGetReplyOptions } from "./get-reply.types.js";
 import { defaultGroupActivation, resolveGroupRequireMention } from "./groups.js";
 import { createModelSelectionState, resolveContextTokens } from "./model-selection.js";
 import type { PreparedReplyConversation } from "./prompt-session-context.js";
@@ -98,7 +98,7 @@ export async function resolveReplyDirectives(params: {
   skipStoredModelOverride?: boolean;
   hasResolvedHeartbeatModelOverride: boolean;
   typing: TypingController;
-  opts?: GetReplyOptions;
+  opts?: InternalGetReplyOptions;
   skillFilter?: string[];
   preparedModelCatalog?: ModelCatalogSnapshot;
 }) {
@@ -357,18 +357,7 @@ export async function resolveReplyDirectives(params: {
     configuredReasoningDefault != null;
   let resolvedReasoningLevel: ReasoningLevel =
     directives.reasoningLevel ?? sessionReasoningLevel ?? configuredReasoningDefault ?? "off";
-  // Original code forced "off" for unauthenticated senders even when the
-  // operator had set `agents.defaults.reasoningDefault` deliberately. That
-  // policy makes sense for chat.send from arbitrary users, but for channel-
-  // driven runs (OpenIM / QQ / Weixin etc.) the config is set by the operator
-  // and should be honored. Restrict the override-to-off only when configured
-  // default is "stream" — the "stream" mode is visibility-only over reasoning
-  // tokens that already get spent regardless.
-  if (
-    reasoningUsesConfiguredDefault &&
-    !canUseReasoningState &&
-    configuredReasoningDefault !== "stream"
-  ) {
+  if (reasoningUsesConfiguredDefault && !canUseReasoningState) {
     resolvedReasoningLevel = "off";
   }
   const resolvedElevatedLevel = elevatedAllowed
@@ -417,6 +406,7 @@ export async function resolveReplyDirectives(params: {
       hasResolvedHeartbeatModelOverride,
       isHeartbeat: opts?.isHeartbeat === true,
       preparedModelCatalog: params.preparedModelCatalog,
+      operatorAuthority: opts?.operatorAuthority,
     });
   } catch (error) {
     if (
@@ -474,7 +464,6 @@ export async function resolveReplyDirectives(params: {
     allowTextCommands,
     command,
     directives,
-    messageProviderKey,
     elevatedEnabled,
     elevatedAllowed,
     elevatedFailures,

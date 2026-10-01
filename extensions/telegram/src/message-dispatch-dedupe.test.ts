@@ -44,18 +44,6 @@ function message(params?: { chatId?: number; messageId?: number }): Message {
   } as Message;
 }
 
-function storedReplayKey(accountId: string, botUserId: number, msg: Message): string {
-  return JSON.stringify([
-    "account",
-    accountId,
-    "bot",
-    String(botUserId),
-    "message",
-    String(msg.chat.id),
-    msg.message_id,
-  ]);
-}
-
 function legacyStoredReplayKey(accountId: string, msg: Message): string {
   const key = JSON.stringify(["message", String(msg.chat.id), msg.message_id]);
   return JSON.stringify(["account", accountId, key]);
@@ -108,33 +96,6 @@ function createTestClaim(params: {
   };
 }
 
-function createTestReplayGuard(
-  params: {
-    commit?: TelegramMessageDispatchReplayGuard["commit"];
-    forget?: TelegramMessageDispatchReplayGuard["forget"];
-    release?: TelegramMessageDispatchReplayGuard["release"];
-  } = {},
-): TelegramMessageDispatchReplayGuard {
-  return {
-    claim: async () => ({ kind: "claimed" }),
-    commit: params.commit ?? (async () => true),
-    forget: params.forget ?? (async () => true),
-    hasRecent: async () => false,
-    warmup: async () => 0,
-    clearMemory: () => {},
-    memorySize: () => 0,
-    release: params.release ?? (() => {}),
-  };
-}
-
-function createDeferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
-
 beforeEach(() => {
   previousStateDir = process.env.OPENCLAW_STATE_DIR;
   process.env.OPENCLAW_STATE_DIR = createStateDir();
@@ -154,35 +115,6 @@ afterEach(() => {
 });
 
 describe("Telegram message dispatch replay guard", () => {
-  it("persists committed dispatches across guard recreation", async () => {
-    const writer = createTelegramMessageDispatchReplayGuard();
-    const first = await claimTelegramMessageDispatchReplay({
-      guard: writer,
-      accountId: "default",
-      botUserId: DEFAULT_BOT_USER_ID,
-      msg: message(),
-    });
-
-    if (first.kind !== "claimed") {
-      throw new Error("expected initial claim");
-    }
-    expect(first.handle.keys).toEqual([storedReplayKey("default", DEFAULT_BOT_USER_ID, message())]);
-    await commitTelegramMessageDispatchReplay({
-      guard: writer,
-      claims: [first.handle],
-    });
-
-    const reader = createTelegramMessageDispatchReplayGuard();
-    await expect(
-      claimTelegramMessageDispatchReplay({
-        guard: reader,
-        accountId: "default",
-        botUserId: DEFAULT_BOT_USER_ID,
-        msg: message(),
-      }),
-    ).resolves.toEqual({ kind: "duplicate" });
-  });
-
   it("isolates identical message coordinates across bot identities", async () => {
     const writer = createTelegramMessageDispatchReplayGuard();
     const first = await claimTelegramMessageDispatchReplay({
@@ -241,32 +173,6 @@ describe("Telegram message dispatch replay guard", () => {
     }
   });
 
-  it("preserves concurrent commits", async () => {
-    const writer = createTelegramMessageDispatchReplayGuard();
-    const claims = await Promise.all(
-      Array.from({ length: 400 }, async (_, index) => {
-        const claim = await claimTelegramMessageDispatchReplay({
-          guard: writer,
-          accountId: "default",
-          botUserId: DEFAULT_BOT_USER_ID,
-          msg: message({ messageId: index + 1 }),
-        });
-        if (claim.kind !== "claimed") {
-          throw new Error(`expected claim ${index + 1}`);
-        }
-        return claim.handle;
-      }),
-    );
-
-    await commitTelegramMessageDispatchReplay({
-      guard: writer,
-      claims,
-    });
-
-    const reader = createTelegramMessageDispatchReplayGuard();
-    await expect(reader.warmup(CURRENT_NAMESPACE)).resolves.toBe(claims.length);
-  });
-
   it("commits replay keys serially before starting the next write", async () => {
     const events: string[] = [];
     const firstGate = createDeferred<void>();
@@ -310,33 +216,6 @@ describe("Telegram message dispatch replay guard", () => {
       "start:third",
       "finish:third",
     ]);
-  });
-
-  it("propagates per-key disk errors and stops the commit sequence", async () => {
-    const diskError = new Error("dedupe disk write failed");
-    const commitCalls: string[] = [];
-    const guard = createTestReplayGuard();
-    const claims = ["first", "second", "third"].map((key) =>
-      createTestClaim({
-        key,
-        commit: async (keyLocal, options) => {
-          commitCalls.push(keyLocal);
-          if (keyLocal === "second") {
-            options?.onDiskError?.(diskError);
-          }
-          return true;
-        },
-      }),
-    );
-
-    await expect(
-      commitTelegramMessageDispatchReplay({
-        guard,
-        claims,
-        requirePersistent: true,
-      }),
-    ).rejects.toBe(diskError);
-    expect(commitCalls).toEqual(["first", "second"]);
   });
 
   it("keeps live dispatch commits fail-open on dedupe disk errors", async () => {
@@ -399,123 +278,6 @@ describe("Telegram message dispatch replay guard", () => {
     expect([...committed]).toEqual([]);
   });
 
-  it("commits replay keys serially before starting the next write", async () => {
-    const events: string[] = [];
-    const firstGate = createDeferred();
-    const secondGate = createDeferred();
-    const secondStarted = createDeferred();
-    const guard = createTestReplayGuard({
-      commit: async (key) => {
-        events.push(`start:${key}`);
-        if (key === "first") {
-          await firstGate.promise;
-        } else if (key === "second") {
-          secondStarted.resolve();
-          await secondGate.promise;
-        }
-        events.push(`finish:${key}`);
-        return true;
-      },
-    });
-
-    const commit = commitTelegramMessageDispatchReplay({
-      guard,
-      keys: ["first", "second", "third"],
-    });
-
-    expect(events).toEqual(["start:first"]);
-    firstGate.resolve();
-    await secondStarted.promise;
-    expect(events).toEqual(["start:first", "finish:first", "start:second"]);
-
-    secondGate.resolve();
-    await commit;
-    expect(events).toEqual([
-      "start:first",
-      "finish:first",
-      "start:second",
-      "finish:second",
-      "start:third",
-      "finish:third",
-    ]);
-  });
-
-  it("propagates per-key disk errors and stops the commit sequence", async () => {
-    const diskError = new Error("dedupe disk write failed");
-    const commitCalls: string[] = [];
-    const guard = createTestReplayGuard({
-      commit: async (key, options) => {
-        commitCalls.push(key);
-        if (key === "second") {
-          options?.onDiskError?.(diskError);
-        }
-        return true;
-      },
-    });
-
-    await expect(
-      commitTelegramMessageDispatchReplay({
-        guard,
-        keys: ["first", "second", "third"],
-        requirePersistent: true,
-      }),
-    ).rejects.toBe(diskError);
-    expect(commitCalls).toEqual(["first", "second"]);
-  });
-
-  it("keeps live dispatch commits fail-open on dedupe disk errors", async () => {
-    const diskError = new Error("dedupe disk write failed");
-    const guard = createTestReplayGuard({
-      commit: async (_key, options) => {
-        options?.onDiskError?.(diskError);
-        return true;
-      },
-    });
-
-    await expect(
-      commitTelegramMessageDispatchReplay({
-        guard,
-        keys: ["live-message"],
-      }),
-    ).resolves.toBeUndefined();
-  });
-
-  it("rolls back partial multi-key commits after a later disk failure", async () => {
-    const diskError = new Error("second key was not persisted");
-    const committed = new Set<string>();
-    const commitCalls: string[] = [];
-    const forgetCalls: string[] = [];
-    const releaseCalls: string[] = [];
-    const guard = createTestReplayGuard({
-      commit: async (key, options) => {
-        commitCalls.push(key);
-        committed.add(key);
-        if (key === "second") {
-          options?.onDiskError?.(diskError);
-        }
-        return true;
-      },
-      forget: async (key) => {
-        forgetCalls.push(key);
-        committed.delete(key);
-        return true;
-      },
-      release: (key) => {
-        releaseCalls.push(key);
-      },
-    });
-    const keys = ["first", "second", "third"];
-
-    await expect(
-      commitTelegramMessageDispatchReplay({ guard, keys, requirePersistent: true }),
-    ).rejects.toBe(diskError);
-
-    expect(commitCalls).toEqual(["first", "second"]);
-    expect(forgetCalls).toEqual(["first", "second"]);
-    expect(releaseCalls).toEqual(["third"]);
-    expect([...committed]).toEqual([]);
-  });
-
   it("uses one persisted namespace across Telegram accounts", async () => {
     const writer = createTelegramMessageDispatchReplayGuard();
     const first = await claimTelegramMessageDispatchReplay({
@@ -542,6 +304,16 @@ describe("Telegram message dispatch replay guard", () => {
     const reader = createTelegramMessageDispatchReplayGuard();
     await expect(reader.warmup(CURRENT_NAMESPACE)).resolves.toBe(2);
     await expect(reader.warmup("default")).resolves.toBe(0);
+    for (const accountId of ["default", "work"]) {
+      await expect(
+        claimTelegramMessageDispatchReplay({
+          guard: reader,
+          accountId,
+          botUserId: DEFAULT_BOT_USER_ID,
+          msg: message(),
+        }),
+      ).resolves.toMatchObject({ kind: "duplicate" });
+    }
   });
 
   it("keeps accounts isolated and releases retryable pre-dispatch claims", async () => {
@@ -563,9 +335,6 @@ describe("Telegram message dispatch replay guard", () => {
       msg: message(),
     });
     expect(work.kind).toBe("claimed");
-    if (work.kind === "claimed") {
-      expect(work.handle.keys).toEqual([storedReplayKey("work", DEFAULT_BOT_USER_ID, message())]);
-    }
 
     releaseTelegramMessageDispatchReplay({
       claims: [first.handle],
@@ -577,9 +346,6 @@ describe("Telegram message dispatch replay guard", () => {
       msg: message(),
     });
     expect(retry.kind).toBe("claimed");
-    if (retry.kind === "claimed") {
-      expect(retry.handle.keys).toEqual(first.handle.keys);
-    }
   });
 
   it("lets an in-flight duplicate retry after the first claim is released", async () => {

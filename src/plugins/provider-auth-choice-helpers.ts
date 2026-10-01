@@ -15,6 +15,7 @@ import { normalizeConfiguredProviderCatalogModelId } from "../agents/model-ref-s
 import {
   normalizeAgentModelMapForConfig,
   normalizeAgentModelRefForConfig,
+  normalizeAgentModelSelectionForConfig,
 } from "../config/model-input.js";
 import { normalizeProviderConfigForConfigDefaults } from "../config/provider-policy.js";
 import type { AgentModelConfig } from "../config/types.agents-shared.js";
@@ -111,23 +112,15 @@ function deleteUndefinedPatchLeaves<T>(target: T, patch: unknown): T {
 }
 
 function normalizeAgentModelConfigForWrite(value: unknown): unknown {
-  if (typeof value === "string") {
-    return normalizeAgentModelRefForConfig(value);
+  const normalized = normalizeAgentModelSelectionForConfig(value);
+  if (!isPlainRecord(normalized)) {
+    return normalized;
   }
-  if (!isPlainRecord(value)) {
-    return value;
-  }
-
-  const next: Record<string, unknown> = { ...value };
-  if (typeof next.primary === "string") {
-    next.primary = normalizeAgentModelRefForConfig(next.primary);
-  }
-  if (Array.isArray(next.fallbacks)) {
-    next.fallbacks = next.fallbacks.map((fallback) =>
-      typeof fallback === "string" ? normalizeAgentModelRefForConfig(fallback) : fallback,
-    );
-  }
-  return next;
+  // Provider patches own their model copy even when normalization changes no values.
+  return {
+    ...normalized,
+    ...(Array.isArray(normalized.fallbacks) ? { fallbacks: [...normalized.fallbacks] } : {}),
+  };
 }
 
 function normalizeAgentModelMapForWrite(value: unknown): unknown {
@@ -305,38 +298,6 @@ function normalizeConfigModelRefsForWrite(
   };
 }
 
-/** Keep a restrictive model allowlist consistent with the configured primary and fallbacks. */
-function ensureConfiguredDefaultModelsAllowed(cfg: OpenClawConfig): OpenClawConfig {
-  const defaults = cfg.agents?.defaults;
-  if (!defaults?.models) {
-    return cfg;
-  }
-  const model = defaults.model;
-  const refs = [
-    typeof model === "string" ? model : model?.primary,
-    ...(typeof model === "object" ? (model.fallbacks ?? []) : []),
-  ].filter((ref): ref is string => typeof ref === "string" && ref.trim().length > 0);
-  const models = normalizeAgentModelMapForConfig(defaults.models);
-  let changed = false;
-  for (const ref of refs) {
-    const normalizedRef = normalizeAgentModelRefForConfig(ref);
-    if (!models[normalizedRef]) {
-      models[normalizedRef] = {};
-      changed = true;
-    }
-  }
-  if (!changed) {
-    return cfg;
-  }
-  return {
-    ...cfg,
-    agents: {
-      ...cfg.agents,
-      defaults: { ...defaults, models },
-    },
-  };
-}
-
 export function applyProviderAuthConfigPatch(
   cfg: OpenClawConfig,
   patch: unknown,
@@ -352,7 +313,7 @@ export function applyProviderAuthConfigPatch(
     providerConfigNormalizer,
   );
   if (!options?.replaceDefaultModels || !isPlainRecord(patch)) {
-    return ensureConfiguredDefaultModelsAllowed(merged);
+    return merged;
   }
 
   const patchModels = (patch.agents as { defaults?: { models?: unknown } } | undefined)?.defaults
@@ -410,50 +371,4 @@ export function restorePriorAgentsDefaultsModelUnlessOptIn(params: {
       defaults,
     },
   };
-}
-
-export function applyDefaultModel(
-  cfg: OpenClawConfig,
-  model: string,
-  opts?: { preserveExistingPrimary?: boolean },
-): OpenClawConfig {
-  const normalizedModel = normalizeAgentModelRefForConfig(model);
-  const models = {
-    ...normalizeAgentModelMapForConfig(cfg.agents?.defaults?.models ?? {}),
-  };
-  models[normalizedModel] = models[normalizedModel] ?? {};
-
-  const existingModel = cfg.agents?.defaults?.model;
-  const existingPrimary =
-    typeof existingModel === "string"
-      ? existingModel
-      : existingModel && typeof existingModel === "object"
-        ? (existingModel as { primary?: string }).primary
-        : undefined;
-  const normalizedExistingPrimary = existingPrimary
-    ? normalizeAgentModelRefForConfig(existingPrimary)
-    : undefined;
-  const existingFallbacks =
-    existingModel && typeof existingModel === "object" && "fallbacks" in existingModel
-      ? (existingModel as { fallbacks?: string[] }).fallbacks?.map((fallback) =>
-          normalizeAgentModelRefForConfig(fallback),
-        )
-      : undefined;
-  return ensureConfiguredDefaultModelsAllowed({
-    ...cfg,
-    agents: {
-      ...cfg.agents,
-      defaults: {
-        ...cfg.agents?.defaults,
-        models,
-        model: {
-          ...(existingFallbacks ? { fallbacks: existingFallbacks } : undefined),
-          primary:
-            opts?.preserveExistingPrimary === true
-              ? (normalizedExistingPrimary ?? normalizedModel)
-              : normalizedModel,
-        },
-      },
-    },
-  });
 }

@@ -1,17 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
+import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { CronService } from "../service.js";
 import {
   createCronStoreHarness,
   createNoopLogger,
   installCronTestHooks,
 } from "../service.test-harness.js";
-import type { CronDelivery, CronJobCreate } from "../types.js";
+import type { CronJobCreate } from "../types.js";
 import { resolveInitialCronDelivery } from "./initial-delivery.js";
 
 function createInput(params: {
   sessionTarget: CronJobCreate["sessionTarget"];
   payload: CronJobCreate["payload"];
-  delivery?: CronDelivery;
 }): CronJobCreate {
   return {
     name: "initial delivery",
@@ -21,39 +21,20 @@ function createInput(params: {
     wakeMode: "now",
     failureAlert: false,
     payload: params.payload,
-    delivery: params.delivery,
   };
 }
 
 describe("resolveInitialCronDelivery", () => {
-  it("preserves explicit delivery", () => {
-    const delivery: CronDelivery = { mode: "none" };
+  it("defaults isolated script output to announce", () => {
     expect(
       resolveInitialCronDelivery(
         createInput({
-          sessionTarget: "current",
-          payload: { kind: "agentTurn", message: "hello" },
-          delivery,
+          sessionTarget: "isolated",
+          payload: { kind: "script", script: "return { notify: 'hello' }" },
         }),
       ),
-    ).toBe(delivery);
+    ).toEqual({ mode: "announce" });
   });
-
-  it.each(["isolated", "current", "session:project-alpha"] as const)(
-    "defaults %s output jobs to announce",
-    (sessionTarget) => {
-      const payloads: CronJobCreate["payload"][] = [
-        { kind: "agentTurn", message: "hello" },
-        { kind: "command", argv: ["echo", "hello"] },
-        { kind: "script", script: "return { notify: 'hello' }" },
-      ];
-      for (const payload of payloads) {
-        expect(resolveInitialCronDelivery(createInput({ sessionTarget, payload }))).toEqual({
-          mode: "announce",
-        });
-      }
-    },
-  );
 
   it("does not default main-session output or system-event delivery", () => {
     expect(
@@ -67,32 +48,6 @@ describe("resolveInitialCronDelivery", () => {
       ),
     ).toBeUndefined();
   });
-
-  it("applies cron.defaultDelivery for isolated jobs without their own delivery", () => {
-    const configDefault: CronDelivery = {
-      mode: "announce",
-      targets: [{ channel: "openclaw-weixin", to: "all" }],
-    };
-    const resolved = resolveInitialCronDelivery(
-      createInput({
-        sessionTarget: "isolated",
-        payload: { kind: "agentTurn", message: "remind me" },
-      }),
-      configDefault,
-    );
-    // Equal in value but a distinct object: the job must not alias the live config.
-    expect(resolved).toEqual(configDefault);
-    expect(resolved).not.toBe(configDefault);
-  });
-
-  it("does not apply the config default to main-session jobs", () => {
-    expect(
-      resolveInitialCronDelivery(
-        createInput({ sessionTarget: "main", payload: { kind: "systemEvent", text: "ping" } }),
-        { mode: "announce" },
-      ),
-    ).toBeUndefined();
-  });
 });
 
 // Direct service callers do not pass through normalizeCronJobCreate, so keep
@@ -103,6 +58,7 @@ installCronTestHooks({ logger });
 
 function createDirectCronService(storePath: string) {
   return new CronService({
+    scheduler: createTestGatewayScheduler(),
     storePath,
     cronEnabled: true,
     log: logger,

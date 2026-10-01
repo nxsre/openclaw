@@ -1,6 +1,7 @@
 import type {
   CronJob as CronJobWire,
   CronRunLogEntry as CronRunLogWireEntry,
+  CronUpdateParams as CronUpdateParamsWire,
 } from "../../packages/gateway-protocol/src/schema/cron.types.js";
 import type { EmbeddedAgentExecutionPhase } from "../agents/embedded-agent-runner/execution-phase.js";
 /** Cron scheduling, delivery, diagnostics, and store data contracts. */
@@ -45,19 +46,7 @@ type CronWakeMode = "next-heartbeat" | "now";
 export type CronMessageChannel = ChannelId;
 
 /** Delivery mode for job completion output. */
-export type CronDeliveryMode = "none" | "announce" | "webhook";
-
-/**
- * One announce fan-out destination. Mirrors the single-target announce fields
- * (channel/to/threadId/accountId); job-level mode/bestEffort/failure routing
- * stay on the parent CronDelivery. Used only for announce delivery.
- */
-export type CronDeliveryTarget = {
-  channel?: CronMessageChannel;
-  to?: string;
-  threadId?: string | number;
-  accountId?: string;
-};
+type CronDeliveryMode = "none" | "announce" | "webhook";
 
 /** Completion delivery configuration for cron job output. */
 export type CronDelivery = {
@@ -68,12 +57,6 @@ export type CronDelivery = {
   threadId?: string | number;
   /** Explicit channel account id for multi-account setups (e.g. multiple Telegram bots). */
   accountId?: string;
-  /**
-   * Multiple announce destinations for one job. When present and non-empty with
-   * mode="announce", the job fans out the same payload to each target; the
-   * single channel/to/... fields above are ignored in favor of this list.
-   */
-  targets?: CronDeliveryTarget[];
   bestEffort?: boolean;
   /** Additional webhook destination used when a job must keep chat delivery. */
   completionDestination?: CronCompletionDestination;
@@ -97,10 +80,7 @@ type CronFailureDestination = {
 
 /** Partial failure-destination update shape; null clears individual override fields. */
 type CronFailureDestinationPatch = {
-  channel?: CronMessageChannel | null;
-  to?: string | null;
-  accountId?: string | null;
-  mode?: "announce" | "webhook" | null;
+  [K in keyof CronFailureDestination]?: CronFailureDestination[K] | null;
 };
 
 /** Partial delivery update shape; null clears optional delivery destinations or fields. */
@@ -109,8 +89,6 @@ export type CronDeliveryPatch = Partial<Pick<CronDelivery, "mode" | "bestEffort"
   to?: string | null;
   threadId?: string | number | null;
   accountId?: string | null;
-  /** Replaces the fan-out target list; null clears it back to single-target delivery. */
-  targets?: CronDeliveryTarget[] | null;
   completionDestination?: CronCompletionDestination | null;
   failureDestination?: CronFailureDestinationPatch | null;
 };
@@ -120,6 +98,12 @@ export type CronRunStatus = "ok" | "error" | "skipped";
 
 /** Delivery outcome for completion or failure-notification sends. */
 export type CronDeliveryStatus = "delivered" | "not-delivered" | "unknown" | "not-requested";
+
+/** Transport evidence for a primary webhook, including an unacknowledged request. */
+export type CronWebhookDeliveryOutcome = {
+  status: "delivered" | "not-delivered" | "unknown";
+  error?: string;
+};
 
 /** Delivery target snapshot recorded for audit/debug output. */
 export type CronDeliveryTraceTarget = NonNullable<CronDeliveryTrace["intended"]>;
@@ -133,18 +117,12 @@ export type CronDeliveryTraceMessageTarget = NonNullable<
 export type CronDeliveryTrace = NonNullable<CronRunLogWireEntry["delivery"]>;
 
 /** Last failed-run notification delivery state stored on job state and run logs. */
-export type CronFailureNotificationDelivery = {
-  /** Whether the last failed run's failure notification reached the target channel. */
-  delivered?: boolean;
-  status: CronDeliveryStatus;
-  error?: string;
-};
+export type CronFailureNotificationDelivery = NonNullable<
+  CronRunLogWireEntry["failureNotificationDelivery"]
+>;
 
 /** Resolved delivery state recorded with a completed cron run. */
-export type CronResolvedDeliveryState = {
-  delivered?: boolean;
-  status: CronDeliveryStatus;
-  error?: string;
+export type CronResolvedDeliveryState = CronFailureNotificationDelivery & {
   deliverySuppressionReason?: NormalizeReplySkipReason;
   failureNotification: CronFailureNotificationDelivery;
 };
@@ -234,18 +212,7 @@ export type CronAgentExecutionPhaseUpdate = CronAgentExecutionStarted & {
 };
 
 /** Failure alert policy persisted on a cron job. */
-export type CronFailureAlert = {
-  after?: number;
-  channel?: CronMessageChannel;
-  to?: string;
-  cooldownMs?: number;
-  /** When true, consecutive skipped runs count toward the alert threshold. */
-  includeSkipped?: boolean;
-  /** Delivery mode: announce (via messaging channels) or webhook (HTTP POST). */
-  mode?: "announce" | "webhook";
-  /** Account ID for multi-account channel configurations. */
-  accountId?: string;
-};
+export type CronFailureAlert = Exclude<NonNullable<CronJobWire["failureAlert"]>, false>;
 
 /** Partial failure-alert update; null clears an inherited field override. */
 export type CronFailureAlertPatch = {
@@ -254,20 +221,16 @@ export type CronFailureAlertPatch = {
 
 /** Payload variants cron can execute in main-session or detached modes. */
 export type CronPayload =
-  | ({ kind: "systemEvent"; text: string } & CronPayloadToolAllow)
-  | (CronAgentTurnPayload & CronPayloadToolAllow)
-  | (CronCommandPayload & CronPayloadToolAllow)
-  | (CronScriptPayload & CronPayloadToolAllow)
+  | Exclude<CronJobWire["payload"], { kind: "agentTurn" | "heartbeat" }>
+  | (Extract<CronJobWire["payload"], { kind: "agentTurn" }> & CronExternalContent)
   // System-owned heartbeat monitor: execution requests an interval heartbeat
   // wake. Gateway-converged only; not accepted from client create/patch APIs.
   | ({ kind: "heartbeat" } & CronPayloadToolAllow);
 
 /** Partial payload update shape used by cron patch/edit flows. */
 export type CronPayloadPatch =
-  | ({ kind: "systemEvent"; text?: string } & CronPayloadToolAllowPatch)
-  | (CronAgentTurnPayloadPatch & CronPayloadToolAllowPatch)
-  | (CronCommandPayloadPatch & CronPayloadToolAllowPatch)
-  | (CronScriptPayloadPatch & CronPayloadToolAllowPatch)
+  | Exclude<CronPayloadPatchWire, { kind: "agentTurn" }>
+  | (Extract<CronPayloadPatchWire, { kind: "agentTurn" }> & CronExternalContent)
   // Representable so the service can reject it with a typed boundary error;
   // transports and tools never accept it.
   | ({ kind: "heartbeat" } & CronPayloadToolAllowPatch);
@@ -288,76 +251,13 @@ type CronPayloadToolAllowPatch = {
   toolsAllowIsDefault?: boolean;
 };
 
-type CronAgentTurnPayloadFields = {
-  message: string;
-  /** Optional model override (provider/model or alias). */
-  model?: string;
-  /** Optional per-job fallback models; overrides agent/global fallbacks when defined. */
-  fallbacks?: string[];
-  thinking?: string;
-  timeoutSeconds?: number;
-  allowUnsafeExternalContent?: boolean;
+type CronPayloadPatchWire = NonNullable<CronUpdateParamsWire["patch"]["payload"]>;
+
+type CronExternalContent = {
   /** Immutable external hook provenance for async dispatch. */
   externalContentSource?: HookExternalContentSource;
-  /** If true, run with lightweight bootstrap context. */
-  lightContext?: boolean;
 };
 
-type CronAgentTurnPayload = {
-  kind: "agentTurn";
-} & CronAgentTurnPayloadFields;
-
-type CronAgentTurnPayloadPatch = {
-  kind: "agentTurn";
-} & Partial<
-  Omit<
-    CronAgentTurnPayloadFields,
-    "model" | "fallbacks" | "toolsAllow" | "thinking" | "timeoutSeconds"
-  >
-> & {
-    model?: string | null;
-    fallbacks?: string[] | null;
-    toolsAllow?: string[] | null;
-    thinking?: string | null;
-    timeoutSeconds?: number | null;
-  };
-
-type CronCommandPayloadFields = {
-  /** Explicit argv vector to execute. Use a shell wrapper argv for shell syntax. */
-  argv: string[];
-  cwd?: string;
-  env?: Record<string, string>;
-  input?: string;
-  timeoutSeconds?: number;
-  noOutputTimeoutSeconds?: number;
-  outputMaxBytes?: number;
-};
-
-type CronCommandPayload = {
-  kind: "command";
-} & CronCommandPayloadFields;
-
-type CronCommandPayloadPatch = {
-  kind: "command";
-} & Partial<Omit<CronCommandPayloadFields, "timeoutSeconds">> & {
-    timeoutSeconds?: number | null;
-  };
-
-type CronScriptPayloadFields = {
-  script: string;
-  timeoutSeconds?: number;
-  toolBudget?: number;
-};
-
-type CronScriptPayload = {
-  kind: "script";
-} & CronScriptPayloadFields;
-
-type CronScriptPayloadPatch = {
-  kind: "script";
-} & Partial<Omit<CronScriptPayloadFields, "timeoutSeconds">> & {
-    timeoutSeconds?: number | null;
-  };
 /** Mutable runtime state persisted beside the immutable cron job spec. */
 // scheduleActivatedAtMs fences catch-up to slots belonging to the active schedule;
 // edits must not invent missed work. Without activation, every computed slot is real.

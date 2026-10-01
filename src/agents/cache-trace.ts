@@ -7,6 +7,7 @@ import { sanitizeSurrogates } from "@openclaw/ai/internal/shared";
 import { stableStringify } from "@openclaw/normalization-core";
 import { resolveStateDir } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { isIncognitoSessionKey } from "../shared/incognito-session-key.js";
 import { resolveUserPath } from "../utils.js";
 import { parseBooleanValue } from "../utils/boolean.js";
 import { safeJsonStringify } from "../utils/safe-json.js";
@@ -122,7 +123,7 @@ function digest(value: unknown): string {
   return crypto.createHash("sha256").update(serialized).digest("hex");
 }
 
-export function summarizeMessages(messages: AgentMessage[]): {
+function summarizeMessages(messages: AgentMessage[]): {
   messageCount: number;
   messageRoles: Array<string | undefined>;
   messageFingerprints: string[];
@@ -142,7 +143,7 @@ export function summarizeMessages(messages: AgentMessage[]): {
 /** Create a cache trace recorder when diagnostics config/env enables it. */
 export function createCacheTrace(params: CacheTraceInit): CacheTrace | null {
   const cfg = resolveCacheTraceConfig(params);
-  if (!cfg.enabled) {
+  if (!cfg.enabled || isIncognitoSessionKey(params.sessionKey)) {
     return null;
   }
 

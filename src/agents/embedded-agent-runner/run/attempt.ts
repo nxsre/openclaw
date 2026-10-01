@@ -3,14 +3,13 @@ import {
   OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST,
 } from "../../../context-engine/host-compat.js";
 import { resolveContextEngineOwnerPluginId } from "../../../context-engine/registry.js";
-import { formatErrorMessage } from "../../../infra/errors.js";
-import {
-  extractHttpStatusFromErrorText,
-  isNonOkHttpStatus,
-} from "../../../shared/assistant-error-format.js";
 import { runWithAsyncWorkResources } from "../../../shared/async-work-resources.js";
 import { getAsyncWorkSignal } from "../../../shared/async-work-scope.js";
-import { resolveAdmittedRunActiveAssertion } from "../../admitted-run-context.js";
+import {
+  bindOperatorModelExecution,
+  readRunOperatorAuthority,
+  resolveAdmittedRunActiveAssertion,
+} from "../../admitted-run-context.js";
 import { createBundleLspToolRuntime } from "../../agent-bundle-lsp-runtime.js";
 import { materializeBundleMcpToolsForRun } from "../../agent-bundle-mcp-tools.js";
 import { AgentRunTerminalOutcomeError } from "../../agent-run-terminal-error.js";
@@ -54,11 +53,6 @@ import { prepareEmbeddedAttemptSystemPrompt } from "./attempt-system-prompt-prep
 import { prepareEmbeddedAttemptToolCatalog } from "./attempt-tool-catalog.js";
 import { prepareEmbeddedAttemptToolBase } from "./attempt-tool-prepare.js";
 import { prepareEmbeddedAttemptTranscriptLifecycle } from "./attempt-transcript-lifecycle-prepare.js";
-import {
-  formatHttpErrorForLog,
-  resolveNonOkHttpStatusFromUnknown,
-  revertEmbeddedSessionToPrePromptLeaf,
-} from "./attempt.http400-revert.js";
 import { measureEmbeddedAgentPreparation } from "./preparation-timing.js";
 import { clearToolActivityRun } from "./tool-activity-heartbeat.js";
 import type {
@@ -70,19 +64,37 @@ import type {
 export async function runEmbeddedAttempt(
   input: EmbeddedRunAttemptParams,
 ): Promise<EmbeddedRunAttemptResult> {
-  const parentSignal = getAsyncWorkSignal();
-  const resourceAbortSignal = parentSignal
-    ? input.abortSignal
-      ? AbortSignal.any([input.abortSignal, parentSignal])
-      : parentSignal
-    : input.abortSignal;
-  return await runWithAsyncWorkResources((onAcquired) =>
-    runEmbeddedAttemptOwned(
-      input,
-      (release) => onAcquired({ release, releaseBeforeResultWhenIdle: true }),
-      resourceAbortSignal,
-    ),
-  );
+  const modelExecution = bindOperatorModelExecution(readRunOperatorAuthority(input), {
+    provider: input.provider,
+    model: input.modelId,
+  });
+  try {
+    const attempt = modelExecution
+      ? {
+          ...input,
+          abortSignal: input.abortSignal
+            ? AbortSignal.any([input.abortSignal, modelExecution.signal])
+            : modelExecution.signal,
+        }
+      : input;
+    const parentSignal = getAsyncWorkSignal();
+    const resourceAbortSignal = parentSignal
+      ? attempt.abortSignal
+        ? AbortSignal.any([attempt.abortSignal, parentSignal])
+        : parentSignal
+      : attempt.abortSignal;
+    const result = await runWithAsyncWorkResources((onAcquired) =>
+      runEmbeddedAttemptOwned(
+        attempt,
+        (release) => onAcquired({ release, releaseBeforeResultWhenIdle: true }),
+        resourceAbortSignal,
+      ),
+    );
+    modelExecution?.assertCurrent();
+    return result;
+  } finally {
+    modelExecution?.release();
+  }
 }
 
 async function runEmbeddedAttemptOwned(
@@ -407,16 +419,6 @@ async function runEmbeddedAttemptOwned(
           ...(params.swarmCollector && params.swarmOutputSchema ? ["structured_output"] : []),
         ],
       });
-      const prePromptMessageCount = preparedSessionRuntime.state.prePromptMessageCount;
-      const runtimeSessionManager = preparedSessionRuntime.sessionManager;
-      const sessionManagerLeafAccess = runtimeSessionManager as unknown as {
-        getLeafId?: () => string | null;
-        leafId?: string | null;
-      };
-      const prePromptSessionLeafId =
-        typeof sessionManagerLeafAccess.getLeafId === "function"
-          ? sessionManagerLeafAccess.getLeafId()
-          : (sessionManagerLeafAccess.leafId ?? null);
       const executionResult = await runEmbeddedAttemptExecutionPhase({
         attempt: params,
         ...(activeContextEngine ? { activeContextEngine } : {}),
@@ -467,55 +469,6 @@ async function runEmbeddedAttemptOwned(
           },
         },
       });
-      const settleTerminal = projectAgentRunAttemptTerminal(executionState.terminal);
-      const httpErrorStatusFromPromptThrow =
-        settleTerminal.promptErrorSource === "prompt"
-          ? resolveNonOkHttpStatusFromUnknown(settleTerminal.promptError)
-          : undefined;
-      const attemptAssistant =
-        executionResult.currentAttemptAssistant ?? executionResult.lastAssistant;
-      const httpErrorFromAssistant =
-        attemptAssistant?.stopReason === "error" &&
-        isNonOkHttpStatus(extractHttpStatusFromErrorText(attemptAssistant.errorMessage ?? ""));
-      const shouldRevertHttpErrorTurn =
-        (executionResult.compactionCount ?? 0) === 0 &&
-        !settleTerminal.aborted &&
-        !settleTerminal.cleanupYieldAborted &&
-        (httpErrorStatusFromPromptThrow !== undefined || httpErrorFromAssistant);
-      if (shouldRevertHttpErrorTurn) {
-        const preservedHttpErrorForRunner =
-          httpErrorStatusFromPromptThrow !== undefined
-            ? formatErrorMessage(settleTerminal.promptError)
-            : attemptAssistant?.errorMessage?.trim() || "LLM request failed.";
-        const revertHttpStatus =
-          httpErrorStatusFromPromptThrow ??
-          extractHttpStatusFromErrorText(attemptAssistant?.errorMessage ?? "");
-        const revertSource =
-          httpErrorStatusFromPromptThrow !== undefined ? "prompt-throw" : "assistant-stop";
-        log.warn(
-          `[http-error-session-revert] discarding failed turn ` +
-            `runId=${params.runId} sessionId=${params.sessionId} ` +
-            `provider=${params.provider} model=${params.modelId} ` +
-            `httpStatus=${revertHttpStatus ?? "unknown"} source=${revertSource} ` +
-            `error=${formatHttpErrorForLog(preservedHttpErrorForRunner)}`,
-        );
-        await withOwnedTranscriptWrite(() => {
-          revertEmbeddedSessionToPrePromptLeaf({
-            activeSession: preparedSessionRuntime.agentSession.activeSession,
-            sessionManager: runtimeSessionManager,
-            prePromptMessageCount,
-            prePromptLeafId: prePromptSessionLeafId,
-            runId: params.runId,
-            sessionId: params.sessionId,
-            httpStatus: revertHttpStatus,
-            errorMessage: preservedHttpErrorForRunner,
-            provider: params.provider,
-            modelId: params.modelId,
-            source: revertSource,
-          });
-        });
-      }
-
       // Read catalog counters before the finally-phase cleanup clears the
       // run-scoped catalog session; afterwards the counts are gone.
       const catalogSession = toolSearchCatalogRef?.current;

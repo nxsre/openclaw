@@ -1,10 +1,8 @@
-import path from "node:path";
 /**
  * Resolves memory-search source, sync, and ranking configuration.
  */
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import type { OpenClawConfig } from "../config/config.js";
-import type { SessionEntry } from "../config/sessions/types.js";
 import {
   normalizeConfiguredMemoryExtraPaths,
   resolveRememberAcrossConversations,
@@ -18,14 +16,8 @@ import { assertSecretOwnerAvailable } from "../secrets/runtime-degraded-state.js
 import { runtimeMemorySecretOwnerId } from "../secrets/runtime-memory-secret-owner.js";
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
 import { clampNumber } from "../utils.js";
-import { resolveAgentConfig, resolveSessionMemoryGroupSegment } from "./agent-scope.js";
+import { resolveAgentConfig } from "./agent-scope.js";
 import { resolveMemorySearchSourcePolicy } from "./memory-search-source-policy.js";
-
-// xcph: group-session memory isolation (group DBs live under <agentDir>/groups/<seg>/).
-type MemoryGroupOpts = {
-  sessionKey?: string | null;
-  sessionEntry?: Pick<SessionEntry, "chatType"> | null;
-};
 
 type ProducedMemorySearchConfig = NonNullable<ReturnType<typeof produceMemorySearchConfig>>;
 
@@ -102,11 +94,7 @@ function getConfiguredMemoryEmbeddingProvider(providerId: string, cfg: OpenClawC
 }
 
 /** Resolves source and query settings without loading an embedding provider runtime. */
-export function resolveMemorySearchIndexConfig(
-  cfg: OpenClawConfig,
-  agentId: string,
-  _groupOpts?: MemoryGroupOpts,
-) {
+export function resolveMemorySearchIndexConfig(cfg: OpenClawConfig, agentId: string) {
   const defaults = cfg.memory?.search;
   const overrides = resolveAgentConfig(cfg, agentId)?.memory?.search;
   const enabled = overrides?.enabled ?? defaults?.enabled ?? true;
@@ -160,12 +148,8 @@ export function resolveMemorySearchIndexConfig(
   };
 }
 
-function produceMemorySearchConfig(
-  cfg: OpenClawConfig,
-  agentId: string,
-  groupOpts?: MemoryGroupOpts,
-) {
-  const indexConfig = resolveMemorySearchIndexConfig(cfg, agentId, groupOpts);
+function produceMemorySearchConfig(cfg: OpenClawConfig, agentId: string) {
+  const indexConfig = resolveMemorySearchIndexConfig(cfg, agentId);
   if (!indexConfig) {
     return null;
   }
@@ -235,23 +219,9 @@ function produceMemorySearchConfig(
   const fts = {
     tokenizer: overrides?.store?.fts?.tokenizer ?? defaults?.store?.fts?.tokenizer ?? "unicode61",
   };
-  // xcph: isolate group recall — group DBs live under <agentDir>/groups/<seg>/.
-  const defaultDbPath = resolveOpenClawAgentSqlitePath({ agentId, env: process.env });
-  const groupSegment = resolveSessionMemoryGroupSegment(
-    groupOpts?.sessionKey,
-    groupOpts?.sessionEntry,
-  );
-  const databasePath = groupSegment
-    ? path.join(
-        path.dirname(path.dirname(defaultDbPath)),
-        "groups",
-        groupSegment,
-        "openclaw-agent.sqlite",
-      )
-    : defaultDbPath;
   const store = {
     driver: "sqlite" as const,
-    databasePath,
+    databasePath: resolveOpenClawAgentSqlitePath({ agentId, env: process.env }),
     fts,
     vector,
   };
@@ -303,9 +273,8 @@ function produceMemorySearchConfig(
 export function resolveMemorySearchConfig(
   cfg: OpenClawConfig,
   agentId: string,
-  groupOpts?: MemoryGroupOpts,
 ): ResolvedMemorySearchConfig | null {
-  return produceMemorySearchConfig(cfg, agentId, groupOpts);
+  return produceMemorySearchConfig(cfg, agentId);
 }
 
 function resolveSyncConfig() {

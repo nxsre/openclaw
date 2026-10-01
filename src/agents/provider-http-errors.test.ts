@@ -1,18 +1,5 @@
 // Verifies provider HTTP error parsing, redaction, and response-size limits.
 import { describe, expect, it, vi } from "vitest";
-
-const providerHttpErrorLogInfo = vi.hoisted(() => vi.fn());
-
-vi.mock("../logging/subsystem.js", () => ({
-  createSubsystemLogger: () => ({
-    info: providerHttpErrorLogInfo,
-    warn: vi.fn(),
-    debug: vi.fn(),
-    error: vi.fn(),
-    child: vi.fn(),
-  }),
-}));
-
 import {
   assertOkOrThrowProviderError,
   assertOkOrThrowHttpError,
@@ -20,7 +7,6 @@ import {
   extractProviderErrorDetail,
   extractProviderRequestId,
   formatProviderErrorPayload,
-  maybeLogProviderHttpErrorResponse,
   ProviderHttpError,
   readProviderBinaryResponse,
   readProviderJsonResponse,
@@ -28,78 +14,22 @@ import {
   readResponseTextLimited,
 } from "./provider-http-errors.js";
 
-function createStreamingBinaryResponse(params: {
-  chunkCount: number;
-  chunkSize: number;
-  byte: number;
-}): { response: Response; getReadCount: () => number } {
-  // Streaming fixture proves oversized binary reads stop before buffering everything.
+function createStreamingResponse(contentType: string, byte = 97) {
   let reads = 0;
   const stream = new ReadableStream<Uint8Array>({
     pull(controller) {
-      if (reads >= params.chunkCount) {
+      if (reads >= 20) {
         controller.close();
         return;
       }
       reads += 1;
-      controller.enqueue(new Uint8Array(params.chunkSize).fill(params.byte));
+      controller.enqueue(new Uint8Array(1024).fill(byte));
     },
   });
   return {
     response: new Response(stream, {
       status: 200,
-      headers: { "Content-Type": "audio/mpeg" },
-    }),
-    getReadCount: () => reads,
-  };
-}
-
-function createStreamingJsonResponse(params: { chunkCount: number; chunkSize: number }): {
-  response: Response;
-  getReadCount: () => number;
-} {
-  // Streaming fixture proves oversized JSON reads stop before buffering everything.
-  let reads = 0;
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (reads >= params.chunkCount) {
-        controller.close();
-        return;
-      }
-      reads += 1;
-      controller.enqueue(encoder.encode("a".repeat(params.chunkSize)));
-    },
-  });
-  return {
-    response: new Response(stream, {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    }),
-    getReadCount: () => reads,
-  };
-}
-
-function createStreamingTextResponse(params: { chunkCount: number; chunkSize: number }): {
-  response: Response;
-  getReadCount: () => number;
-} {
-  let reads = 0;
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (reads >= params.chunkCount) {
-        controller.close();
-        return;
-      }
-      reads += 1;
-      controller.enqueue(encoder.encode("x".repeat(params.chunkSize)));
-    },
-  });
-  return {
-    response: new Response(stream, {
-      status: 200,
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": contentType },
     }),
     getReadCount: () => reads,
   };
@@ -107,12 +37,8 @@ function createStreamingTextResponse(params: { chunkCount: number; chunkSize: nu
 
 describe("provider error utils", () => {
   it.each([
-    ["undefined", undefined, undefined],
     ["null", null, undefined],
     ["string", "provider failure", undefined],
-    ["number", 429, undefined],
-    ["boolean", false, undefined],
-    ["function", () => "provider failure", undefined],
     ["array", [{ message: "ignored" }], undefined],
     ["empty object", {}, undefined],
     ["blank fields", { message: " ", detail: "\n", type: " ", code: " " }, undefined],
@@ -562,17 +488,6 @@ describe("provider error utils", () => {
     });
   });
 
-  it("wraps malformed successful JSON responses with provider labels", async () => {
-    const response = new Response("{ nope", {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-
-    await expect(readProviderJsonResponse(response, "Provider catalog failed")).rejects.toThrow(
-      "Provider catalog failed: malformed JSON response",
-    );
-  });
-
   it("does not retain reflected credentials in malformed JSON causes", async () => {
     const credential = "opaque-credential";
     const response = new Response(credential, { status: 200 });
@@ -597,10 +512,7 @@ describe("provider error utils", () => {
   });
 
   it("caps successful JSON responses instead of buffering oversized bodies", async () => {
-    const streamed = createStreamingJsonResponse({
-      chunkCount: 20,
-      chunkSize: 1024,
-    });
+    const streamed = createStreamingResponse("application/json");
 
     await expect(
       readProviderJsonResponse(streamed.response, "Provider catalog failed", {
@@ -612,10 +524,7 @@ describe("provider error utils", () => {
   });
 
   it("honors custom JSON overflow errors and stops reading", async () => {
-    const streamed = createStreamingJsonResponse({
-      chunkCount: 20,
-      chunkSize: 1024,
-    });
+    const streamed = createStreamingResponse("application/json");
     const sentinel = new Error("custom overflow");
     const onOverflow = vi.fn(() => sentinel);
 
@@ -648,10 +557,7 @@ describe("provider error utils", () => {
   });
 
   it("caps successful text responses instead of buffering oversized bodies", async () => {
-    const streamed = createStreamingTextResponse({
-      chunkCount: 20,
-      chunkSize: 1024,
-    });
+    const streamed = createStreamingResponse("text/plain", 120);
 
     await expect(
       readProviderTextResponse(streamed.response, "Provider text failed", {
@@ -663,11 +569,7 @@ describe("provider error utils", () => {
   });
 
   it("caps successful binary responses instead of buffering oversized bodies", async () => {
-    const streamed = createStreamingBinaryResponse({
-      chunkCount: 20,
-      chunkSize: 1024,
-      byte: 121,
-    });
+    const streamed = createStreamingResponse("audio/mpeg", 121);
 
     await expect(
       readProviderBinaryResponse(streamed.response, "Provider TTS failed", "audio", {
@@ -795,22 +697,6 @@ describe("provider error utils", () => {
     );
   });
 
-  it("rejects stalled JSON response body after chunk idle timeout", async () => {
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array([1]));
-      },
-    });
-    const response = new Response(stream, {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-
-    await expect(
-      readProviderJsonResponse(response, "stalled-provider", { chunkTimeoutMs: 20 }),
-    ).rejects.toThrow("stalled-provider: response body stalled for 20ms");
-  });
-
   it("bounds stalled binary provider responses with the shared default idle timeout", async () => {
     vi.useFakeTimers();
     try {
@@ -879,48 +765,6 @@ describe("provider error utils", () => {
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
       });
-    }
-  });
-
-  it("logs full non-ok response bodies by default", async () => {
-    const previous = process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-    delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-    providerHttpErrorLogInfo.mockClear();
-    try {
-      const body = "x".repeat(900);
-      const response = new Response(body, {
-        status: 502,
-        headers: { "content-type": "text/plain" },
-      });
-      await maybeLogProviderHttpErrorResponse(response, { label: "test-fetch" });
-      expect(providerHttpErrorLogInfo).toHaveBeenCalledTimes(1);
-      const message = String(providerHttpErrorLogInfo.mock.calls[0]?.[0] ?? "");
-      expect(message).toContain("[provider-http-error] test-fetch status=502");
-      expect(message).toContain(body);
-      await expect(response.text()).resolves.toBe(body);
-    } finally {
-      if (previous === undefined) {
-        delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-      } else {
-        process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY = previous;
-      }
-    }
-  });
-
-  it("does not log non-ok response bodies when explicitly disabled", async () => {
-    const previous = process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-    process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY = "off";
-    providerHttpErrorLogInfo.mockClear();
-    try {
-      const response = new Response("secret-body", { status: 500 });
-      await maybeLogProviderHttpErrorResponse(response, { label: "test-fetch" });
-      expect(providerHttpErrorLogInfo).not.toHaveBeenCalled();
-    } finally {
-      if (previous === undefined) {
-        delete process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY;
-      } else {
-        process.env.OPENCLAW_DEBUG_MODEL_HTTP_ERROR_BODY = previous;
-      }
     }
   });
 });

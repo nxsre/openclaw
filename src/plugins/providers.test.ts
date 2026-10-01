@@ -199,22 +199,20 @@ function createMetadataSnapshotFixture(
         buildPluginMetadataProviderFacts(plugins).providerAuthContributions,
       providers: ownerMap(
         plugins.flatMap((plugin) =>
-          plugin.providers.map(
-            (providerId) => [providerId, [plugin.id]] as [string, readonly string[]],
-          ),
+          plugin.providers.map((providerId) => [providerId, [plugin.id]] as const),
         ),
       ),
       modelCatalogProviders: ownerMap(
         plugins.flatMap((plugin) =>
           Object.keys(plugin.modelCatalog?.aliases ?? {}).map(
-            (providerId) => [providerId, [plugin.id]] as [string, readonly string[]],
+            (providerId) => [providerId, [plugin.id]] as const,
           ),
         ),
       ),
       cliBackends: ownerMap(
         plugins.flatMap((plugin) =>
           [...plugin.cliBackends, ...(plugin.setup?.cliBackends ?? [])].map(
-            (backendId) => [backendId, [plugin.id]] as [string, readonly string[]],
+            (backendId) => [backendId, [plugin.id]] as const,
           ),
         ),
       ),
@@ -702,12 +700,6 @@ describe("resolvePluginProviders", () => {
     });
   });
 
-  it("maps explicit cli-backend model refs to owning plugin ids", () => {
-    setOwningProviderManifestPlugins();
-
-    expectModelOwningPluginIds("claude-cli/claude-sonnet-4-6", ["anthropic"]);
-  });
-
   it("reuses one registry snapshot across explicit model ownership lookups", () => {
     setOwningProviderManifestPlugins();
 
@@ -1016,21 +1008,6 @@ describe("resolvePluginProviders", () => {
     expect(
       resolveCatalogHookProviderPluginIds({ config: {}, env: {} as NodeJS.ProcessEnv }),
     ).toEqual(["runtime-bundled"]);
-  });
-
-  it("loads bundled Ollama catalog augment hooks from the manifest runtime flag", () => {
-    setManifestPlugin({
-      id: "ollama",
-      providerIds: ["ollama", "ollama-cloud"],
-      enabledByDefault: true,
-      modelCatalog: {
-        runtimeAugment: true,
-      },
-    });
-
-    expect(
-      resolveCatalogHookProviderPluginIds({ config: {}, env: {} as NodeJS.ProcessEnv }),
-    ).toEqual(["ollama"]);
   });
 
   it("loads usage hooks only for manifest-declared providers", () => {

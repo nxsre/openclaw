@@ -45,15 +45,6 @@ describe("WebLoginWaitParamsSchema", () => {
       }),
     ).toBe(true);
   });
-
-  it("accepts optional sessionKey for web.login.wait", () => {
-    expect(validate.Check({ sessionKey: "uuid-session-key" })).toBe(true);
-    expect(
-      validate.Check({
-        sessionKey: "x".repeat(513),
-      }),
-    ).toBe(false);
-  });
 });
 
 describe("WebLoginStartParamsSchema", () => {

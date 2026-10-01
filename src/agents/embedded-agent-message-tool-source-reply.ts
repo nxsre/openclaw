@@ -89,14 +89,6 @@ export function isDeliveredMessagingToolResult(params: {
   ) {
     return false;
   }
-  // xcph: 回执明确表示「未送达 / no-op」时直接判否,避免后续正向 OK/partial 误判为已送达。
-  if (
-    results.some(
-      (result) => pluginEnvelopeHas(result, "nonDelivery") || pluginEnvelopeHas(result, "noOp"),
-    )
-  ) {
-    return false;
-  }
   if (results.some((result) => pluginEnvelopeHas(result, "partial"))) {
     return true;
   }
@@ -157,7 +149,11 @@ export function isDeliveredMessageToolOnlySourceReplyResult(params: {
   const sourceRouteReplyAction =
     (params.allowExplicitSourceRoute === true || confirmedCurrentSourceRoute) &&
     isMessageToolSourceReplyActionName(args.action);
-  if (!isMessageToolSendActionName(args.action) && !sourceRouteReplyAction) {
+  if (
+    deliveryFact?.sourceReplyDelivered !== true &&
+    !isMessageToolSendActionName(args.action) &&
+    !sourceRouteReplyAction
+  ) {
     return false;
   }
   if (

@@ -23,6 +23,11 @@ Every automation subcommand accepts the shared Gateway connection options. Use
 an explicit WebSocket URL. Do not combine them. Connection options such as
 `--port`, `--url`, and `--token` may appear before or after the subcommand.
 
+Automation commands require a running Gateway. With token, password, or `none`
+authentication, calls to the configured local loopback Gateway do not open the
+shared state database for device authentication. Remote and explicit URL targets
+retain their device authentication and pairing requirements.
+
 ## Create jobs quickly
 
 `openclaw automations create` is an alias for `openclaw automations add`. For new jobs, put the schedule first and the prompt second:
@@ -38,7 +43,8 @@ For agent or command jobs, `--timeout-seconds` accepts non-negative whole second
 Set `--timeout-seconds 0` on `add`/`create` or `edit` to disable the scheduler's
 wall-clock ceiling. Omitting the flag on creation keeps the default timeout;
 omitting it on edit leaves the stored timeout unchanged. Agent/provider timeouts,
-startup watchdogs, and command-runner limits still apply.
+startup watchdogs, and command-runner limits still apply. System-event jobs reject
+`--timeout-seconds`; script jobs use `--script-timeout-seconds` instead.
 
 Use `--webhook <url>` when the job should POST the finished payload instead of delivering to a chat target:
 
@@ -157,36 +163,6 @@ Use `automations add|create --webhook <url>` or `automations edit <job-id> --web
 
 Reminders created from an active chat preserve the live chat delivery target for fallback announce delivery. Internal session keys may be lowercase. Do not use them as a source of truth for case-sensitive provider IDs such as Matrix room IDs.
 
-### Multi-channel fan-out
-
-Announce delivery can fan one job out to several chat targets with `delivery.targets`, a list of `{ channel, to }` entries (each also accepts `accountId`). When the list is present, the job sends the same text to every target and the top-level `channel`/`to` are ignored. Each target must name a configured announce channel, so listing all of your channels delivers everywhere. Fan-out requires `mode: "announce"` and an isolated-style session target, the same as single-channel announce delivery.
-
-On the CLI, repeat `--target <channel>:<dest>` (the recipient is everything after the first colon, so values like `user:alice` are preserved):
-
-```sh
-openclaw cron add "take medication" \
-  --at "2026-06-24T22:16:00+08:00" \
-  --message "Remind me to take my medication" \
-  --session isolated \
-  --target "openclaw-weixin:o9cq80..." \
-  --target "openim:user:alice"
-```
-
-The first target is the primary route (it carries the agent `message` tool and session identity); the remaining targets are best-effort announces. A failed extra target is logged and recorded in run diagnostics but does not flip the primary outcome. Threaded delivery (`--thread-id`) applies only to the primary target. Use `cron edit <job-id> --target ...` to replace the list or `--clear-targets` to return to single-channel delivery.
-
-Use the recipient `all` to broadcast to everyone on a channel: `--target "slack:all"`. The recipient list comes from the channel directory roster when the channel supports it, falling back to recipients seen in this agent's session history (so for channels without a contact API, `all` means everyone who has messaged the bot). A prefixed form restricts by addressing kind: `--target "openim:user:all"` sends only to `user:` recipients on that channel. An `all` target needs an explicit channel (not `last`); if it resolves to zero recipients the broadcast is skipped and logged.
-
-To make every scheduled job broadcast by default without setting `--target` each time, configure `cron.defaultDelivery`. It applies to new isolated agent-turn/command jobs that are created without their own delivery config (jobs that set delivery always win):
-
-```json
-"cron": {
-  "defaultDelivery": {
-    "mode": "announce",
-    "targets": [{ "channel": "openclaw-weixin", "to": "all" }]
-  }
-}
-```
-
 ### Failure delivery
 
 Failure notifications resolve in this order:
@@ -219,6 +195,10 @@ If an isolated run times out before the first model request, `openclaw automatio
 
 `--at <datetime>` schedules a one-shot run. Offset-less datetimes are treated as UTC unless you also pass `--tz <iana>`, which interprets the wall-clock time in the given timezone.
 
+Invalid `--tz` values are rejected before saving a job; use an IANA timezone such as
+`America/New_York`. Invalid timestamps and nonexistent local times during a
+daylight-saving transition are reported separately as `--at` errors.
+
 <Note>
 One-shot jobs delete only after `completionStatus: "succeeded"`. Required-delivery failure or unknown completion keeps the job disabled, with no next run, so restarts do not replay payload side effects. Intentional silence and successful executions with explicit `delivery.bestEffort: true` complete and delete normally. Use `--keep-after-run` to preserve successful jobs too.
 </Note>
@@ -239,7 +219,7 @@ Automation jobs, pending runtime state, and run history live in the shared SQLit
 
 Manually running a disabled job does not enable its schedule or create automatic retries. Use `openclaw automations enable <job-id>` to resume scheduled runs.
 
-`openclaw automations run <job-id>` force-runs by default and returns after the Gateway durably reserves the run and accepts it into its execution lane. Successful responses include `{ ok: true, enqueued: true, runId }`; the job may still be waiting for a slot. If admission or caller checks fail before queue acceptance, the request fails without reporting a queued run. If the Gateway exits before dispatch, startup records an interrupted receipt for that exact request in the state database. Such pre-dispatch interruptions do not appear in task-backed run history. Use the returned `runId` to inspect an executed run's result:
+`openclaw automations run <job-id>` force-runs by default and returns after the Gateway durably reserves the run and accepts it into its execution lane. Successful responses include `{ ok: true, enqueued: true, runId }`; the job may still be waiting for a slot. If admission or caller checks fail before queue acceptance, the request fails without reporting a queued run. If the Gateway exits before dispatch, startup records an interrupted receipt for that exact request in the state database. Such pre-dispatch interruptions do not appear in executed-run history. Use the returned `runId` to inspect an executed run's result:
 
 ```bash
 openclaw automations run <job-id>
@@ -304,6 +284,8 @@ Isolated automation turns suppress stale acknowledgement-only replies. If the fi
 If an isolated automation run returns only the silent token (`NO_REPLY` or `no_reply`), the scheduler suppresses direct outbound delivery and the fallback queued summary path. Nothing is posted back to chat.
 
 Human-readable `automations list` and `automations show` label successful intentional suppression as `ok (suppressed)`, not a delivery warning. `automations show` includes `last delivery suppression` with the recorded reason (`empty`, `silent`, `heartbeat`, or `channel_transform`). JSON keeps `deliveryStatus: "not-delivered"` and the separate `deliverySuppressionReason`. Genuine delivery failures without an intentional reason still show `ok (not delivered)` when execution succeeded.
+
+Successful executions with an unconfirmed delivery outcome show `delivery unknown`, including webhook requests that time out before receiving response headers. This label applies to both required and best-effort delivery; it does not claim delivery failed. JSON execution status remains `ok`.
 
 ### Structured denials
 

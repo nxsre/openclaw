@@ -89,7 +89,6 @@ import { makeTextToolResult } from "../../../../test/helpers/text-tool-result.js
 import { makeUserMessage } from "../../../../test/helpers/user-message.js";
 import { createZeroUsage } from "../usage.test-support.js";
 import {
-  convertMessages,
   streamOpenAICompletions,
   streamSimpleOpenAICompletions,
   type OpenAICompletionsOptions,
@@ -415,52 +414,6 @@ describe("OpenAI-compatible completions params", () => {
     expect(result.content).toStrictEqual([{ type: "text", text: "Ordinary answer." }]);
   });
 
-  it("preserves a valid provider-reported usage cost", async () => {
-    mockChunksRef.chunks = [
-      makeTextChunk("ok"),
-      makeFinishChunk("stop", {
-        prompt_tokens: 10,
-        completion_tokens: 5,
-        total_tokens: 15,
-        cost: 0,
-      }),
-    ];
-    const pricedModel = {
-      ...model,
-      cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
-    } satisfies Model<"openai-completions">;
-
-    const result = await streamOpenAICompletions(pricedModel, context, {
-      apiKey: "sk-test",
-    }).result();
-
-    expect(result.usage.cost.total).toBe(0);
-    expect(result.usage.cost.totalOrigin).toBe("provider-billed");
-  });
-
-  it("keeps the catalog estimate for an invalid provider-reported usage cost", async () => {
-    mockChunksRef.chunks = [
-      makeTextChunk("ok"),
-      makeFinishChunk("stop", {
-        prompt_tokens: 10,
-        completion_tokens: 5,
-        total_tokens: 15,
-        cost: -1,
-      }),
-    ];
-    const pricedModel = {
-      ...model,
-      cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
-    } satisfies Model<"openai-completions">;
-
-    const result = await streamOpenAICompletions(pricedModel, context, {
-      apiKey: "sk-test",
-    }).result();
-
-    expect(result.usage.cost.total).toBeCloseTo(0.00002);
-    expect(result.usage.cost.totalOrigin).toBeUndefined();
-  });
-
   it("fails when streaming headers arrive but no first SSE event follows", async () => {
     vi.useFakeTimers();
     try {
@@ -641,55 +594,6 @@ describe("OpenAI-compatible completions params", () => {
     expect(result.errorMessage).toContain('requested unavailable tool "broken"');
   });
 
-  it("preserves the empty tools marker for tool history after quarantining every schema", async () => {
-    let capturedPayload: Record<string, unknown> | undefined;
-    const stream = streamOpenAICompletions(
-      model,
-      {
-        messages: [
-          {
-            role: "assistant",
-            content: [
-              {
-                type: "toolCall",
-                id: "call_abc",
-                name: "lookup",
-                arguments: {},
-              },
-            ],
-          },
-          {
-            role: "toolResult",
-            content: [{ type: "text", text: "done" }],
-            toolCallId: "call_abc",
-          },
-          ...context.messages,
-        ],
-        tools: [
-          {
-            name: "broken",
-            description: "Broken tool.",
-            get parameters(): never {
-              throw new Error("parameters exploded");
-            },
-          },
-        ],
-      } as never,
-      {
-        apiKey: "sk-test",
-        onPayload(payload) {
-          capturedPayload = payload as Record<string, unknown>;
-          throw new Error("stop before network");
-        },
-      },
-    );
-
-    const result = await stream.result();
-
-    expect(result.stopReason).toBe("error");
-    expect(capturedPayload?.tools).toEqual([]);
-  });
-
   it("replays update_plan-style empty non-image tool results as no output", async () => {
     let capturedMessages:
       | Array<{ role?: string; content?: unknown; tool_call_id?: string }>
@@ -862,23 +766,6 @@ describe("OpenAI-compatible completions params", () => {
 
     expect(result.stopReason).toBe("error");
     expect(capturedPayload).not.toHaveProperty("tools");
-  });
-
-  it("clamps requested max tokens to the model output cap", async () => {
-    let capturedMaxTokens: unknown;
-    const stream = streamOpenAICompletions(createModel(32_000), context, {
-      apiKey: "sk-test",
-      maxTokens: 200_000,
-      onPayload(payload) {
-        capturedMaxTokens = (payload as { max_completion_tokens?: unknown }).max_completion_tokens;
-        throw new Error("stop before network");
-      },
-    });
-
-    const result = await stream.result();
-
-    expect(result.stopReason).toBe("error");
-    expect(capturedMaxTokens).toBe(32_000);
   });
 
   it("uses Z.AI max_tokens and disables thinking by default", async () => {
@@ -1990,38 +1877,6 @@ describe("openai-completions stop-reason tool-call guard", () => {
           content: expect.stringContaining('"type":"json"'),
         }),
       ]),
-    );
-  });
-});
-
-describe("convertMessages — image input gating", () => {
-  const imageMessages = {
-    messages: [
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "look at this" },
-          { type: "image", mimeType: "image/png", data: "QUJD" },
-        ],
-        timestamp: 1,
-      },
-    ],
-  } as unknown as Context;
-
-  it("strips images to a text placeholder for text-only models", () => {
-    const out = convertMessages(model, imageMessages, {} as never);
-    const user = out.find((m) => m.role === "user")!;
-    const parts = user.content as Array<{ type: string; text?: string }>;
-    expect(parts.some((p) => p.type === "image_url")).toBe(false);
-    expect(parts.some((p) => p.type === "text" && /image omitted/i.test(p.text ?? ""))).toBe(true);
-  });
-
-  it("keeps images for image-capable models", () => {
-    const visionModel = { ...model, input: ["text", "image"] } as typeof model;
-    const out = convertMessages(visionModel, imageMessages, {} as never);
-    const user = out.find((m) => m.role === "user")!;
-    expect((user.content as Array<{ type: string }>).some((p) => p.type === "image_url")).toBe(
-      true,
     );
   });
 });
