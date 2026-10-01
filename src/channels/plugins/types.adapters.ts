@@ -259,7 +259,10 @@ export type ChannelAuthAdapter = {
     runtime: RuntimeEnv;
     verbose?: boolean;
     channelInput?: string | null;
-  }) => Promise<void>;
+  }) => Promise<void | {
+    /** Override `channels.start` account after CLI login when credentials key differs from CLI default. */
+    reconcileAccountId?: string;
+  }>;
 };
 
 export type ChannelHeartbeatAdapter = {

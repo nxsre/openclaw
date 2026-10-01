@@ -13,6 +13,7 @@ import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import {
   hasExplicitCronDeliveryTarget,
   resolveCronDeliveryPlan,
+  resolveCronDeliveryPlans,
   type CronDeliveryPlan,
 } from "../delivery-plan.js";
 import {
@@ -269,12 +270,22 @@ export async function resolveCronDeliveryContext(params: {
   job: CronJob;
   agentId: string;
 }) {
-  const deliveryPlan = resolveCronDeliveryPlan(params.job);
+  let deliveryPlan = resolveCronDeliveryPlan(params.job);
+  let additionalDeliveryPlans: CronDeliveryPlan[] = [];
   const {
     buildDeliveryFormatPrompt,
     resolveDeliveryTarget,
     resolveMessageToolDeliveryFormatPrompt,
+    expandCronDeliveryPlans,
   } = await loadCronDeliveryRuntime();
+  if (params.job.delivery?.targets?.length) {
+    const expanded = await expandCronDeliveryPlans(resolveCronDeliveryPlans(params.job), {
+      cfg: params.cfg,
+      agentId: params.agentId,
+    });
+    deliveryPlan = expanded[0] ?? deliveryPlan;
+    additionalDeliveryPlans = expanded.slice(1);
+  }
   const resolvedDelivery =
     deliveryPlan.mode === "webhook" ||
     (deliveryPlan.mode === "none" && !hasExplicitCronDeliveryTarget(deliveryPlan))
@@ -311,6 +322,7 @@ export async function resolveCronDeliveryContext(params: {
   });
   return {
     deliveryPlan,
+    additionalDeliveryPlans,
     deliveryRequested,
     resolvedDelivery,
     deliverySystemPrompt: replyRouted

@@ -192,6 +192,15 @@ function coerceDelivery(delivery: UnknownRecord) {
       delete next[field];
     }
   }
+  if ("targets" in delivery && delivery.targets === null) {
+    // Null is an explicit patch clear back to single-target delivery.
+    next.targets = null;
+  } else if (parsed.targets !== undefined && parsed.targets.length > 0) {
+    next.targets = parsed.targets;
+  } else if ("targets" in next) {
+    // Non-array input or a list whose entries were all unusable: drop the field.
+    delete next.targets;
+  }
   if ("failureDestination" in next && next.failureDestination !== null) {
     // Null is an explicit clear signal in patches; invalid objects are dropped.
     if (isRecord(next.failureDestination)) {

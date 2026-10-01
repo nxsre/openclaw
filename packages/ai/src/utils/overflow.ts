@@ -31,8 +31,11 @@ const ASSISTANT_OVERFLOW_PATTERNS = [
   /context[_ ]length[_ ]exceeded/i, // Generic fallback
   /too many tokens/i, // Generic fallback
   /token limit exceeded/i, // Generic fallback
-  /^413\s*(?:status code)?\s*\(no body\)/i, // Cerebras: 413 with no body
+  /^413\s*(?:status code)?\s*\(no body\)/i, // Content-too-large empty bodies
 ];
+
+/** Cerebras-only empty-body 400 overflow signal (other providers must not match). */
+const CEREBRAS_EMPTY_BODY_400_OVERFLOW_RE = /^400\s*(?:status code)?\s*\(no body\)$/i;
 
 const FAILOVER_EXPLICIT_OVERFLOW_PATTERNS = [
   /request_too_large/i, // Anthropic request byte-size overflow
@@ -128,6 +131,16 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
     const errorMessage = message.errorMessage;
     const isNonOverflow = NON_OVERFLOW_PATTERNS.some((p) => p.test(errorMessage));
     if (!isNonOverflow && matchesContextOverflowMessage(errorMessage, "assistant-error")) {
+      return true;
+    }
+    // Cerebras historically returns empty-body HTTP 400 for overflow. Gate that
+    // heuristic to the cerebras provider so other OpenAI-compatible 400s
+    // (sensitive-word filters, validation) do not enter compact-and-retry.
+    if (
+      !isNonOverflow &&
+      message.provider === "cerebras" &&
+      CEREBRAS_EMPTY_BODY_400_OVERFLOW_RE.test(errorMessage)
+    ) {
       return true;
     }
   }

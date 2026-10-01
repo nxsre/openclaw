@@ -8,7 +8,9 @@ import type { LocalCommandProbe } from "../system-agent/probes.js";
 import {
   ANTHROPIC_API_DEFAULT_MODEL_REF,
   CLAUDE_CLI_DEFAULT_MODEL_REF,
+  CODEX_APP_SERVER_DEFAULT_MODEL_REF,
   detectInferenceBackends,
+  OPENAI_API_DEFAULT_MODEL_REF,
 } from "./onboard-inference.js";
 
 const emptyPluginMetadataSnapshot = vi.hoisted(() => ({
@@ -82,6 +84,11 @@ function probeDeps(found: Record<string, boolean>) {
 }
 
 describe("detectInferenceBackends", () => {
+  it("uses route-specific GPT-5.6 defaults for direct API and Codex", () => {
+    expect(OPENAI_API_DEFAULT_MODEL_REF).toBe("openai/gpt-5.6-sol");
+    expect(CODEX_APP_SERVER_DEFAULT_MODEL_REF).toBe("openai/gpt-5.6-sol");
+  });
+
   it.each([false, true])(
     "keeps native detection passive with stored Codex credentials: %s",
     async (stored) => {

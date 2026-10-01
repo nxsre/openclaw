@@ -251,7 +251,7 @@ export function createJob(
       input.payload.kind === "script"
         ? normalizeCronScriptPayload(structuredClone(input.payload))
         : structuredClone(input.payload),
-    delivery: resolveInitialCronDelivery(input),
+    delivery: resolveInitialCronDelivery(input, state.deps.cronConfig?.defaultDelivery),
     failureAlert: input.failureAlert,
     ...(input.trigger ? { trigger: structuredClone(input.trigger) } : {}),
     state: {
@@ -517,7 +517,7 @@ export function applyDeclarativeJobSpec(
     toolsAllowProvenance: opts.toolsAllowProvenance,
     toolsAllowExecTarget: opts.toolsAllowExecTarget,
   });
-  const delivery = resolveInitialCronDelivery(input);
+  const delivery = resolveInitialCronDelivery(input, opts.cronConfig?.defaultDelivery);
   if (delivery) {
     job.delivery = structuredClone(delivery);
   } else {
@@ -560,6 +560,7 @@ function mergeCronDelivery(
     to: existing?.to,
     threadId: existing?.threadId,
     accountId: existing?.accountId,
+    targets: existing?.targets,
     bestEffort: existing?.bestEffort,
     completionDestination: existing?.completionDestination,
     failureDestination: existing?.failureDestination,
@@ -577,6 +578,8 @@ function mergeCronDelivery(
       next.channel = undefined;
       next.threadId = undefined;
       next.accountId = undefined;
+      // Announce fan-out targets are meaningless for webhook delivery.
+      next.targets = undefined;
     }
     if (!hasCompletionDestinationPatch && (next.mode === "none" || next.mode === "webhook")) {
       next.completionDestination = undefined;
@@ -593,6 +596,10 @@ function mergeCronDelivery(
   }
   if ("accountId" in patch) {
     next.accountId = normalizeOptionalString(patch.accountId);
+  }
+  if ("targets" in patch) {
+    // null (or an emptied list) clears fan-out back to single-target delivery.
+    next.targets = patch.targets && patch.targets.length > 0 ? patch.targets : undefined;
   }
   if (typeof patch.bestEffort === "boolean") {
     next.bestEffort = patch.bestEffort;
@@ -645,6 +652,13 @@ function mergeCronDelivery(
     }
   }
 
+  // Fan-out targets are announce-only. Drop them for none/webhook so a patch that
+  // sets targets without an announce mode never persists as dead config that
+  // resolveCronDeliveryPlans silently ignores.
+  if (next.mode !== "announce") {
+    next.targets = undefined;
+  }
+
   if (
     existing === undefined &&
     !("mode" in patch) &&
@@ -652,6 +666,7 @@ function mergeCronDelivery(
     next.to === undefined &&
     next.threadId === undefined &&
     next.accountId === undefined &&
+    next.targets === undefined &&
     next.bestEffort === undefined &&
     next.completionDestination === undefined &&
     next.failureDestination === undefined

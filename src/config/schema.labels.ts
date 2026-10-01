@@ -596,6 +596,7 @@ export const FIELD_LABELS: Record<string, string> = {
   "cron.webhookSsrfPolicy.allowIpv6UniqueLocalRange":
     "Automations Webhook Allow IPv6 Unique Local Range",
   "cron.sessionRetention": "Automations Session Retention",
+  "cron.defaultDelivery": "Automations Default Delivery",
   transcripts: "Transcripts",
   "transcripts.enabled": "Transcripts Enabled",
   "transcripts.autoStart": "Transcripts Auto-start Sources",

@@ -122,6 +122,10 @@ export function convertMessages(
           content: sanitizeSurrogates(msg.content),
         };
       } else {
+        // Only send image content to models that declare image input. Otherwise a
+        // text-only model rejects the request, and the image in history re-poisons
+        // every later turn. Replace images with a text placeholder.
+        const supportsImageInput = model.input.includes("image");
         const content: Array<ChatCompletionContentPart | ChatCompletionContentPartVideo> =
           msg.content.map((item) => {
             if (item.type === "text") {
@@ -135,6 +139,12 @@ export function convertMessages(
                 type: "video_url",
                 video_url: { url: `data:${item.mimeType};base64,${item.data}` },
               } satisfies ChatCompletionContentPartVideo;
+            }
+            if (!supportsImageInput) {
+              return {
+                type: "text",
+                text: "[image omitted: model has no image input]",
+              } satisfies ChatCompletionContentPartText;
             }
             return {
               type: "image_url",

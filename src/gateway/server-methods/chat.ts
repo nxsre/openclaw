@@ -25,6 +25,8 @@ import { appendAssistantTranscriptMessage } from "./chat-transcript-persistence.
 import type { GatewayRequestHandlers } from "./types.js";
 import { assertValidParams } from "./validation.js";
 
+export { abortChatRunsByConnId } from "./chat-abort-runtime.js";
+
 export {
   augmentChatHistoryWithCanvasBlocks,
   DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS,

@@ -72,6 +72,7 @@ import {
 } from "./run.runtime.js";
 import { resolveCronAgentSessionKey } from "./session-key.js";
 import { prepareCronSession } from "./session.js";
+import { prepareCronSession } from "./session.js";
 
 export type PreparedCronRunContext = Extract<
   Awaited<ReturnType<typeof prepareCronRunContext>>,
@@ -432,6 +433,7 @@ export async function prepareCronRunContext(params: {
     const {
       deliveryPlan,
       deliveryRequested,
+      additionalDeliveryPlans,
       resolvedDelivery,
       sourceDelivery,
       deliverySystemPrompt,
@@ -622,6 +624,7 @@ export async function prepareCronRunContext(params: {
         withRunSession,
         agentPayload,
         deliveryPlan,
+        additionalDeliveryPlans,
         resolvedDelivery,
         deliveryRequested,
         // Trusted formatting metadata belongs to the resolved delivery channel.

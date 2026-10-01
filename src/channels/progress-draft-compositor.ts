@@ -365,9 +365,17 @@ export function createChannelProgressDraftCompositor(params: ChannelProgressDraf
 
   const noteProgress = async (
     inputLine?: ChannelProgressDraftCompositorLine,
-    options?: { toolName?: string; startImmediately?: boolean; flush?: boolean },
+    options?: {
+      toolName?: string;
+      startImmediately?: boolean;
+      flush?: boolean;
+      allowAfterFinal?: boolean;
+    },
   ) => {
-    if (!isTurnActive()) {
+    if (
+      !params.active ||
+      ((finalReplyStarted || finalReplyDelivered) && !options?.allowAfterFinal)
+    ) {
       return false;
     }
     if (options?.toolName !== undefined && !isChannelProgressDraftWorkToolName(options.toolName)) {

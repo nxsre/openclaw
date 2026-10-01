@@ -8,3 +8,4 @@ export {
   dispatchCronDelivery,
   queueCronMessageToolDeliveryAwareness,
 } from "./delivery-dispatch.js";
+export { expandCronDeliveryPlans, fanOutAdditionalCronAnnounceTargets } from "../delivery.js";

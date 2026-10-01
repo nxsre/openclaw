@@ -29,6 +29,7 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveDebugProxySettings } from "../proxy-capture/env.js";
 import { isRetryableProviderHttpStatus } from "./failover/retry-evidence.js";
 import {
+  maybeLogProviderHttpErrorResponse,
   ProviderHttpError,
   readResponseTextLimited,
   summarizeProviderTransportError,
@@ -744,6 +745,12 @@ export function buildGuardedModelFetch(
       throw remediatedError;
     }
     let response = result.response;
+    if (!response.ok) {
+      await maybeLogProviderHttpErrorResponse(response, {
+        label: "model-fetch",
+        url: formatModelTransportDebugUrl(url),
+      });
+    }
     const elapsedMs = Date.now() - fetchStartedAt;
     const responseMessage =
       `[model-fetch] response provider=${model.provider} api=${model.api} model=${model.id} ` +

@@ -89,6 +89,7 @@ import { makeTextToolResult } from "../../../../test/helpers/text-tool-result.js
 import { makeUserMessage } from "../../../../test/helpers/user-message.js";
 import { createZeroUsage } from "../usage.test-support.js";
 import {
+  convertMessages,
   streamOpenAICompletions,
   streamSimpleOpenAICompletions,
   type OpenAICompletionsOptions,
@@ -1877,6 +1878,38 @@ describe("openai-completions stop-reason tool-call guard", () => {
           content: expect.stringContaining('"type":"json"'),
         }),
       ]),
+    );
+  });
+});
+
+describe("convertMessages — image input gating", () => {
+  const imageMessages = {
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look at this" },
+          { type: "image", mimeType: "image/png", data: "QUJD" },
+        ],
+        timestamp: 1,
+      },
+    ],
+  } as unknown as Context;
+
+  it("strips images to a text placeholder for text-only models", () => {
+    const out = convertMessages(model, imageMessages, {} as never);
+    const user = out.find((m) => m.role === "user")!;
+    const parts = user.content as Array<{ type: string; text?: string }>;
+    expect(parts.some((p) => p.type === "image_url")).toBe(false);
+    expect(parts.some((p) => p.type === "text" && /image omitted/i.test(p.text ?? ""))).toBe(true);
+  });
+
+  it("keeps images for image-capable models", () => {
+    const visionModel = { ...model, input: ["text", "image"] } as typeof model;
+    const out = convertMessages(visionModel, imageMessages, {} as never);
+    const user = out.find((m) => m.role === "user")!;
+    expect((user.content as Array<{ type: string }>).some((p) => p.type === "image_url")).toBe(
+      true,
     );
   });
 });

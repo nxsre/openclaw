@@ -298,6 +298,38 @@ function normalizeConfigModelRefsForWrite(
   };
 }
 
+/** Keep a restrictive model allowlist consistent with the configured primary and fallbacks. */
+export function ensureConfiguredDefaultModelsAllowed(cfg: OpenClawConfig): OpenClawConfig {
+  const defaults = cfg.agents?.defaults;
+  if (!defaults?.models) {
+    return cfg;
+  }
+  const model = defaults.model;
+  const refs = [
+    typeof model === "string" ? model : model?.primary,
+    ...(typeof model === "object" ? (model.fallbacks ?? []) : []),
+  ].filter((ref): ref is string => typeof ref === "string" && ref.trim().length > 0);
+  const models = normalizeAgentModelMapForConfig(defaults.models);
+  let changed = false;
+  for (const ref of refs) {
+    const normalizedRef = normalizeAgentModelRefForConfig(ref);
+    if (!models[normalizedRef]) {
+      models[normalizedRef] = {};
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return cfg;
+  }
+  return {
+    ...cfg,
+    agents: {
+      ...cfg.agents,
+      defaults: { ...defaults, models },
+    },
+  };
+}
+
 export function applyProviderAuthConfigPatch(
   cfg: OpenClawConfig,
   patch: unknown,
@@ -313,7 +345,7 @@ export function applyProviderAuthConfigPatch(
     providerConfigNormalizer,
   );
   if (!options?.replaceDefaultModels || !isPlainRecord(patch)) {
-    return merged;
+    return ensureConfiguredDefaultModelsAllowed(merged);
   }
 
   const patchModels = (patch.agents as { defaults?: { models?: unknown } } | undefined)?.defaults

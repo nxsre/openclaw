@@ -549,7 +549,36 @@ export async function handleChatAbortRequestWithLifecycle(
       if (!abortSession.ok) {
         throw abortSession.error;
       }
-      respond(true, { ok: true, aborted: false, runIds: [] });
+      // No chatAbortControllers / pending / queued / worker entry for this runId —
+      // reuse the same session abort path as chat.abort without runId, so
+      // XIM/channel reply runs are stopped even though they never register
+      // chatAbortControllers for this UUID.
+      const res = await abortChatRunsForSessionKeyWithPartials({
+        context,
+        ops,
+        sessionKey: canonicalAbortSessionKey,
+        sessionKeyAliases: canonicalAbortSessionKey === rawSessionKey ? undefined : [rawSessionKey],
+        agentId: abortAgentId,
+        sessionId: abortSessionEntry?.sessionId,
+        defaultAgentId: compatibilityDefaultAgentId,
+        abortOrigin: "rpc",
+        stopReason: "rpc",
+        requester,
+        preserveSideRuns,
+        excludeRunIds: lifecycle.excludeRunIds,
+        onAuthorizedAfterQueuedAbort: lifecycle.onAuthorizedAfterQueuedAbort,
+      });
+      if (res.unauthorized) {
+        respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unauthorized"));
+        return;
+      }
+      respond(true, {
+        ok: true,
+        aborted: res.aborted,
+        // Echo the requested runId when we stopped session work but had no
+        // controller-tracked ids (typical for XIM inbound).
+        runIds: res.aborted ? (res.runIds.length > 0 ? res.runIds : [runId]) : [],
+      });
       return;
     }
     if (!requester.isAdmin) {

@@ -23,6 +23,7 @@ import {
   handleCronCliError,
   parseCronCommandArgv,
   parseCronCommandEnv,
+  parseCronDeliveryTargets,
   parseCronIntegerOption,
   parseCronNoOutputTimeoutOption,
   parseCronStringList,
@@ -286,15 +287,17 @@ export function registerCronAddCommand(cron: Command) {
             const accountId = normalizeOptionalString(opts.account);
             const threadId = parseCronThreadIdOption(opts.threadId);
             const hasThreadId = typeof threadId === "number";
+            const fanOutTargets = parseCronDeliveryTargets(opts.target);
             const hasChatDeliveryTarget =
               cmd.getOptionValueSource("channel") === "cli" ||
               typeof opts.to === "string" ||
               Boolean(accountId) ||
-              hasThreadId;
+              hasThreadId ||
+              fanOutTargets !== undefined;
 
             if (hasChatDeliveryTarget && !supportsChatDelivery) {
               throw new CronCliError(
-                "--channel, --to, --account, and --thread-id require a non-main agentTurn, command, or script job with delivery.",
+                "--channel, --to, --account, --thread-id, and --target require a non-main agentTurn, command, or script job with delivery.",
               );
             }
             if (hasWebhook && hasChatDeliveryTarget) {
@@ -382,6 +385,7 @@ export function registerCronAddCommand(cron: Command) {
                     to: hasWebhook ? webhookUrl : normalizeOptionalString(opts.to),
                     threadId: hasWebhook ? undefined : threadId,
                     accountId: hasWebhook ? undefined : accountId,
+                    targets: hasWebhook ? undefined : fanOutTargets,
                     bestEffort: opts.bestEffortDeliver ? true : undefined,
                   }
                 : undefined,

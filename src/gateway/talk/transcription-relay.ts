@@ -30,8 +30,15 @@ const MAX_AUDIO_BASE64_BYTES = 512 * 1024;
 const MAX_TRANSCRIPTION_SESSIONS_PER_CONN = 2;
 const MAX_TRANSCRIPTION_SESSIONS_GLOBAL = 64;
 const TRANSCRIPTION_EVENT = "talk.event";
-const RELAY_INPUT_ENCODING = "g711_ulaw";
-const RELAY_INPUT_SAMPLE_RATE_HZ = 8000;
+const DEFAULT_RELAY_INPUT_ENCODING = "g711_ulaw";
+const DEFAULT_RELAY_INPUT_SAMPLE_RATE_HZ = 8000;
+
+export type TalkTranscriptionRelayInputEncoding = "g711_ulaw" | "g711_alaw" | "pcm16";
+
+export type TalkTranscriptionRelayInputAudio = {
+  inputEncoding: TalkTranscriptionRelayInputEncoding;
+  inputSampleRateHz: number;
+};
 
 type TalkTranscriptionRelayEventPayload =
   | { transcriptionSessionId: string; type: "ready" }
@@ -71,14 +78,51 @@ type TalkTranscriptionRelaySessionResult = {
   mode: "transcription";
   transport: "gateway-relay";
   transcriptionSessionId: string;
-  audio: {
-    inputEncoding: "g711_ulaw";
-    inputSampleRateHz: 8000;
-  };
+  audio: TalkTranscriptionRelayInputAudio;
   expiresAt: number;
 };
 
 const transcriptionSessions = new Map<string, TranscriptionRelaySession>();
+
+function normalizeRelayInputEncoding(
+  value: unknown,
+): "g711_ulaw" | "g711_alaw" | "pcm16" | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  if (
+    normalized === "mulaw" ||
+    normalized === "ulaw" ||
+    normalized === "g711_ulaw" ||
+    normalized === "g711-mulaw" ||
+    normalized === "pcm_mulaw" ||
+    normalized === "audio/pcmu" ||
+    normalized === "ulaw_8000"
+  ) {
+    return "g711_ulaw";
+  }
+  if (
+    normalized === "alaw" ||
+    normalized === "g711_alaw" ||
+    normalized === "g711-alaw" ||
+    normalized === "pcm_alaw"
+  ) {
+    return "g711_alaw";
+  }
+  if (
+    normalized === "pcm" ||
+    normalized === "pcm16" ||
+    normalized === "linear16" ||
+    normalized === "pcm_s16le"
+  ) {
+    return "pcm16";
+  }
+  return undefined;
+}
 
 function inferSampleRateFromAudioFormat(value: unknown): number | undefined {
   if (typeof value !== "string") {
@@ -88,37 +132,39 @@ function inferSampleRateFromAudioFormat(value: unknown): number | undefined {
   return match ? readFiniteNumber(match[1]) : undefined;
 }
 
-/** Verifies provider config matches the audio format the browser relay emits. */
-function assertRelayInputAudioConfig(providerConfig: RealtimeTranscriptionProviderConfig): void {
+export function resolveTalkTranscriptionRelayInputAudio(
+  providerConfig: RealtimeTranscriptionProviderConfig,
+): TalkTranscriptionRelayInputAudio {
   const encodingValue =
     providerConfig.encoding ?? providerConfig.audioFormat ?? providerConfig.audio_format;
-  // Unknown provider aliases remain provider-owned; reject only known incompatible formats.
-  const encoding = typeof encodingValue === "string" ? encodingValue.trim().toLowerCase() : "";
-  if (
-    [
-      "alaw",
-      "g711_alaw",
-      "g711-alaw",
-      "pcm_alaw",
-      "pcm",
-      "pcm16",
-      "linear16",
-      "pcm_s16le",
-    ].includes(encoding)
-  ) {
-    throw new Error(
-      `Gateway transcription relay requires ${RELAY_INPUT_ENCODING}/${RELAY_INPUT_SAMPLE_RATE_HZ} audio`,
-    );
-  }
-
+  const encoding = normalizeRelayInputEncoding(encodingValue);
   const sampleRate =
     readFiniteNumber(providerConfig.sampleRate ?? providerConfig.sample_rate) ??
     inferSampleRateFromAudioFormat(encodingValue);
-  if (sampleRate && sampleRate !== RELAY_INPUT_SAMPLE_RATE_HZ) {
+
+  if (!encoding) {
+    return {
+      inputEncoding: DEFAULT_RELAY_INPUT_ENCODING,
+      inputSampleRateHz: DEFAULT_RELAY_INPUT_SAMPLE_RATE_HZ,
+    };
+  }
+
+  if (encoding === "pcm16") {
+    const inputSampleRateHz = sampleRate ?? 16_000;
+    if (inputSampleRateHz !== 8_000 && inputSampleRateHz !== 16_000) {
+      throw new Error(
+        `Gateway transcription relay pcm16 audio supports 8000 or 16000 Hz (got ${inputSampleRateHz})`,
+      );
+    }
+    return { inputEncoding: "pcm16", inputSampleRateHz };
+  }
+
+  if (sampleRate && sampleRate !== DEFAULT_RELAY_INPUT_SAMPLE_RATE_HZ) {
     throw new Error(
-      `Gateway transcription relay requires ${RELAY_INPUT_ENCODING}/${RELAY_INPUT_SAMPLE_RATE_HZ} audio`,
+      `Gateway transcription relay ${encoding} audio requires ${DEFAULT_RELAY_INPUT_SAMPLE_RATE_HZ} Hz (got ${sampleRate})`,
     );
   }
+  return { inputEncoding: encoding, inputSampleRateHz: DEFAULT_RELAY_INPUT_SAMPLE_RATE_HZ };
 }
 
 function broadcastToOwner(
@@ -221,7 +267,7 @@ export function createTalkTranscriptionRelaySession(
   params: CreateTalkTranscriptionRelaySessionParams,
 ): TalkTranscriptionRelaySessionResult {
   enforceTranscriptionSessionLimits(params.connId);
-  assertRelayInputAudioConfig(params.providerConfig);
+  const audio = resolveTalkTranscriptionRelayInputAudio(params.providerConfig);
   const transcriptionSessionId = randomUUID();
   const expiresAtMs = resolveExpiresAtMsFromDurationMs(TRANSCRIPTION_SESSION_TTL_MS);
   if (expiresAtMs === undefined) {
@@ -349,10 +395,7 @@ export function createTalkTranscriptionRelaySession(
     mode: "transcription",
     transport: "gateway-relay",
     transcriptionSessionId,
-    audio: {
-      inputEncoding: RELAY_INPUT_ENCODING,
-      inputSampleRateHz: RELAY_INPUT_SAMPLE_RATE_HZ,
-    },
+    audio,
     expiresAt: Math.floor(expiresAtMs / 1000),
   };
 }

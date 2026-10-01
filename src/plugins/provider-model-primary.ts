@@ -4,6 +4,7 @@ import {
   normalizeAgentModelRefForConfig,
 } from "../config/model-input.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { ensureConfiguredDefaultModelsAllowed } from "./provider-auth-choice-helpers.js";
 
 /** Applies a primary model to agent defaults while preserving model fallback metadata. */
 export function applyPrimaryModel(
@@ -31,7 +32,7 @@ export function applyPrimaryModel(
     typeof existingModel === "object"
       ? existingModel?.fallbacks?.map(normalizeAgentModelRefForConfig)
       : undefined;
-  return {
+  return ensureConfiguredDefaultModelsAllowed({
     ...cfg,
     agents: {
       ...cfg.agents,
@@ -47,5 +48,5 @@ export function applyPrimaryModel(
         },
       },
     },
-  };
+  });
 }

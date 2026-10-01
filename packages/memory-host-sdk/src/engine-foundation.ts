@@ -6,6 +6,8 @@ export {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
   resolveSessionAgentId,
+  resolveSessionMemoryGroupSegment,
+  resolveSessionWorkspaceDir,
 } from "./host/openclaw-runtime-agent.js";
 export {
   resolveMemorySearchConfig,
